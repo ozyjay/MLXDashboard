@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:MLXDashboard}",
+            "name": "Debug MLXDashboard",
+            "target": "MLXDashboard",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug MLXDashboard"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:MLXDashboard}",
+            "name": "Release MLXDashboard",
+            "target": "MLXDashboard",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release MLXDashboard"
+        }
+    ]
+}

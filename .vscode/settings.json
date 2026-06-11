@@ -1,0 +1,8 @@
+{
+  "git.ignoredRepositories": [
+    ".build/checkouts/swift-atomics",
+    ".build/checkouts/swift-collections",
+    ".build/checkouts/swift-nio",
+    ".build/checkouts/swift-system"
+  ]
+}
