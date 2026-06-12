@@ -255,6 +255,42 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.modelInstallProgress?.stepText, "Step 5 of 5")
     }
 
+    func testInstallSelectedModelShowsDownloadActivityFromInstaller() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = FakeCommandRunner(results: [
+            "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "whoami": CommandResult(exitCode: 0, standardOutput: #"{"name":"octocat"}"#, standardError: ""),
+            "install": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/abc"}"#,
+                standardError: "MLXDashboard: Started Hugging Face snapshot download for mlx-community/Tiny"
+            )
+        ])
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            tokenStore: StubTokenStore(),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelInstaller: HuggingFaceModelInstaller(runner: runner),
+            authChecker: HuggingFaceAuthChecker(runner: runner),
+            huggingFaceCacheRoot: paths.applicationSupport.appending(path: "hub", directoryHint: .isDirectory)
+        )
+        viewModel.searchResults = [HuggingFaceModelSummary(id: "mlx-community/Tiny")]
+        viewModel.selectedSearchModelID = "mlx-community/Tiny"
+
+        await viewModel.installSelectedModel()
+        await Task.yield()
+
+        XCTAssertTrue(viewModel.modelInstallProgress?.activities.contains {
+            $0.message == "Started Hugging Face snapshot download for mlx-community/Tiny"
+        } == true)
+    }
+
     func testDownloadProgressUsesTransferPercentETAAndRate() {
         let progress = ModelInstallProgress(
             modelID: "mlx-community/Tiny",
@@ -270,6 +306,22 @@ final class DashboardViewModelTests: XCTestCase {
 
         XCTAssertEqual(progress.fractionCompleted, 0.42, accuracy: 0.001)
         XCTAssertEqual(progress.downloadStatusText, "42% • ETA 7m 12s • 13.4MB/s")
+    }
+
+    func testModelInstallProgressCapsActivityToLatestFiveEntries() {
+        var progress = ModelInstallProgress(
+            modelID: "mlx-community/Tiny",
+            phase: .downloading,
+            detail: "Downloading."
+        )
+
+        for index in 1...6 {
+            progress = progress.appendingActivity(
+                HuggingFaceDownloadActivity(message: "event \(index)", tone: .info, source: .commandOutput)
+            )
+        }
+
+        XCTAssertEqual(progress.activities.map(\.message), ["event 2", "event 3", "event 4", "event 5", "event 6"])
     }
 
     func testInstallSelectedModelFinishesWithFailedProgress() async throws {

@@ -88,6 +88,8 @@ struct ModelInstallProgress: Equatable {
     var phase: ModelInstallPhase
     var detail: String
     var downloadProgress: HuggingFaceDownloadProgress? = nil
+    var cacheSummary: DownloadCacheSummary? = nil
+    var activities: [HuggingFaceDownloadActivity] = []
 
     var title: String {
         phase.title
@@ -114,5 +116,21 @@ struct ModelInstallProgress: Equatable {
             parts.append(rateText)
         }
         return parts.joined(separator: " • ")
+    }
+
+    var cacheStatusText: String? {
+        guard phase == .downloading else { return nil }
+        return cacheSummary?.statusText
+    }
+
+    func appendingActivity(_ activity: HuggingFaceDownloadActivity) -> ModelInstallProgress {
+        guard activities.last != activity else { return self }
+
+        var copy = self
+        copy.activities.append(activity)
+        if copy.activities.count > 5 {
+            copy.activities = Array(copy.activities.suffix(5))
+        }
+        return copy
     }
 }

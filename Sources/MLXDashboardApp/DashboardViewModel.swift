@@ -37,6 +37,7 @@ final class DashboardViewModel: ObservableObject {
     private let configuredHuggingFaceCacheRoot: URL?
     private var providerServer: NIOProviderServer?
     private var activeInstallTask: Task<Void, Never>?
+    private var downloadActivityMonitorTask: Task<Void, Never>?
 
     init(
         settingsStore: SettingsStore = SettingsStore(),
@@ -293,6 +294,8 @@ final class DashboardViewModel: ObservableObject {
                 ? "Continuing download for \(model.id). Existing Hugging Face cache files will be reused when available."
                 : "Downloading \(model.id). Large models can take a while."
             updateInstallProgress(.downloading, modelID: model.id, detail: downloadDetail)
+            startDownloadActivityMonitor(modelID: model.id)
+            defer { stopDownloadActivityMonitor() }
             let result = try await modelInstaller.install(
                 modelID: model.id,
                 pythonExecutable: status.pythonExecutable,
@@ -304,6 +307,11 @@ final class DashboardViewModel: ObservableObject {
                             detail: downloadDetail,
                             downloadProgress: progress
                         )
+                    }
+                },
+                activityHandler: { [weak self] activity in
+                    Task { @MainActor [weak self] in
+                        self?.appendInstallActivity(activity, modelID: model.id)
                     }
                 }
             )
@@ -465,16 +473,113 @@ final class DashboardViewModel: ObservableObject {
         detail: String,
         downloadProgress: HuggingFaceDownloadProgress? = nil
     ) {
+        let existingProgress = modelInstallProgress?.modelID == modelID ? modelInstallProgress : nil
         modelInstallProgress = ModelInstallProgress(
             modelID: modelID,
             phase: phase,
             detail: detail,
-            downloadProgress: downloadProgress
+            downloadProgress: phase == .downloading ? (downloadProgress ?? existingProgress?.downloadProgress) : downloadProgress,
+            cacheSummary: existingProgress?.cacheSummary,
+            activities: existingProgress?.activities ?? []
         )
         modelInstallMessage = detail
     }
 
+    private func appendInstallActivity(_ activity: HuggingFaceDownloadActivity, modelID: String) {
+        guard let progress = modelInstallProgress,
+              progress.modelID == modelID
+        else { return }
+
+        modelInstallProgress = progress.appendingActivity(activity)
+    }
+
+    private func updateInstallCacheSummary(_ cacheSummary: DownloadCacheSummary, modelID: String) {
+        guard var progress = modelInstallProgress,
+              progress.modelID == modelID
+        else { return }
+
+        progress.cacheSummary = cacheSummary
+        modelInstallProgress = progress
+    }
+
+    private func startDownloadActivityMonitor(modelID: String) {
+        stopDownloadActivityMonitor()
+        downloadActivityMonitorTask = Task { @MainActor [weak self] in
+            await self?.monitorDownloadActivity(modelID: modelID)
+        }
+    }
+
+    private func stopDownloadActivityMonitor() {
+        downloadActivityMonitorTask?.cancel()
+        downloadActivityMonitorTask = nil
+    }
+
+    private func monitorDownloadActivity(modelID: String) async {
+        let cacheRoot = huggingFaceCacheRoot
+        let xetLogRoot = cacheRoot
+            .deletingLastPathComponent()
+            .appending(path: "xet/logs", directoryHint: .isDirectory)
+        let cacheSampler = DownloadCacheSampler()
+        let xetLogReader = XetLogActivityReader()
+
+        var lastTotalBytes: Int64?
+        var lastGrowthDate = Date()
+        var warnedAboutNoGrowth = false
+        var seenXetActivityKeys = Set<String>()
+
+        while !Task.isCancelled {
+            guard modelInstallProgress?.modelID == modelID,
+                  modelInstallProgress?.phase == .downloading
+            else { return }
+
+            let now = Date()
+            if var summary = try? cacheSampler.summary(modelID: modelID, cacheRoot: cacheRoot) {
+                if let previousTotalBytes = lastTotalBytes {
+                    if summary.totalBytes > previousTotalBytes {
+                        lastGrowthDate = now
+                        warnedAboutNoGrowth = false
+                    }
+                } else {
+                    lastGrowthDate = now
+                }
+                lastTotalBytes = summary.totalBytes
+
+                let secondsSinceGrowth = max(0, Int(now.timeIntervalSince(lastGrowthDate)))
+                summary.secondsSinceGrowth = secondsSinceGrowth
+                updateInstallCacheSummary(summary, modelID: modelID)
+
+                if secondsSinceGrowth >= 30, !warnedAboutNoGrowth {
+                    appendInstallActivity(
+                        HuggingFaceDownloadActivity(
+                            message: "No cache growth for \(secondsSinceGrowth)s",
+                            tone: .warning,
+                            source: .cacheScan
+                        ),
+                        modelID: modelID
+                    )
+                    warnedAboutNoGrowth = true
+                }
+            }
+
+            if let activities = try? xetLogReader.activities(logRoot: xetLogRoot) {
+                for activity in activities {
+                    let key = "\(activity.source.rawValue):\(activity.message)"
+                    guard !seenXetActivityKeys.contains(key) else { continue }
+                    seenXetActivityKeys.insert(key)
+                    appendInstallActivity(activity, modelID: modelID)
+                }
+            }
+
+            do {
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+            } catch {
+                return
+            }
+        }
+    }
+
     private func markModelDownloadPaused(modelID: String) {
+        stopDownloadActivityMonitor()
         let detail = "Paused download for \(modelID). Use Continue Downloading to resume with cached files."
         updateInstallProgress(.paused, modelID: modelID, detail: detail)
         registry.upsert(ModelRecord(id: modelID, status: .paused, message: "Paused; continue downloading to resume"))
