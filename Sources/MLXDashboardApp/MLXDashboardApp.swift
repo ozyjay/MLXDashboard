@@ -6,6 +6,7 @@ import MLXServerControl
 
 @main
 struct MLXDashboardApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var viewModel = DashboardViewModel()
 
     var body: some Scene {

@@ -12,6 +12,58 @@ public struct HuggingFaceModelSummary: Sendable, Equatable, Identifiable, Codabl
     }
 }
 
+public enum HuggingFaceAuthStatus: Sendable, Equatable {
+    case loggedIn(username: String?)
+    case loggedOut(String)
+    case unavailable(String)
+
+    public var displayText: String {
+        switch self {
+        case .loggedIn(let username):
+            if let username, !username.isEmpty {
+                return "Hugging Face: logged in as \(username)"
+            }
+            return "Hugging Face: logged in"
+        case .loggedOut:
+            return "Hugging Face: not logged in"
+        case .unavailable:
+            return "Hugging Face: unable to check auth"
+        }
+    }
+}
+
+public struct HuggingFaceAuthChecker: Sendable {
+    private let runner: any CommandRunning
+
+    public init(runner: any CommandRunning = ShellCommandRunner()) {
+        self.runner = runner
+    }
+
+    public func status(pythonExecutable: URL) async throws -> HuggingFaceAuthStatus {
+        let script = """
+        import json
+        from huggingface_hub import HfApi
+        info = HfApi().whoami()
+        print(json.dumps({'name': info.get('name')}))
+        """
+        let result = try await runner.run(Command(executableURL: pythonExecutable, arguments: ["-c", script]))
+        guard result.exitCode == 0 else {
+            let message = cleaned(result.standardError)
+            if message.localizedCaseInsensitiveContains("No module named") {
+                return .unavailable(message)
+            }
+            return .loggedOut(message)
+        }
+        let auth = try JSONDecoder().decode(HuggingFaceWhoamiResponse.self, from: Data(result.standardOutput.utf8))
+        return .loggedIn(username: auth.name)
+    }
+
+    private func cleaned(_ message: String) -> String {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "No Hugging Face login was found" : trimmed
+    }
+}
+
 public struct HuggingFaceModelSearcher: Sendable {
     private let runner: any CommandRunning
 
@@ -35,6 +87,18 @@ public struct HuggingFaceModelSearcher: Sendable {
     }
 }
 
+public struct HuggingFaceInstallResult: Sendable, Equatable, Codable {
+    public var localPath: String
+
+    public init(localPath: String) {
+        self.localPath = localPath
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case localPath = "local_path"
+    }
+}
+
 public struct HuggingFaceModelInstaller: Sendable {
     private let runner: any CommandRunning
 
@@ -42,16 +106,23 @@ public struct HuggingFaceModelInstaller: Sendable {
         self.runner = runner
     }
 
-    public func install(modelID: String, pythonExecutable: URL) async throws {
+    public func install(modelID: String, pythonExecutable: URL) async throws -> HuggingFaceInstallResult {
         let script = """
+        import json
         from huggingface_hub import snapshot_download
-        snapshot_download(repo_id='\(modelID.replacingOccurrences(of: "'", with: "\\'"))')
+        path = snapshot_download(repo_id='\(modelID.replacingOccurrences(of: "'", with: "\\'"))')
+        print(json.dumps({'local_path': path}))
         """
         let result = try await runner.run(Command(executableURL: pythonExecutable, arguments: ["-c", script]))
         guard result.exitCode == 0 else {
             throw HuggingFaceError.installFailed(result.standardError)
         }
+        return try JSONDecoder().decode(HuggingFaceInstallResult.self, from: Data(result.standardOutput.utf8))
     }
+}
+
+private struct HuggingFaceWhoamiResponse: Decodable {
+    var name: String?
 }
 
 public enum HuggingFaceError: Error, Equatable, CustomStringConvertible {

@@ -84,6 +84,7 @@ private struct ControllerTab: View {
 
 private struct ModelsTab: View {
     @EnvironmentObject private var viewModel: DashboardViewModel
+    @State private var isConfirmingCacheDelete = false
 
     var body: some View {
         HSplitView {
@@ -93,19 +94,44 @@ private struct ModelsTab: View {
                     TextField("Search Hugging Face MLX models", text: $viewModel.modelQuery)
                         .textFieldStyle(.roundedBorder)
                     Button("Search") { Task { await viewModel.searchModels() } }
+                    Button("Check Login") { Task { await viewModel.refreshHuggingFaceAuthStatus() } }
                 }
-                if let message = viewModel.modelSearchMessage {
-                    HStack(alignment: .firstTextBaseline, spacing: 12) {
-                        Text(message)
-                            .foregroundStyle(.secondary)
-                        if viewModel.shouldOfferPythonPackageInstall {
-                            Button("Install Packages") {
-                                Task { await viewModel.installPythonPackages() }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(viewModel.huggingFaceAuthMessage)
+                        .foregroundStyle(.secondary)
+                    if let message = viewModel.modelSearchMessage {
+                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+                            Text(message)
+                                .foregroundStyle(.secondary)
+                            if viewModel.shouldOfferPythonPackageInstall {
+                                Button("Install Packages") {
+                                    Task { await viewModel.installPythonPackages() }
+                                }
                             }
                         }
                     }
+                    if let message = viewModel.modelInstallMessage {
+                        Text(message)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
                 }
-                Table(viewModel.searchResults) {
+                HStack {
+                    Button("Install Selected") {
+                        Task { await viewModel.installSelectedModel() }
+                    }
+                    .disabled(viewModel.selectedSearchModelID == nil || viewModel.isInstallingModel)
+                    if viewModel.isInstallingModel {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    if viewModel.shouldOfferPythonPackageInstall {
+                        Button("Install Packages") {
+                            Task { await viewModel.installPythonPackages() }
+                        }
+                    }
+                }
+                Table(viewModel.searchResults, selection: $viewModel.selectedSearchModelID) {
                     TableColumn("Model", value: \.id)
                     TableColumn("Downloads") { model in
                         Text(model.downloads.map(String.init) ?? "")
@@ -113,32 +139,56 @@ private struct ModelsTab: View {
                     TableColumn("Likes") { model in
                         Text(model.likes.map(String.init) ?? "")
                     }
-                    TableColumn("Install") { model in
+                    TableColumn("Action") { model in
                         Button("Install") {
-                            Task { await viewModel.installModel(model) }
+                            viewModel.selectedSearchModelID = model.id
+                            Task { await viewModel.installSelectedModel() }
                         }
+                        .disabled(viewModel.isInstallingModel)
                     }
                 }
             }
-            .frame(minWidth: 420)
+            .frame(minWidth: 460)
 
             VStack(alignment: .leading, spacing: 14) {
                 Text("Installed Models").font(.headline)
-            HStack {
-                Button("Scan Cache") { viewModel.scanModelCache() }
-            }
-            Table(viewModel.installedModels) {
-                TableColumn("Model", value: \.id)
-                TableColumn("Status") { record in
-                    Text(record.status.rawValue)
+                HStack {
+                    Button("Scan Cache") { viewModel.scanModelCache() }
+                    Button("Set Active") { viewModel.setSelectedInstalledModelActive() }
+                        .disabled(viewModel.selectedInstalledModelID == nil)
+                    Button("Delete from Cache", role: .destructive) {
+                        isConfirmingCacheDelete = true
+                    }
+                    .disabled(viewModel.selectedInstalledModelID == nil)
                 }
-                TableColumn("Path") { record in
-                    Text(record.localPath ?? "")
-                        .lineLimit(1)
+                Table(viewModel.installedModels, selection: $viewModel.selectedInstalledModelID) {
+                    TableColumn("Model", value: \.id)
+                    TableColumn("Status") { record in
+                        Text(record.status.rawValue)
+                    }
+                    TableColumn("Path") { record in
+                        Text(record.localPath ?? "")
+                            .lineLimit(1)
+                    }
+                    TableColumn("Message") { record in
+                        Text(record.message ?? "")
+                            .lineLimit(1)
+                    }
                 }
             }
+            .frame(minWidth: 460)
+        }
+        .confirmationDialog(
+            "Delete cached model?",
+            isPresented: $isConfirmingCacheDelete,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Cache", role: .destructive) {
+                viewModel.deleteSelectedInstalledModelFromCache()
             }
-            .frame(minWidth: 420)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes all cached snapshots for the selected Hugging Face model.")
         }
     }
 }

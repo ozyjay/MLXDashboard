@@ -15,7 +15,12 @@ final class DashboardViewModel: ObservableObject {
     @Published var searchResults: [HuggingFaceModelSummary] = []
     @Published var modelQuery = "mlx-community"
     @Published var modelSearchMessage: String?
+    @Published var modelInstallMessage: String?
+    @Published var huggingFaceAuthMessage = "Hugging Face: Not checked"
     @Published var shouldOfferPythonPackageInstall = false
+    @Published var selectedSearchModelID: String?
+    @Published var selectedInstalledModelID: String?
+    @Published var isInstallingModel = false
 
     let telemetry = TelemetryStore()
     let serverController = ServerProcessController()
@@ -24,21 +29,33 @@ final class DashboardViewModel: ObservableObject {
     private let tokenStore: ProviderTokenStoring
     private let registry: ModelRegistry
     private let environmentManager: PythonEnvironmentManager
-    private let cacheScanner = MLXModelCacheScanner()
-    private let modelSearcher = HuggingFaceModelSearcher()
-    private let modelInstaller = HuggingFaceModelInstaller()
+    private let cacheManager: MLXModelCacheManager
+    private let modelSearcher: HuggingFaceModelSearcher
+    private let modelInstaller: HuggingFaceModelInstaller
+    private let authChecker: HuggingFaceAuthChecker
+    private let configuredHuggingFaceCacheRoot: URL?
     private var providerServer: NIOProviderServer?
 
     init(
         settingsStore: SettingsStore = SettingsStore(),
         tokenStore: ProviderTokenStoring = KeychainProviderTokenStore(),
         registry: ModelRegistry = ModelRegistry(),
-        environmentManager: PythonEnvironmentManager = PythonEnvironmentManager()
+        environmentManager: PythonEnvironmentManager = PythonEnvironmentManager(),
+        cacheManager: MLXModelCacheManager = MLXModelCacheManager(),
+        modelSearcher: HuggingFaceModelSearcher = HuggingFaceModelSearcher(),
+        modelInstaller: HuggingFaceModelInstaller = HuggingFaceModelInstaller(),
+        authChecker: HuggingFaceAuthChecker = HuggingFaceAuthChecker(),
+        huggingFaceCacheRoot: URL? = nil
     ) {
         self.settingsStore = settingsStore
         self.tokenStore = tokenStore
         self.registry = registry
         self.environmentManager = environmentManager
+        self.cacheManager = cacheManager
+        self.modelSearcher = modelSearcher
+        self.modelInstaller = modelInstaller
+        self.authChecker = authChecker
+        self.configuredHuggingFaceCacheRoot = huggingFaceCacheRoot
         self.settings = (try? settingsStore.load()) ?? DashboardSettings()
         try? registry.load()
         self.installedModels = registry.records
@@ -135,9 +152,7 @@ final class DashboardViewModel: ObservableObject {
 
     func scanModelCache() {
         do {
-            let cacheRoot = FileManager.default.homeDirectoryForCurrentUser
-                .appending(path: ".cache/huggingface/hub", directoryHint: .isDirectory)
-            let cached = try cacheScanner.scan(cacheRoot: cacheRoot)
+            let cached = try cacheManager.scan(cacheRoot: huggingFaceCacheRoot)
             for model in cached {
                 registry.upsert(ModelRecord(id: model.id, status: .installed, localPath: model.localPath))
             }
@@ -146,6 +161,21 @@ final class DashboardViewModel: ObservableObject {
             telemetry.appendLog("Scanned Hugging Face cache")
         } catch {
             telemetry.appendLog("Cache scan failed: \(error)")
+        }
+    }
+
+    func refreshHuggingFaceAuthStatus() async {
+        do {
+            let status = try await environmentManager.status()
+            guard status.isReady else {
+                let missingPackages = status.packageReport.missingInstallNames.joined(separator: ", ")
+                huggingFaceAuthMessage = "Hugging Face: install packages first (\(missingPackages))"
+                return
+            }
+            let auth = try await authChecker.status(pythonExecutable: status.pythonExecutable)
+            huggingFaceAuthMessage = auth.displayText
+        } catch {
+            huggingFaceAuthMessage = "Hugging Face: unable to check auth - \(error)"
         }
     }
 
@@ -172,23 +202,117 @@ final class DashboardViewModel: ObservableObject {
     }
 
     func installModel(_ model: HuggingFaceModelSummary) async {
+        isInstallingModel = true
+        defer { isInstallingModel = false }
+
         do {
+            modelInstallMessage = "Preparing to install \(model.id)..."
+            let status = try await environmentManager.status()
+            guard status.isReady else {
+                let missingPackages = status.packageReport.missingInstallNames.joined(separator: ", ")
+                shouldOfferPythonPackageInstall = true
+                modelInstallMessage = "Install needs Python packages first: \(missingPackages). Use Install Packages, then try again."
+                telemetry.appendLog("Install blocked for \(model.id); missing packages: \(missingPackages)")
+                return
+            }
+            shouldOfferPythonPackageInstall = false
+
+            modelInstallMessage = "Checking Hugging Face login for \(model.id)..."
+            let authStatus = try await authChecker.status(pythonExecutable: status.pythonExecutable)
+            huggingFaceAuthMessage = authStatus.displayText
+            if case .loggedOut = authStatus {
+                modelInstallMessage = "Hugging Face login was not found. Public models can still install; private or gated models may require login."
+            }
+
             registry.upsert(ModelRecord(id: model.id, status: .installing, message: "Installing from Hugging Face"))
             try registry.save()
             installedModels = registry.records
 
-            let python = try await environmentManager.ensureVenv()
-            try await modelInstaller.install(modelID: model.id, pythonExecutable: python)
-            registry.upsert(ModelRecord(id: model.id, status: .installed, message: "Installed"))
+            modelInstallMessage = "Downloading \(model.id). Large models can take a while."
+            let result = try await modelInstaller.install(modelID: model.id, pythonExecutable: status.pythonExecutable)
+            registry.upsert(ModelRecord(id: model.id, status: .installed, localPath: result.localPath, message: "Installed"))
             try registry.save()
             installedModels = registry.records
             scanModelCache()
+            modelInstallMessage = "Installed \(model.id) at \(result.localPath)"
             telemetry.appendLog("Installed \(model.id)")
         } catch {
-            registry.upsert(ModelRecord(id: model.id, status: .failed, message: String(describing: error)))
+            let message = friendlyInstallMessage(for: error)
+            modelInstallMessage = "Install failed for \(model.id): \(message)"
+            registry.upsert(ModelRecord(id: model.id, status: .failed, message: message))
             try? registry.save()
             installedModels = registry.records
             telemetry.appendLog("Install failed for \(model.id): \(error)")
         }
+    }
+
+    func installSelectedModel() async {
+        guard let selectedSearchModelID,
+              let model = searchResults.first(where: { $0.id == selectedSearchModelID })
+        else {
+            modelInstallMessage = "Select a model from search results before installing."
+            return
+        }
+        await installModel(model)
+    }
+
+    func setSelectedInstalledModelActive() {
+        guard let selectedInstalledModelID,
+              installedModels.contains(where: { $0.id == selectedInstalledModelID && $0.status == .installed })
+        else {
+            modelInstallMessage = "Select an installed model before setting it active."
+            return
+        }
+
+        settings.activeModel = selectedInstalledModelID
+        saveSettings()
+        modelInstallMessage = "Selected \(selectedInstalledModelID) as the active model."
+    }
+
+    func deleteSelectedInstalledModelFromCache() {
+        guard let selectedInstalledModelID,
+              let record = installedModels.first(where: { $0.id == selectedInstalledModelID })
+        else {
+            modelInstallMessage = "Select an installed model before deleting from cache."
+            return
+        }
+
+        do {
+            _ = try cacheManager.deleteModelCache(
+                modelID: record.id,
+                localPath: record.localPath,
+                cacheRoot: huggingFaceCacheRoot
+            )
+            registry.markRemoved(id: record.id)
+            try registry.save()
+            installedModels = registry.records
+            if settings.activeModel == record.id {
+                settings.activeModel = nil
+                saveSettings()
+            }
+            modelInstallMessage = "Deleted cache for \(record.id)."
+            telemetry.appendLog("Deleted cache for \(record.id)")
+        } catch {
+            let message = String(describing: error)
+            modelInstallMessage = "Could not delete cache for \(record.id): \(message)"
+            telemetry.appendLog("Cache delete failed for \(record.id): \(error)")
+        }
+    }
+
+    private var huggingFaceCacheRoot: URL {
+        configuredHuggingFaceCacheRoot ?? FileManager.default.homeDirectoryForCurrentUser
+            .appending(path: ".cache/huggingface/hub", directoryHint: .isDirectory)
+    }
+
+    private func friendlyInstallMessage(for error: Error) -> String {
+        let raw = String(describing: error)
+        let lowercased = raw.lowercased()
+        if lowercased.contains("401") || lowercased.contains("403") || lowercased.contains("gated") || lowercased.contains("unauthorized") {
+            return "Hugging Face denied access. Log in with Hugging Face or request access to the model, then try again. Details: \(raw)"
+        }
+        if lowercased.contains("no module named") {
+            return "A required Python package is missing. Use Install Packages, then try again. Details: \(raw)"
+        }
+        return raw
     }
 }

@@ -40,6 +40,41 @@ final class PythonBridgeTests: XCTestCase {
         XCTAssertEqual(models.first?.localPath, good.path)
     }
 
+    func testCacheManagerDeletesWholeRepoCacheFolderForModel() throws {
+        let root = try temporaryDirectory()
+        let snapshot = root.appending(path: "models--mlx-community--Tiny/snapshots/abc123", directoryHint: .isDirectory)
+        let siblingSnapshot = root.appending(path: "models--mlx-community--Tiny/snapshots/def456", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: siblingSnapshot, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: snapshot.appending(path: "config.json").path, contents: Data())
+        FileManager.default.createFile(atPath: siblingSnapshot.appending(path: "config.json").path, contents: Data())
+
+        let manager = MLXModelCacheManager()
+        let deleted = try manager.deleteModelCache(
+            modelID: "mlx-community/Tiny",
+            localPath: snapshot.path,
+            cacheRoot: root
+        )
+
+        XCTAssertEqual(deleted.lastPathComponent, "models--mlx-community--Tiny")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appending(path: "models--mlx-community--Tiny").path))
+    }
+
+    func testCacheManagerRejectsUnsafeModelIDWithoutDeletingCacheRoot() throws {
+        let root = try temporaryDirectory()
+        let keep = root.appending(path: "models--mlx-community--Tiny", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: keep, withIntermediateDirectories: true)
+
+        let manager = MLXModelCacheManager()
+
+        XCTAssertThrowsError(
+            try manager.deleteModelCache(modelID: "../Tiny", localPath: nil, cacheRoot: root)
+        ) { error in
+            XCTAssertEqual(error as? MLXModelCacheError, .unsafeModelID("../Tiny"))
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: keep.path))
+    }
+
     func testHuggingFaceSearcherDecodesModelSummaries() async throws {
         let runner = FakeCommandRunner(results: [
             "search": CommandResult(
@@ -53,6 +88,45 @@ final class PythonBridgeTests: XCTestCase {
         let results = try await searcher.search(query: "tiny", pythonExecutable: URL(filePath: "/tmp/python"), limit: 5)
 
         XCTAssertEqual(results, [HuggingFaceModelSummary(id: "mlx-community/Tiny", downloads: 42, likes: 7)])
+    }
+
+    func testHuggingFaceAuthCheckerReportsLoggedInAndLoggedOutStates() async throws {
+        let loggedInRunner = FakeCommandRunner(results: [
+            "whoami": CommandResult(exitCode: 0, standardOutput: #"{"name":"octocat"}"#, standardError: "")
+        ])
+        let loggedOutRunner = FakeCommandRunner(results: [
+            "whoami": CommandResult(exitCode: 1, standardOutput: "", standardError: "Invalid user token")
+        ])
+        let unavailableRunner = FakeCommandRunner(results: [
+            "whoami": CommandResult(exitCode: 1, standardOutput: "", standardError: "No module named huggingface_hub")
+        ])
+
+        let python = URL(filePath: "/tmp/python")
+        let loggedIn = try await HuggingFaceAuthChecker(runner: loggedInRunner).status(pythonExecutable: python)
+        let loggedOut = try await HuggingFaceAuthChecker(runner: loggedOutRunner).status(pythonExecutable: python)
+        let unavailable = try await HuggingFaceAuthChecker(runner: unavailableRunner).status(pythonExecutable: python)
+
+        XCTAssertEqual(loggedIn, .loggedIn(username: "octocat"))
+        XCTAssertEqual(loggedOut, .loggedOut("Invalid user token"))
+        XCTAssertEqual(unavailable, .unavailable("No module named huggingface_hub"))
+    }
+
+    func testHuggingFaceInstallerReturnsDownloadedSnapshotPath() async throws {
+        let runner = FakeCommandRunner(results: [
+            "install": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/abc"}"#,
+                standardError: ""
+            )
+        ])
+        let installer = HuggingFaceModelInstaller(runner: runner)
+
+        let result = try await installer.install(
+            modelID: "mlx-community/Tiny",
+            pythonExecutable: URL(filePath: "/tmp/python")
+        )
+
+        XCTAssertEqual(result.localPath, "/tmp/cache/models--mlx-community--Tiny/snapshots/abc")
     }
 
     func testHuggingFaceInstallerReportsInstallFailure() async throws {
@@ -87,6 +161,8 @@ private struct FakeCommandRunner: CommandRunning {
             key = "search"
         } else if script.contains("snapshot_download") {
             key = "install"
+        } else if script.contains("whoami") {
+            key = "whoami"
         } else {
             key = script
         }

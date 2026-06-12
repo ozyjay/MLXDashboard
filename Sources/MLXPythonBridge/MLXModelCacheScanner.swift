@@ -67,3 +67,85 @@ public struct MLXModelCacheScanner: Sendable {
         return cacheRoot.appending(path: suffix).path
     }
 }
+
+public struct MLXModelCacheManager: Sendable {
+    public init() {}
+
+    public func scan(cacheRoot: URL) throws -> [CachedMLXModel] {
+        try MLXModelCacheScanner().scan(cacheRoot: cacheRoot)
+    }
+
+    @discardableResult
+    public func deleteModelCache(modelID: String, localPath: String?, cacheRoot: URL) throws -> URL {
+        let cacheDirectory = try repoCacheDirectory(modelID: modelID, localPath: localPath, cacheRoot: cacheRoot)
+        if FileManager.default.fileExists(atPath: cacheDirectory.path) {
+            try FileManager.default.removeItem(at: cacheDirectory)
+        }
+        return cacheDirectory
+    }
+
+    public func repoCacheDirectory(modelID: String, localPath: String?, cacheRoot: URL) throws -> URL {
+        let root = cacheRoot.standardizedFileURL
+        let cacheFolder = try cacheFolderName(for: modelID)
+
+        if let localPath,
+           let directory = repoCacheDirectoryFromLocalPath(localPath, cacheRoot: root) {
+            return directory
+        }
+
+        let directory = root.appending(path: cacheFolder, directoryHint: .isDirectory)
+            .standardizedFileURL
+        guard isInsideCacheRoot(directory, root: root) else {
+            throw MLXModelCacheError.outsideCacheRoot(directory.path)
+        }
+        return directory
+    }
+
+    private func repoCacheDirectoryFromLocalPath(_ localPath: String, cacheRoot: URL) -> URL? {
+        let localURL = URL(filePath: localPath).standardizedFileURL
+        let components = localURL.pathComponents
+        guard let index = components.firstIndex(where: { $0.hasPrefix("models--") }) else {
+            return nil
+        }
+        let prefix = components[0...index].joined(separator: "/")
+        let directory = URL(filePath: prefix).standardizedFileURL
+        return isInsideCacheRoot(directory, root: cacheRoot) ? directory : nil
+    }
+
+    private func cacheFolderName(for modelID: String) throws -> String {
+        let parts = modelID.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard !parts.isEmpty,
+              parts.allSatisfy({ isSafeRepoIDComponent($0) })
+        else {
+            throw MLXModelCacheError.unsafeModelID(modelID)
+        }
+        return "models--\(parts.joined(separator: "--"))"
+    }
+
+    private func isSafeRepoIDComponent(_ component: String) -> Bool {
+        guard !component.isEmpty, component != ".", component != ".." else {
+            return false
+        }
+        return !component.contains("\\") && !component.contains(":")
+    }
+
+    private func isInsideCacheRoot(_ directory: URL, root: URL) -> Bool {
+        let rootPath = root.standardizedFileURL.path
+        let directoryPath = directory.standardizedFileURL.path
+        return directoryPath == rootPath || directoryPath.hasPrefix(rootPath + "/")
+    }
+}
+
+public enum MLXModelCacheError: Error, Equatable, CustomStringConvertible {
+    case unsafeModelID(String)
+    case outsideCacheRoot(String)
+
+    public var description: String {
+        switch self {
+        case .unsafeModelID(let modelID):
+            return "Unsafe model id for cache deletion: \(modelID)"
+        case .outsideCacheRoot(let path):
+            return "Refusing to delete outside the Hugging Face cache: \(path)"
+        }
+    }
+}
