@@ -48,7 +48,7 @@ struct DownloadCacheSampler {
         }
 
         for case let url as URL in enumerator {
-            let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+            guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]) else { continue }
             guard values.isRegularFile == true else { continue }
             totalBytes += Int64(values.fileSize ?? 0)
             if url.lastPathComponent.hasSuffix(".incomplete") {
@@ -73,13 +73,19 @@ struct XetLogActivityReader {
     func activities(logRoot: URL) throws -> [HuggingFaceDownloadActivity] {
         guard let files = try? FileManager.default.contentsOfDirectory(
             at: logRoot,
-            includingPropertiesForKeys: [.contentModificationDateKey],
+            includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey, .isSymbolicLinkKey],
             options: [.skipsHiddenFiles]
         ) else { return [] }
 
-        let newest = try files
-            .map { url -> (URL, Date) in
-                let values = try url.resourceValues(forKeys: [.contentModificationDateKey])
+        let newest = files
+            .compactMap { url -> (URL, Date)? in
+                guard url.pathExtension == "log",
+                      let values = try? url.resourceValues(
+                        forKeys: [.contentModificationDateKey, .isRegularFileKey, .isSymbolicLinkKey]
+                      ),
+                      values.isRegularFile == true,
+                      values.isSymbolicLink != true
+                else { return nil }
                 return (url, values.contentModificationDate ?? .distantPast)
             }
             .sorted { $0.1 > $1.1 }
@@ -88,7 +94,7 @@ struct XetLogActivityReader {
 
         var activities: [HuggingFaceDownloadActivity] = []
         for file in newest {
-            let text = try String(contentsOf: file, encoding: .utf8)
+            guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
             activities.append(contentsOf: HuggingFaceDownloadActivity.parse(from: text))
         }
         var uniqueActivities: [HuggingFaceDownloadActivity] = []

@@ -470,6 +470,44 @@ final class DashboardViewModelTests: XCTestCase {
         ])
     }
 
+    func testXetLogActivityReaderIgnoresNewerBadEntriesAndReadsOlderLog() throws {
+        let root = try temporaryDirectory()
+        let logs = root.appending(path: "xet/logs", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+
+        let validLog = logs.appending(path: "xet_20260612.log")
+        try #"{"fields":{"message":"Concurrency control for download: Decreased concurrency from 2 to 1; reason: success ratio below threshold (connection struggling)"}}"#
+            .write(to: validLog, atomically: true, encoding: .utf8)
+
+        let newerDirectory = logs.appending(path: "newer.log", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: newerDirectory, withIntermediateDirectories: true)
+        let badLog = logs.appending(path: "bad.log")
+        try Data([0xff, 0xfe, 0xfd]).write(to: badLog)
+
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 100)],
+            ofItemAtPath: validLog.path
+        )
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 200)],
+            ofItemAtPath: newerDirectory.path
+        )
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 300)],
+            ofItemAtPath: badLog.path
+        )
+
+        let activities = try XetLogActivityReader().activities(logRoot: logs)
+
+        XCTAssertEqual(activities, [
+            HuggingFaceDownloadActivity(
+                message: "Xet transfer: connection struggling, concurrency reduced",
+                tone: .warning,
+                source: .xetLog
+            )
+        ])
+    }
+
     func testSetSelectedInstalledModelActiveSavesSettings() throws {
         let paths = try temporaryAppPaths()
         let viewModel = DashboardViewModel(
