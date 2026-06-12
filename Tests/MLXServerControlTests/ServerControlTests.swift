@@ -25,6 +25,42 @@ final class ServerControlTests: XCTestCase {
         XCTAssertEqual(controller.state, .stopped)
         XCTAssertTrue(process.wasTerminated)
     }
+
+    func testMLXServerAlwaysBindsToLocalhostEvenWhenSettingsHostIsUnsafe() {
+        let controller = ServerProcessController()
+        let settings = DashboardSettings(mlxHost: "0.0.0.0")
+
+        let arguments = controller.makeArguments(settings: settings)
+
+        XCTAssertEqual(arguments.hostArgumentValue, "127.0.0.1")
+    }
+
+    func testMLXServerFlagsCannotOverrideLocalhostBinding() {
+        let controller = ServerProcessController()
+        let settings = DashboardSettings(
+            mlxHost: "127.0.0.1",
+            serverFlags: ["--trust-remote-code", "--host", "0.0.0.0", "--host=::", "--extra"]
+        )
+
+        let arguments = controller.makeArguments(settings: settings)
+
+        XCTAssertEqual(arguments.hostArgumentValue, "127.0.0.1")
+        XCTAssertFalse(arguments.contains("0.0.0.0"))
+        XCTAssertFalse(arguments.contains("--host=::"))
+        XCTAssertTrue(arguments.contains("--trust-remote-code"))
+        XCTAssertTrue(arguments.contains("--extra"))
+    }
+}
+
+private extension Array where Element == String {
+    var hostArgumentValue: String? {
+        guard let index = firstIndex(of: "--host"),
+              indices.contains(index + 1)
+        else {
+            return nil
+        }
+        return self[index + 1]
+    }
 }
 
 private final class FakeManagedProcess: ManagedProcess {

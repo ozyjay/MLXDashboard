@@ -5,6 +5,85 @@ import MLXPythonBridge
 
 @MainActor
 final class DashboardViewModelTests: XCTestCase {
+    func testDefaultsModelQueryToDevstralSmall() throws {
+        let paths = try temporaryAppPaths()
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            tokenStore: StubTokenStore(),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+        )
+
+        XCTAssertEqual(viewModel.modelQuery, "Devstral-Small")
+    }
+
+    func testSearchDefaultModelsIfReadyRunsSearchWhenPackagesAreReady() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(
+            at: python.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = FakeCommandRunner(results: [
+            "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "search": CommandResult(
+                exitCode: 0,
+                standardOutput: #"[{"id":"lmstudio-community/Devstral-Small-2505-MLX-4bit","downloads":10036,"likes":7}]"#,
+                standardError: ""
+            )
+        ])
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            tokenStore: StubTokenStore(),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelSearcher: HuggingFaceModelSearcher(runner: runner)
+        )
+
+        await viewModel.searchDefaultModelsIfReady()
+
+        XCTAssertEqual(viewModel.searchResults.map(\.id), ["lmstudio-community/Devstral-Small-2505-MLX-4bit"])
+        XCTAssertEqual(viewModel.modelSearchMessage, nil)
+        XCTAssertFalse(viewModel.shouldOfferPythonPackageInstall)
+    }
+
+    func testSearchDefaultModelsIfReadyPromptsForPackagesWithoutSearchingWhenMissing() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(
+            at: python.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = FakeCommandRunner(results: [
+            "import mlx_lm": CommandResult(exitCode: 1, standardOutput: "", standardError: "No module named mlx_lm"),
+            "import huggingface_hub": CommandResult(exitCode: 1, standardOutput: "", standardError: "No module named huggingface_hub"),
+            "search": CommandResult(
+                exitCode: 0,
+                standardOutput: #"[{"id":"should-not-search","downloads":1,"likes":1}]"#,
+                standardError: ""
+            )
+        ])
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            tokenStore: StubTokenStore(),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelSearcher: HuggingFaceModelSearcher(runner: runner)
+        )
+
+        await viewModel.searchDefaultModelsIfReady()
+
+        XCTAssertEqual(viewModel.searchResults, [])
+        XCTAssertEqual(viewModel.modelSearchMessage, "Install Python packages to search default MLX models: mlx-lm, huggingface_hub.")
+        XCTAssertTrue(viewModel.shouldOfferPythonPackageInstall)
+        XCTAssertFalse(runner.commands.contains { ($0.arguments.last ?? "").contains("list_models") })
+    }
+
     func testSearchModelsWithMissingPythonPackagesPromptsInstallInsteadOfSearching() async throws {
         let paths = try temporaryAppPaths()
         let python = paths.venvDirectory.appending(path: "bin/python")
@@ -138,6 +217,78 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertNil(registry.record(id: "mlx-community/Other"))
     }
 
+    func testInstallSelectedModelFinishesWithCompletedProgress() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(
+            at: python.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = FakeCommandRunner(results: [
+            "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "whoami": CommandResult(exitCode: 0, standardOutput: #"{"name":"octocat"}"#, standardError: ""),
+            "install": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/abc"}"#,
+                standardError: ""
+            )
+        ])
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            tokenStore: StubTokenStore(),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelInstaller: HuggingFaceModelInstaller(runner: runner),
+            authChecker: HuggingFaceAuthChecker(runner: runner)
+        )
+        viewModel.searchResults = [HuggingFaceModelSummary(id: "mlx-community/Tiny")]
+        viewModel.selectedSearchModelID = "mlx-community/Tiny"
+
+        await viewModel.installSelectedModel()
+
+        XCTAssertEqual(viewModel.modelInstallProgress?.modelID, "mlx-community/Tiny")
+        XCTAssertEqual(viewModel.modelInstallProgress?.phase, .installed)
+        XCTAssertEqual(viewModel.modelInstallProgress?.fractionCompleted, 1.0)
+        XCTAssertEqual(viewModel.modelInstallProgress?.stepText, "Step 5 of 5")
+    }
+
+    func testInstallSelectedModelFinishesWithFailedProgress() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(
+            at: python.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = FakeCommandRunner(results: [
+            "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "whoami": CommandResult(exitCode: 0, standardOutput: #"{"name":"octocat"}"#, standardError: ""),
+            "install": CommandResult(exitCode: 1, standardOutput: "", standardError: "download failed")
+        ])
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            tokenStore: StubTokenStore(),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelInstaller: HuggingFaceModelInstaller(runner: runner),
+            authChecker: HuggingFaceAuthChecker(runner: runner)
+        )
+        viewModel.searchResults = [HuggingFaceModelSummary(id: "mlx-community/Tiny")]
+        viewModel.selectedSearchModelID = "mlx-community/Tiny"
+
+        await viewModel.installSelectedModel()
+
+        XCTAssertEqual(viewModel.modelInstallProgress?.modelID, "mlx-community/Tiny")
+        XCTAssertEqual(viewModel.modelInstallProgress?.phase, .failed)
+        XCTAssertEqual(viewModel.modelInstallProgress?.fractionCompleted, 1.0)
+        XCTAssertTrue(viewModel.modelInstallProgress?.detail.contains("download failed") == true)
+    }
+
     func testSetSelectedInstalledModelActiveSavesSettings() throws {
         let paths = try temporaryAppPaths()
         let viewModel = DashboardViewModel(
@@ -183,6 +334,36 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.modelInstallMessage, "Deleted cache for mlx-community/Tiny.")
     }
 
+    func testDeleteSelectedInstalledModelClearsStaleInstallProgress() throws {
+        let paths = try temporaryAppPaths()
+        let cacheRoot = try temporaryDirectory()
+        let snapshot = cacheRoot.appending(path: "models--mlx-community--Tiny/snapshots/abc", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: snapshot.appending(path: "config.json").path, contents: Data())
+
+        let registry = ModelRegistry(fileURL: paths.modelRegistryFile)
+        registry.upsert(ModelRecord(id: "mlx-community/Tiny", status: .installed, localPath: snapshot.path))
+        try registry.save()
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            tokenStore: StubTokenStore(),
+            registry: registry,
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:])),
+            huggingFaceCacheRoot: cacheRoot
+        )
+        viewModel.selectedInstalledModelID = "mlx-community/Tiny"
+        viewModel.modelInstallProgress = ModelInstallProgress(
+            modelID: "mlx-community/Previous",
+            phase: .installed,
+            detail: "Installed previous model"
+        )
+
+        viewModel.deleteSelectedInstalledModelFromCache()
+
+        XCTAssertNil(viewModel.modelInstallProgress)
+        XCTAssertEqual(viewModel.modelInstallMessage, "Deleted cache for mlx-community/Tiny.")
+    }
+
     private func temporaryAppPaths() throws -> AppPaths {
         let root = FileManager.default.temporaryDirectory
             .appending(path: "MLXDashboardAppTests-\(UUID().uuidString)", directoryHint: .isDirectory)
@@ -214,6 +395,8 @@ private final class FakeCommandRunner: CommandRunning, @unchecked Sendable {
             key = "install"
         } else if script.contains("whoami") {
             key = "whoami"
+        } else if script.contains("list_models") {
+            key = "search"
         } else {
             key = script
         }

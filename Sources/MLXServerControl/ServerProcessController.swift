@@ -65,14 +65,34 @@ public final class ServerProcessController: ObservableObject {
     public func makeArguments(settings: DashboardSettings) -> [String] {
         var arguments = [
             "-m", "mlx_lm.server",
-            "--host", settings.mlxHost,
+            "--host", DashboardSettings.localMLXHost,
             "--port", String(settings.mlxPort)
         ]
         if let activeModel = settings.activeModel, !activeModel.isEmpty {
             arguments += ["--model", activeModel]
         }
-        arguments += settings.serverFlags
+        arguments += sanitizedServerFlags(settings.serverFlags)
         return arguments
+    }
+
+    private func sanitizedServerFlags(_ flags: [String]) -> [String] {
+        var sanitized: [String] = []
+        var skipNext = false
+        for flag in flags {
+            if skipNext {
+                skipNext = false
+                continue
+            }
+            if flag == "--host" {
+                skipNext = true
+                continue
+            }
+            if flag.hasPrefix("--host=") {
+                continue
+            }
+            sanitized.append(flag)
+        }
+        return sanitized
     }
 }
 

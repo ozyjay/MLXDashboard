@@ -1,6 +1,8 @@
 import Foundation
 
 public struct DashboardSettings: Codable, Equatable, Sendable {
+    public static let localMLXHost = "127.0.0.1"
+
     public var activeModel: String?
     public var mlxHost: String
     public var mlxPort: Int
@@ -29,7 +31,7 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
     }
 
     public var mlxBaseURL: URL {
-        URL(string: "http://\(mlxHost):\(mlxPort)")!
+        URL(string: "http://\(Self.localMLXHost):\(mlxPort)")!
     }
 }
 

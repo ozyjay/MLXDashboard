@@ -13,7 +13,7 @@ final class DashboardViewModel: ObservableObject {
     @Published var providerStatus = "Stopped"
     @Published var installedModels: [ModelRecord] = []
     @Published var searchResults: [HuggingFaceModelSummary] = []
-    @Published var modelQuery = "mlx-community"
+    @Published var modelQuery = "Devstral-Small"
     @Published var modelSearchMessage: String?
     @Published var modelInstallMessage: String?
     @Published var huggingFaceAuthMessage = "Hugging Face: Not checked"
@@ -21,6 +21,7 @@ final class DashboardViewModel: ObservableObject {
     @Published var selectedSearchModelID: String?
     @Published var selectedInstalledModelID: String?
     @Published var isInstallingModel = false
+    @Published var modelInstallProgress: ModelInstallProgress?
 
     let telemetry = TelemetryStore()
     let serverController = ServerProcessController()
@@ -102,7 +103,7 @@ final class DashboardViewModel: ObservableObject {
         do {
             let python = try await environmentManager.ensureVenv()
             try serverController.start(settings: settings, pythonExecutable: python)
-            telemetry.appendLog("Started mlx-lm on \(settings.mlxHost):\(settings.mlxPort)")
+            telemetry.appendLog("Started mlx-lm on \(DashboardSettings.localMLXHost):\(settings.mlxPort)")
             try startProvider()
         } catch {
             telemetry.appendLog("Failed to start server: \(error)")
@@ -201,44 +202,81 @@ final class DashboardViewModel: ObservableObject {
         }
     }
 
+    func searchDefaultModelsIfReady() async {
+        do {
+            let status = try await environmentManager.status()
+            guard ModelDiscoveryPolicy.shouldRunDefaultSearch(
+                isReady: status.isReady,
+                hasResults: !searchResults.isEmpty
+            ) else {
+                if !status.isReady {
+                    let missingPackages = status.packageReport.missingInstallNames.joined(separator: ", ")
+                    searchResults = []
+                    shouldOfferPythonPackageInstall = true
+                    modelSearchMessage = "Install Python packages to search default MLX models: \(missingPackages)."
+                    telemetry.appendLog("Default model search needs Python packages: \(missingPackages)")
+                }
+                return
+            }
+
+            shouldOfferPythonPackageInstall = false
+            modelSearchMessage = nil
+            searchResults = try await modelSearcher.search(query: modelQuery, pythonExecutable: status.pythonExecutable)
+            telemetry.appendLog("Loaded default Hugging Face model search for \(modelQuery)")
+        } catch {
+            modelSearchMessage = "Default model search failed: \(error)"
+            telemetry.appendLog("Default model search failed: \(error)")
+        }
+    }
+
     func installModel(_ model: HuggingFaceModelSummary) async {
         isInstallingModel = true
         defer { isInstallingModel = false }
 
         do {
-            modelInstallMessage = "Preparing to install \(model.id)..."
+            updateInstallProgress(.preparing, modelID: model.id, detail: "Preparing to install \(model.id).")
+            updateInstallProgress(.checkingPackages, modelID: model.id, detail: "Checking local Python packages before downloading.")
             let status = try await environmentManager.status()
             guard status.isReady else {
                 let missingPackages = status.packageReport.missingInstallNames.joined(separator: ", ")
                 shouldOfferPythonPackageInstall = true
-                modelInstallMessage = "Install needs Python packages first: \(missingPackages). Use Install Packages, then try again."
+                updateInstallProgress(
+                    .blocked,
+                    modelID: model.id,
+                    detail: "Install needs Python packages first: \(missingPackages). Use Install Packages, then try again."
+                )
                 telemetry.appendLog("Install blocked for \(model.id); missing packages: \(missingPackages)")
                 return
             }
             shouldOfferPythonPackageInstall = false
 
-            modelInstallMessage = "Checking Hugging Face login for \(model.id)..."
+            updateInstallProgress(.checkingLogin, modelID: model.id, detail: "Checking Hugging Face login for \(model.id).")
             let authStatus = try await authChecker.status(pythonExecutable: status.pythonExecutable)
             huggingFaceAuthMessage = authStatus.displayText
             if case .loggedOut = authStatus {
-                modelInstallMessage = "Hugging Face login was not found. Public models can still install; private or gated models may require login."
+                updateInstallProgress(
+                    .checkingLogin,
+                    modelID: model.id,
+                    detail: "Hugging Face login was not found. Public models can still install; private or gated models may require login."
+                )
             }
 
             registry.upsert(ModelRecord(id: model.id, status: .installing, message: "Installing from Hugging Face"))
             try registry.save()
             installedModels = registry.records
 
-            modelInstallMessage = "Downloading \(model.id). Large models can take a while."
+            updateInstallProgress(.downloading, modelID: model.id, detail: "Downloading \(model.id). Large models can take a while.")
             let result = try await modelInstaller.install(modelID: model.id, pythonExecutable: status.pythonExecutable)
+            updateInstallProgress(.finalizing, modelID: model.id, detail: "Finalizing cache record for \(model.id).")
             registry.upsert(ModelRecord(id: model.id, status: .installed, localPath: result.localPath, message: "Installed"))
             try registry.save()
             installedModels = registry.records
             scanModelCache()
-            modelInstallMessage = "Installed \(model.id) at \(result.localPath)"
+            updateInstallProgress(.installed, modelID: model.id, detail: "Installed \(model.id) at \(result.localPath)")
             telemetry.appendLog("Installed \(model.id)")
         } catch {
             let message = friendlyInstallMessage(for: error)
-            modelInstallMessage = "Install failed for \(model.id): \(message)"
+            updateInstallProgress(.failed, modelID: model.id, detail: "Install failed for \(model.id): \(message)")
             registry.upsert(ModelRecord(id: model.id, status: .failed, message: message))
             try? registry.save()
             installedModels = registry.records
@@ -250,6 +288,7 @@ final class DashboardViewModel: ObservableObject {
         guard let selectedSearchModelID,
               let model = searchResults.first(where: { $0.id == selectedSearchModelID })
         else {
+            modelInstallProgress = nil
             modelInstallMessage = "Select a model from search results before installing."
             return
         }
@@ -260,10 +299,12 @@ final class DashboardViewModel: ObservableObject {
         guard let selectedInstalledModelID,
               installedModels.contains(where: { $0.id == selectedInstalledModelID && $0.status == .installed })
         else {
+            modelInstallProgress = nil
             modelInstallMessage = "Select an installed model before setting it active."
             return
         }
 
+        modelInstallProgress = nil
         settings.activeModel = selectedInstalledModelID
         saveSettings()
         modelInstallMessage = "Selected \(selectedInstalledModelID) as the active model."
@@ -273,10 +314,12 @@ final class DashboardViewModel: ObservableObject {
         guard let selectedInstalledModelID,
               let record = installedModels.first(where: { $0.id == selectedInstalledModelID })
         else {
+            modelInstallProgress = nil
             modelInstallMessage = "Select an installed model before deleting from cache."
             return
         }
 
+        modelInstallProgress = nil
         do {
             _ = try cacheManager.deleteModelCache(
                 modelID: record.id,
@@ -302,6 +345,11 @@ final class DashboardViewModel: ObservableObject {
     private var huggingFaceCacheRoot: URL {
         configuredHuggingFaceCacheRoot ?? FileManager.default.homeDirectoryForCurrentUser
             .appending(path: ".cache/huggingface/hub", directoryHint: .isDirectory)
+    }
+
+    private func updateInstallProgress(_ phase: ModelInstallPhase, modelID: String, detail: String) {
+        modelInstallProgress = ModelInstallProgress(modelID: modelID, phase: phase, detail: detail)
+        modelInstallMessage = detail
     }
 
     private func friendlyInstallMessage(for error: Error) -> String {

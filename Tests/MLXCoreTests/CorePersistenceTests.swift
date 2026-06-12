@@ -23,6 +23,12 @@ final class CorePersistenceTests: XCTestCase {
         XCTAssertEqual(reloaded.serverFlags, ["--trust-remote-code"])
     }
 
+    func testMLXBaseURLUsesLocalhostEvenIfPersistedHostIsUnsafe() {
+        let settings = DashboardSettings(mlxHost: "0.0.0.0", mlxPort: 8080)
+
+        XCTAssertEqual(settings.mlxBaseURL.absoluteString, "http://127.0.0.1:8080")
+    }
+
     func testTokenStoreCreatesStableTokenAndCanRegenerate() throws {
         let store = EphemeralProviderTokenStore()
 

@@ -1,21 +1,108 @@
 import SwiftUI
 import MLXCore
 
+enum DashboardSection: String, CaseIterable, Identifiable {
+    case discover = "Discover"
+    case installed = "Installed"
+    case controller = "Controller"
+    case provider = "Provider"
+    case dashboard = "Dashboard"
+
+    var id: String { rawValue }
+
+    var systemImage: String {
+        switch self {
+        case .discover:
+            return "magnifyingglass"
+        case .installed:
+            return "externaldrive"
+        case .controller:
+            return "switch.2"
+        case .provider:
+            return "point.3.connected.trianglepath.dotted"
+        case .dashboard:
+            return "gauge.with.dots.needle.67percent"
+        }
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject private var viewModel: DashboardViewModel
+    @State private var selectedSection: DashboardSection? = .discover
 
     var body: some View {
-        TabView {
-            DashboardTab()
-                .tabItem { Label("Dashboard", systemImage: "gauge.with.dots.needle.67percent") }
-            ControllerTab()
-                .tabItem { Label("Controller", systemImage: "switch.2") }
-            ModelsTab()
-                .tabItem { Label("Models", systemImage: "square.stack.3d.up") }
-            ProviderTab()
-                .tabItem { Label("Provider", systemImage: "point.3.connected.trianglepath.dotted") }
+        NavigationSplitView {
+            List(DashboardSection.allCases, selection: $selectedSection) { section in
+                Label(section.rawValue, systemImage: section.systemImage)
+                    .tag(section)
+            }
+            .navigationTitle("MLXDashboard")
+            .navigationSplitViewColumnWidth(min: 160, ideal: 190, max: 240)
+        } detail: {
+            VStack(spacing: 0) {
+                AppHeader(section: selectedSection ?? .discover)
+                Divider()
+                detailView(for: selectedSection ?? .discover)
+                    .padding(16)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
         }
-        .padding(18)
+        .frame(minWidth: 980, minHeight: 680)
+    }
+
+    @ViewBuilder
+    private func detailView(for section: DashboardSection) -> some View {
+        switch section {
+        case .discover:
+            DiscoverModelsView()
+        case .installed:
+            InstalledModelsView()
+        case .controller:
+            ControllerTab()
+        case .provider:
+            ProviderTab()
+        case .dashboard:
+            DashboardTab()
+        }
+    }
+}
+
+private struct AppHeader: View {
+    @EnvironmentObject private var viewModel: DashboardViewModel
+    let section: DashboardSection
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(section.rawValue)
+                    .font(.headline)
+                HStack(spacing: 10) {
+                    Text("Python: \(viewModel.pythonStatus)")
+                    Text("Provider: \(viewModel.providerStatus)")
+                    if let activeModel = viewModel.settings.activeModel {
+                        Text("Active: \(activeModel)")
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            }
+
+            Spacer()
+
+            Button {
+                Task { await viewModel.refreshPythonStatus() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .help("Refresh Python status")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .task {
+            await viewModel.refreshPythonStatus()
+        }
     }
 }
 
@@ -82,64 +169,82 @@ private struct ControllerTab: View {
     }
 }
 
-private struct ModelsTab: View {
+private struct DiscoverModelsView: View {
     @EnvironmentObject private var viewModel: DashboardViewModel
-    @State private var isConfirmingCacheDelete = false
 
     var body: some View {
-        HSplitView {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("Hugging Face Search").font(.headline)
-                HStack {
-                    TextField("Search Hugging Face MLX models", text: $viewModel.modelQuery)
-                        .textFieldStyle(.roundedBorder)
-                    Button("Search") { Task { await viewModel.searchModels() } }
-                    Button("Check Login") { Task { await viewModel.refreshHuggingFaceAuthStatus() } }
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                TextField("Search Hugging Face MLX models", text: $viewModel.modelQuery)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit {
+                        Task { await viewModel.searchModels() }
+                    }
+                Button("Search") { Task { await viewModel.searchModels() } }
+                Button("Check Login") { Task { await viewModel.refreshHuggingFaceAuthStatus() } }
+                if viewModel.shouldOfferPythonPackageInstall {
+                    Button("Install Packages") {
+                        Task { await viewModel.installPythonPackages() }
+                    }
                 }
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(viewModel.huggingFaceAuthMessage)
-                        .foregroundStyle(.secondary)
-                    if let message = viewModel.modelSearchMessage {
-                        HStack(alignment: .firstTextBaseline, spacing: 12) {
-                            Text(message)
-                                .foregroundStyle(.secondary)
-                            if viewModel.shouldOfferPythonPackageInstall {
-                                Button("Install Packages") {
-                                    Task { await viewModel.installPythonPackages() }
-                                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(viewModel.huggingFaceAuthMessage)
+                    .foregroundStyle(.secondary)
+                if let message = viewModel.modelSearchMessage {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text(message)
+                            .foregroundStyle(.secondary)
+                        if viewModel.shouldOfferPythonPackageInstall {
+                            Button("Install Packages") {
+                                Task { await viewModel.installPythonPackages() }
                             }
                         }
                     }
-                    if let message = viewModel.modelInstallMessage {
-                        Text(message)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    }
                 }
-                HStack {
-                    Button("Install Selected") {
-                        Task { await viewModel.installSelectedModel() }
-                    }
-                    .disabled(viewModel.selectedSearchModelID == nil || viewModel.isInstallingModel)
-                    if viewModel.isInstallingModel {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                    if viewModel.shouldOfferPythonPackageInstall {
-                        Button("Install Packages") {
-                            Task { await viewModel.installPythonPackages() }
+                if let progress = viewModel.modelInstallProgress {
+                    InstallProgressBanner(progress: progress)
+                } else if let message = viewModel.modelInstallMessage {
+                    Text(message)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .lineLimit(2)
+                }
+            }
+            .font(.caption)
+
+            HStack(spacing: 10) {
+                Button("Install Selected") {
+                    Task { await viewModel.installSelectedModel() }
+                }
+                .disabled(!ModelDiscoveryPolicy.canInstallSelected(
+                    hasSelection: viewModel.selectedSearchModelID != nil,
+                    isInstalling: viewModel.isInstallingModel
+                ))
+                if viewModel.isInstallingModel {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Spacer()
+            }
+
+            Table(viewModel.searchResults, selection: $viewModel.selectedSearchModelID) {
+                TableColumn("Model", value: \.id)
+                TableColumn("Downloads") { model in
+                    Text(model.downloads.map(String.init) ?? "")
+                }
+                TableColumn("Likes") { model in
+                    Text(model.likes.map(String.init) ?? "")
+                }
+                TableColumn("Action") { model in
+                    if viewModel.isInstallingModel && viewModel.modelInstallProgress?.modelID == model.id {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Installing")
                         }
-                    }
-                }
-                Table(viewModel.searchResults, selection: $viewModel.selectedSearchModelID) {
-                    TableColumn("Model", value: \.id)
-                    TableColumn("Downloads") { model in
-                        Text(model.downloads.map(String.init) ?? "")
-                    }
-                    TableColumn("Likes") { model in
-                        Text(model.likes.map(String.init) ?? "")
-                    }
-                    TableColumn("Action") { model in
+                    } else {
                         Button("Install") {
                             viewModel.selectedSearchModelID = model.id
                             Task { await viewModel.installSelectedModel() }
@@ -148,35 +253,53 @@ private struct ModelsTab: View {
                     }
                 }
             }
-            .frame(minWidth: 460)
+            .frame(minHeight: 420)
+        }
+        .task {
+            await viewModel.searchDefaultModelsIfReady()
+        }
+    }
+}
 
-            VStack(alignment: .leading, spacing: 14) {
-                Text("Installed Models").font(.headline)
-                HStack {
-                    Button("Scan Cache") { viewModel.scanModelCache() }
-                    Button("Set Active") { viewModel.setSelectedInstalledModelActive() }
-                        .disabled(viewModel.selectedInstalledModelID == nil)
-                    Button("Delete from Cache", role: .destructive) {
-                        isConfirmingCacheDelete = true
-                    }
+private struct InstalledModelsView: View {
+    @EnvironmentObject private var viewModel: DashboardViewModel
+    @State private var isConfirmingCacheDelete = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Installed Models").font(.title3.bold())
+                Spacer()
+                Button("Scan Cache") { viewModel.scanModelCache() }
+                Button("Set Active") { viewModel.setSelectedInstalledModelActive() }
                     .disabled(viewModel.selectedInstalledModelID == nil)
+                Button("Delete from Cache", role: .destructive) {
+                    isConfirmingCacheDelete = true
                 }
-                Table(viewModel.installedModels, selection: $viewModel.selectedInstalledModelID) {
-                    TableColumn("Model", value: \.id)
-                    TableColumn("Status") { record in
-                        Text(record.status.rawValue)
-                    }
-                    TableColumn("Path") { record in
-                        Text(record.localPath ?? "")
-                            .lineLimit(1)
-                    }
-                    TableColumn("Message") { record in
-                        Text(record.message ?? "")
-                            .lineLimit(1)
-                    }
+                .disabled(viewModel.selectedInstalledModelID == nil)
+            }
+            if let progress = viewModel.modelInstallProgress {
+                InstallProgressBanner(progress: progress)
+            } else if let message = viewModel.modelInstallMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            Table(viewModel.installedModels, selection: $viewModel.selectedInstalledModelID) {
+                TableColumn("Model", value: \.id)
+                TableColumn("Status") { record in
+                    Text(record.status.rawValue)
+                }
+                TableColumn("Path") { record in
+                    Text(record.localPath ?? "")
+                        .lineLimit(1)
+                }
+                TableColumn("Message") { record in
+                    Text(record.message ?? "")
+                        .lineLimit(1)
                 }
             }
-            .frame(minWidth: 460)
         }
         .confirmationDialog(
             "Delete cached model?",
@@ -190,6 +313,65 @@ private struct ModelsTab: View {
         } message: {
             Text("This removes all cached snapshots for the selected Hugging Face model.")
         }
+    }
+}
+
+private struct InstallProgressBanner: View {
+    let progress: ModelInstallProgress
+
+    private var tintColor: Color {
+        switch progress.phase {
+        case .installed:
+            return .green
+        case .failed:
+            return .red
+        case .blocked:
+            return .orange
+        default:
+            return .accentColor
+        }
+    }
+
+    private var symbolName: String {
+        switch progress.phase {
+        case .installed:
+            return "checkmark.circle.fill"
+        case .failed:
+            return "xmark.octagon.fill"
+        case .blocked:
+            return "exclamationmark.triangle.fill"
+        default:
+            return "arrow.down.circle"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: symbolName)
+                    .foregroundStyle(tintColor)
+                Text(progress.title)
+                    .font(.caption.bold())
+                Text(progress.stepText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(progress.modelID)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+            }
+            ProgressView(value: progress.fractionCompleted)
+                .tint(tintColor)
+            Text(progress.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .lineLimit(2)
+        }
+        .padding(10)
+        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
