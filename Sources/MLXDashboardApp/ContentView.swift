@@ -239,13 +239,23 @@ private struct DiscoverModelsView: View {
             }
 
             Table(viewModel.searchResults, selection: $viewModel.selectedSearchModelID) {
-                TableColumn("Model", value: \.id)
+                TableColumn("Model") { model in
+                    Text(model.id)
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+                .width(min: 560, ideal: 900)
                 TableColumn("Downloads") { model in
                     Text(model.downloads.map(String.init) ?? "")
+                        .monospacedDigit()
                 }
+                .width(min: 72, ideal: 86, max: 104)
                 TableColumn("Likes") { model in
                     Text(model.likes.map(String.init) ?? "")
+                        .monospacedDigit()
                 }
+                .width(min: 42, ideal: 52, max: 64)
                 TableColumn("Action") { model in
                     if viewModel.isInstallingModel && viewModel.modelInstallProgress?.modelID == model.id {
                         HStack(spacing: 6) {
@@ -261,6 +271,7 @@ private struct DiscoverModelsView: View {
                         .disabled(viewModel.isInstallingModel)
                     }
                 }
+                .width(min: 112, ideal: 128, max: 150)
             }
             .frame(minHeight: 420)
         }
@@ -305,18 +316,29 @@ private struct InstalledModelsView: View {
                     .textSelection(.enabled)
             }
             Table(viewModel.installedModels, selection: $viewModel.selectedInstalledModelID) {
-                TableColumn("Model", value: \.id)
+                TableColumn("Model") { record in
+                    Text(record.id)
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+                .width(min: 420, ideal: 760)
                 TableColumn("Status") { record in
                     Text(record.status.rawValue)
                 }
+                .width(min: 76, ideal: 88, max: 104)
                 TableColumn("Path") { record in
                     Text(record.localPath ?? "")
                         .lineLimit(1)
+                        .truncationMode(.middle)
                 }
+                .width(min: 120, ideal: 180, max: 240)
                 TableColumn("Message") { record in
                     Text(record.message ?? "")
                         .lineLimit(1)
+                        .truncationMode(.tail)
                 }
+                .width(min: 90, ideal: 140, max: 190)
             }
         }
         .confirmationDialog(
@@ -464,7 +486,7 @@ private struct ProviderTab: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("MLXChat Provider").font(.title2.bold())
             LabeledContent("Base URL", value: viewModel.providerBaseURL)
-            LabeledContent("Authorization", value: "Bearer \(viewModel.tokenPreview)")
+            LabeledContent("Authorization", value: viewModel.tokenPreview == "Hidden" ? "Bearer ********" : "Bearer \(viewModel.tokenPreview)")
             HStack {
                 Button("Start Provider") {
                     do {
@@ -474,7 +496,21 @@ private struct ProviderTab: View {
                     }
                 }
                 Button("Stop Provider") { viewModel.stopProvider() }
-                Button("Regenerate Token") { viewModel.regenerateToken() }
+                Button("Reveal Token") {
+                    Task { await viewModel.revealProviderToken() }
+                }
+                Button("Copy Token") {
+                    Task { await viewModel.copyProviderToken() }
+                }
+                Button("Regenerate Token") {
+                    Task { await viewModel.regenerateProviderToken() }
+                }
+            }
+            if let providerTokenMessage = viewModel.providerTokenMessage {
+                Text(providerTokenMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
             }
             Divider()
             Text("Routes").font(.headline)

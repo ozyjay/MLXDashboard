@@ -116,6 +116,8 @@ struct ModelInstallProgress: Equatable {
         var parts = [downloadProgress.percentText]
         if let etaText = downloadProgress.etaText {
             parts.append("ETA \(etaText)")
+        } else {
+            parts.append("Calculating ETA")
         }
         if let rateText = downloadProgress.rateText {
             parts.append(rateText)

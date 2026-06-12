@@ -5,6 +5,108 @@ import MLXPythonBridge
 
 @MainActor
 final class DashboardViewModelTests: XCTestCase {
+    func testStartupDoesNotReadProviderToken() throws {
+        let paths = try temporaryAppPaths()
+        let tokenStore = CountingTokenStore(token: "secret-token")
+
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            tokenStore: tokenStore,
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+        )
+
+        XCTAssertEqual(tokenStore.tokenReadCount, 0)
+        XCTAssertEqual(viewModel.tokenPreview, "Hidden")
+    }
+
+    func testRevealProviderTokenRequiresSuccessfulBiometricAuthorization() async throws {
+        let paths = try temporaryAppPaths()
+        let tokenStore = CountingTokenStore(token: "secret-token")
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            tokenStore: tokenStore,
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+        )
+
+        await viewModel.revealProviderToken(authorizer: StubBiometricAuthorizer(result: .authorized))
+
+        XCTAssertEqual(viewModel.tokenPreview, "secret-token")
+        XCTAssertEqual(tokenStore.tokenReadCount, 1)
+        XCTAssertEqual(viewModel.providerTokenMessage, "Provider token revealed.")
+    }
+
+    func testFailedBiometricAuthorizationDoesNotExposeProviderToken() async throws {
+        let paths = try temporaryAppPaths()
+        let tokenStore = CountingTokenStore(token: "secret-token")
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            tokenStore: tokenStore,
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+        )
+
+        await viewModel.revealProviderToken(authorizer: StubBiometricAuthorizer(result: .cancelled))
+
+        XCTAssertEqual(viewModel.tokenPreview, "Hidden")
+        XCTAssertEqual(tokenStore.tokenReadCount, 0)
+        XCTAssertEqual(viewModel.providerTokenMessage, "Token reveal cancelled.")
+    }
+
+    func testCopyProviderTokenRequiresAuthorizationAndCopiesBearerToken() async throws {
+        let paths = try temporaryAppPaths()
+        let tokenStore = CountingTokenStore(token: "secret-token")
+        let copier = StubProviderTokenCopier()
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            tokenStore: tokenStore,
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+        )
+
+        await viewModel.copyProviderToken(
+            authorizer: StubBiometricAuthorizer(result: .authorized),
+            copier: copier
+        )
+
+        XCTAssertEqual(copier.copiedText, "Bearer secret-token")
+        XCTAssertEqual(viewModel.tokenPreview, "Hidden")
+        XCTAssertEqual(viewModel.providerTokenMessage, "Provider token copied.")
+    }
+
+    func testRegenerateProviderTokenRequiresAuthorization() async throws {
+        let paths = try temporaryAppPaths()
+        let tokenStore = CountingTokenStore(token: "old-token", regeneratedToken: "new-token")
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            tokenStore: tokenStore,
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+        )
+
+        await viewModel.regenerateProviderToken(authorizer: StubBiometricAuthorizer(result: .authorized))
+
+        XCTAssertEqual(viewModel.tokenPreview, "new-token")
+        XCTAssertEqual(tokenStore.regenerateCount, 1)
+        XCTAssertEqual(viewModel.providerTokenMessage, "Provider token regenerated.")
+    }
+
+    func testProviderStartCanReadTokenWithoutBiometricAuthorization() throws {
+        let paths = try temporaryAppPaths()
+        let tokenStore = CountingTokenStore(token: "secret-token")
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            tokenStore: tokenStore,
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+        )
+
+        _ = try viewModel.providerAuthorizationTokenForTesting()
+
+        XCTAssertEqual(tokenStore.tokenReadCount, 1)
+    }
+
     func testDefaultsModelQueryToDevstralSmall() throws {
         let paths = try temporaryAppPaths()
         let viewModel = DashboardViewModel(
@@ -366,6 +468,22 @@ final class DashboardViewModelTests: XCTestCase {
 
         XCTAssertEqual(progress.fractionCompleted, 0.42, accuracy: 0.001)
         XCTAssertEqual(progress.downloadStatusText, "42% • ETA 7m 12s • 13.4MB/s")
+    }
+
+    func testDownloadProgressShowsCalculatingETAWhenNoReliableETAExists() {
+        let progress = ModelInstallProgress(
+            modelID: "mlx-community/Tiny",
+            phase: .downloading,
+            detail: "Downloading mlx-community/Tiny.",
+            downloadProgress: HuggingFaceDownloadProgress(
+                fractionCompleted: 0.42,
+                percentText: "42%",
+                etaText: nil,
+                rateText: "13.4MB/s"
+            )
+        )
+
+        XCTAssertEqual(progress.downloadStatusText, "42% • Calculating ETA • 13.4MB/s")
     }
 
     func testModelInstallProgressExposesCacheAndActivityStatusText() {
@@ -913,5 +1031,63 @@ private struct StubTokenStore: ProviderTokenStoring {
 
     func regenerateToken() throws -> String {
         "new-test-token"
+    }
+}
+
+private final class CountingTokenStore: ProviderTokenStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private let storedToken: String
+    private let regeneratedToken: String
+    private var reads = 0
+    private var regenerations = 0
+
+    var tokenReadCount: Int {
+        lock.withLock { reads }
+    }
+
+    var regenerateCount: Int {
+        lock.withLock { regenerations }
+    }
+
+    init(token: String, regeneratedToken: String? = nil) {
+        self.storedToken = token
+        self.regeneratedToken = regeneratedToken ?? token
+    }
+
+    func token() throws -> String {
+        lock.withLock {
+            reads += 1
+        }
+        return storedToken
+    }
+
+    func regenerateToken() throws -> String {
+        lock.withLock {
+            regenerations += 1
+        }
+        return regeneratedToken
+    }
+}
+
+private struct StubBiometricAuthorizer: BiometricAuthorizing {
+    let result: BiometricAuthorizationResult
+
+    func authorize(reason: String) async -> BiometricAuthorizationResult {
+        result
+    }
+}
+
+private final class StubProviderTokenCopier: ProviderTokenCopying, @unchecked Sendable {
+    private let lock = NSLock()
+    private var text: String?
+
+    var copiedText: String? {
+        lock.withLock { text }
+    }
+
+    func copy(_ text: String) {
+        lock.withLock {
+            self.text = text
+        }
     }
 }

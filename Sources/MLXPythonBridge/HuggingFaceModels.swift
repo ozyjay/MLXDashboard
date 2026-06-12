@@ -129,14 +129,17 @@ public struct HuggingFaceDownloadProgress: Sendable, Equatable {
 
         let percentString = String(line[percentMatch].dropLast())
         guard let percentValue = Double(percentString) else { return nil }
+        let bracketText = bracketContent(in: line)
+        guard let rate = rateText(from: bracketText),
+              isByteTransferRate(rate)
+        else { return nil }
         let fraction = min(max(percentValue / 100, 0), 1)
         let percentText = formattedPercent(percentValue)
-        let bracketText = bracketContent(in: line)
         return HuggingFaceDownloadProgress(
             fractionCompleted: fraction,
             percentText: percentText,
             etaText: etaText(from: bracketText),
-            rateText: rateText(from: bracketText)
+            rateText: rate
         )
     }
 
@@ -172,6 +175,11 @@ public struct HuggingFaceDownloadProgress: Sendable, Equatable {
         guard parts.count == 2 else { return nil }
         let rate = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
         return rate.isEmpty ? nil : rate
+    }
+
+    private static func isByteTransferRate(_ rate: String) -> Bool {
+        let normalized = rate.lowercased()
+        return normalized.contains("b/s") || normalized.contains("byte/s") || normalized.contains("bytes/s")
     }
 
     private static func formattedDuration(_ raw: String) -> String {

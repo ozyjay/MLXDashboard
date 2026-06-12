@@ -89,7 +89,7 @@ public struct MLXModelCacheManager: Sendable {
         let cacheFolder = try cacheFolderName(for: modelID)
 
         if let localPath,
-           let directory = repoCacheDirectoryFromLocalPath(localPath, cacheRoot: root) {
+           let directory = repoCacheDirectoryFromLocalPath(localPath, expectedCacheFolder: cacheFolder) {
             return directory
         }
 
@@ -101,15 +101,16 @@ public struct MLXModelCacheManager: Sendable {
         return directory
     }
 
-    private func repoCacheDirectoryFromLocalPath(_ localPath: String, cacheRoot: URL) -> URL? {
+    private func repoCacheDirectoryFromLocalPath(_ localPath: String, expectedCacheFolder: String) -> URL? {
         let localURL = URL(filePath: localPath).standardizedFileURL
         let components = localURL.pathComponents
-        guard let index = components.firstIndex(where: { $0.hasPrefix("models--") }) else {
+        guard let index = components.firstIndex(where: { $0 == expectedCacheFolder }),
+              components[(index + 1)...].contains("snapshots")
+        else {
             return nil
         }
         let prefix = components[0...index].joined(separator: "/")
-        let directory = URL(filePath: prefix).standardizedFileURL
-        return isInsideCacheRoot(directory, root: cacheRoot) ? directory : nil
+        return URL(filePath: prefix).standardizedFileURL
     }
 
     private func cacheFolderName(for modelID: String) throws -> String {

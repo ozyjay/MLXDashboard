@@ -46,7 +46,8 @@ let package = Package(
                 "MLXPythonBridge",
                 "MLXServerControl",
                 "MLXProviderServer"
-            ]
+            ],
+            linkerSettings: [.linkedFramework("LocalAuthentication")]
         ),
         .testTarget(
             name: "MLXCoreTests",

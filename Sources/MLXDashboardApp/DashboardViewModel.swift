@@ -8,7 +8,8 @@ import MLXServerControl
 @MainActor
 final class DashboardViewModel: ObservableObject {
     @Published var settings: DashboardSettings
-    @Published var tokenPreview = ""
+    @Published var tokenPreview = "Hidden"
+    @Published var providerTokenMessage: String?
     @Published var pythonStatus = "Not checked"
     @Published var providerStatus = "Stopped"
     @Published var installedModels: [ModelRecord] = []
@@ -64,7 +65,6 @@ final class DashboardViewModel: ObservableObject {
         self.settings = (try? settingsStore.load()) ?? DashboardSettings()
         try? registry.load()
         self.installedModels = Self.visibleInstalledModels(from: registry.records)
-        self.tokenPreview = (try? tokenStore.token()) ?? ""
     }
 
     var providerBaseURL: String {
@@ -165,13 +165,64 @@ final class DashboardViewModel: ObservableObject {
         }
     }
 
-    func regenerateToken() {
+    func revealProviderToken(authorizer: any BiometricAuthorizing = LocalBiometricAuthorizer()) async {
+        guard await authorizeProviderTokenAccess(
+            authorizer: authorizer,
+            reason: "Authenticate to reveal the MLXDashboard provider token.",
+            cancelledMessage: "Token reveal cancelled."
+        ) else { return }
+
+        do {
+            tokenPreview = try tokenStore.token()
+            providerTokenMessage = "Provider token revealed."
+            telemetry.appendLog("Revealed provider token")
+        } catch {
+            tokenPreview = "Hidden"
+            providerTokenMessage = "Could not reveal provider token: \(error)"
+            telemetry.appendLog("Token reveal failed: \(error)")
+        }
+    }
+
+    func copyProviderToken(
+        authorizer: any BiometricAuthorizing = LocalBiometricAuthorizer(),
+        copier: any ProviderTokenCopying = PasteboardProviderTokenCopier()
+    ) async {
+        guard await authorizeProviderTokenAccess(
+            authorizer: authorizer,
+            reason: "Authenticate to copy the MLXDashboard provider token.",
+            cancelledMessage: "Token copy cancelled."
+        ) else { return }
+
+        do {
+            copier.copy("Bearer \(try tokenStore.token())")
+            providerTokenMessage = "Provider token copied."
+            telemetry.appendLog("Copied provider token")
+        } catch {
+            providerTokenMessage = "Could not copy provider token: \(error)"
+            telemetry.appendLog("Token copy failed: \(error)")
+        }
+    }
+
+    func regenerateProviderToken(authorizer: any BiometricAuthorizing = LocalBiometricAuthorizer()) async {
+        guard await authorizeProviderTokenAccess(
+            authorizer: authorizer,
+            reason: "Authenticate to regenerate the MLXDashboard provider token.",
+            cancelledMessage: "Token regeneration cancelled."
+        ) else { return }
+
         do {
             tokenPreview = try tokenStore.regenerateToken()
+            providerTokenMessage = "Provider token regenerated."
             telemetry.appendLog("Regenerated provider token")
         } catch {
+            tokenPreview = "Hidden"
+            providerTokenMessage = "Could not regenerate provider token: \(error)"
             telemetry.appendLog("Token regeneration failed: \(error)")
         }
+    }
+
+    func providerAuthorizationTokenForTesting() throws -> String {
+        try tokenStore.token()
     }
 
     func scanModelCache() {
@@ -461,6 +512,23 @@ final class DashboardViewModel: ObservableObject {
     private var huggingFaceCacheRoot: URL {
         configuredHuggingFaceCacheRoot ?? FileManager.default.homeDirectoryForCurrentUser
             .appending(path: ".cache/huggingface/hub", directoryHint: .isDirectory)
+    }
+
+    private func authorizeProviderTokenAccess(
+        authorizer: any BiometricAuthorizing,
+        reason: String,
+        cancelledMessage: String
+    ) async -> Bool {
+        switch await authorizer.authorize(reason: reason) {
+        case .authorized:
+            return true
+        case .cancelled:
+            providerTokenMessage = cancelledMessage
+            return false
+        case .failed(let message):
+            providerTokenMessage = "Authentication failed: \(message)"
+            return false
+        }
     }
 
     private func startInstallTask(_ operation: @escaping @MainActor () async -> Void) {

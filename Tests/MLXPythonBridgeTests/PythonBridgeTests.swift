@@ -60,6 +60,25 @@ final class PythonBridgeTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appending(path: "models--mlx-community--Tiny").path))
     }
 
+    func testCacheManagerDeletesRepoCacheFolderFromRecordedSnapshotPathOutsideDefaultRoot() throws {
+        let defaultRoot = try temporaryDirectory()
+        let actualRoot = try temporaryDirectory()
+        let actualRepo = actualRoot.appending(path: "models--mlx-community--Tiny", directoryHint: .isDirectory)
+        let snapshot = actualRepo.appending(path: "snapshots/abc123", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: snapshot.appending(path: "config.json").path, contents: Data())
+
+        let manager = MLXModelCacheManager()
+        let deleted = try manager.deleteModelCache(
+            modelID: "mlx-community/Tiny",
+            localPath: snapshot.path,
+            cacheRoot: defaultRoot
+        )
+
+        XCTAssertEqual(deleted.standardizedFileURL.path, actualRepo.standardizedFileURL.path)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: actualRepo.path))
+    }
+
     func testCacheManagerRejectsUnsafeModelIDWithoutDeletingCacheRoot() throws {
         let root = try temporaryDirectory()
         let keep = root.appending(path: "models--mlx-community--Tiny", directoryHint: .isDirectory)
@@ -140,6 +159,48 @@ final class PythonBridgeTests: XCTestCase {
         XCTAssertEqual(progress.rateText, "13.4MB/s")
     }
 
+    func testHuggingFaceDownloadProgressParsesCommonByteRateUnits() throws {
+        let units = ["B/s", "KB/s", "KiB/s", "MB/s", "MiB/s", "GB/s", "GiB/s"]
+
+        for unit in units {
+            let line = "model.safetensors:  8%|8         | 80M/1.00G [00:02<00:23, 4.0\(unit)]"
+
+            let progress = try XCTUnwrap(HuggingFaceDownloadProgress.parse(from: line))
+
+            XCTAssertEqual(progress.etaText, "23s")
+            XCTAssertEqual(progress.rateText, "4.0\(unit)")
+        }
+    }
+
+    func testHuggingFaceDownloadProgressHandlesCarriageReturnUpdates() throws {
+        let output = "Fetching 14 files:   7%|7         | 1/14 [00:12<00:06, 2.27it/s]\rmodel.safetensors:  42%|####      | 4.20G/10.0G [05:10<07:12, 13.4MiB/s]"
+
+        let progress = try XCTUnwrap(HuggingFaceDownloadProgress.parse(from: output))
+
+        XCTAssertEqual(progress.percentText, "42%")
+        XCTAssertEqual(progress.etaText, "7m 12s")
+        XCTAssertEqual(progress.rateText, "13.4MiB/s")
+    }
+
+    func testHuggingFaceDownloadProgressIgnoresItemCounterETA() throws {
+        let line = "Fetching 14 files:   7%|7         | 1/14 [00:12<00:06, 2.27it/s]"
+
+        XCTAssertNil(HuggingFaceDownloadProgress.parse(from: line))
+    }
+
+    func testHuggingFaceDownloadProgressPrefersByteProgressOverFileCounter() throws {
+        let output = """
+        model.safetensors:  42%|####      | 4.20G/10.0G [05:10<07:12, 13.4MB/s]
+        Fetching 14 files:   7%|7         | 1/14 [00:12<00:06, 2.27it/s]
+        """
+
+        let progress = try XCTUnwrap(HuggingFaceDownloadProgress.parse(from: output))
+
+        XCTAssertEqual(progress.percentText, "42%")
+        XCTAssertEqual(progress.etaText, "7m 12s")
+        XCTAssertEqual(progress.rateText, "13.4MB/s")
+    }
+
     func testHuggingFaceDownloadActivityParsesXetConnectionStrugglingJSON() throws {
         let line = #"{"timestamp":"2026-06-12T14:00:45Z","level":"INFO","fields":{"message":"Concurrency control for download: Decreased concurrency from 1 to 1; reason: success ratio below threshold (connection struggling) (success_ratio = 1.000, threshold = 0.500)"}}"#
 
@@ -215,6 +276,30 @@ final class PythonBridgeTests: XCTestCase {
         ])
     }
 
+    func testHuggingFaceInstallerDoesNotReplaceReliableProgressWithFileCounterOnlyOutput() async throws {
+        let runner = FakeCommandRunner(results: [
+            "install": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/abc"}"#,
+                standardError: """
+                model.safetensors:  42%|####      | 4.20G/10.0G [05:10<07:12, 13.4MB/s]
+                Fetching 14 files:   7%|7         | 1/14 [00:12<00:06, 2.27it/s]
+                """
+            )
+        ])
+        let installer = HuggingFaceModelInstaller(runner: runner)
+        let recorder = DownloadProgressRecorder()
+
+        _ = try await installer.install(
+            modelID: "mlx-community/Tiny",
+            pythonExecutable: URL(filePath: "/tmp/python"),
+            progressHandler: { recorder.append($0) }
+        )
+
+        XCTAssertEqual(recorder.eventCount, 1)
+        XCTAssertEqual(recorder.last?.etaText, "7m 12s")
+    }
+
     func testHuggingFaceInstallerReportsDownloadActivityFromSplitCommandOutputChunks() async throws {
         let runner = SplitOutputCommandRunner(
             chunks: [
@@ -253,7 +338,7 @@ final class PythonBridgeTests: XCTestCase {
         let installer = HuggingFaceModelInstaller(runner: runner)
 
         do {
-            try await installer.install(modelID: "mlx-community/Tiny", pythonExecutable: URL(filePath: "/tmp/python"))
+            _ = try await installer.install(modelID: "mlx-community/Tiny", pythonExecutable: URL(filePath: "/tmp/python"))
             XCTFail("Expected install to fail")
         } catch let error as HuggingFaceError {
             XCTAssertEqual(error, .installFailed("download failed"))
@@ -310,6 +395,12 @@ private final class DownloadProgressRecorder: @unchecked Sendable {
     var last: HuggingFaceDownloadProgress? {
         lock.withLock {
             events.last
+        }
+    }
+
+    var eventCount: Int {
+        lock.withLock {
+            events.count
         }
     }
 
