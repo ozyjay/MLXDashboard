@@ -36,6 +36,7 @@ final class DashboardViewModel: ObservableObject {
     private let authChecker: HuggingFaceAuthChecker
     private let configuredHuggingFaceCacheRoot: URL?
     private var providerServer: NIOProviderServer?
+    private var activeInstallTask: Task<Void, Never>?
 
     init(
         settingsStore: SettingsStore = SettingsStore(),
@@ -59,12 +60,31 @@ final class DashboardViewModel: ObservableObject {
         self.configuredHuggingFaceCacheRoot = huggingFaceCacheRoot
         self.settings = (try? settingsStore.load()) ?? DashboardSettings()
         try? registry.load()
-        self.installedModels = registry.records
+        self.installedModels = Self.visibleInstalledModels(from: registry.records)
         self.tokenPreview = (try? tokenStore.token()) ?? ""
     }
 
     var providerBaseURL: String {
         settings.providerBaseURL.absoluteString
+    }
+
+    var hasRunningDownloads: Bool {
+        isInstallingModel || activeInstallTask != nil
+    }
+
+    var canContinueLastModelInstall: Bool {
+        guard !isInstallingModel,
+              let progress = modelInstallProgress
+        else { return false }
+        return progress.phase.canContinueDownloading
+    }
+
+    var canContinueSelectedInstalledModelInstall: Bool {
+        guard !isInstallingModel,
+              let selectedInstalledModelID,
+              let record = installedModels.first(where: { $0.id == selectedInstalledModelID })
+        else { return false }
+        return record.status == .failed || record.status == .paused || record.status == .installing
     }
 
     func saveSettings() {
@@ -158,7 +178,7 @@ final class DashboardViewModel: ObservableObject {
                 registry.upsert(ModelRecord(id: model.id, status: .installed, localPath: model.localPath))
             }
             try registry.save()
-            installedModels = registry.records
+            installedModels = Self.visibleInstalledModels(from: registry.records)
             telemetry.appendLog("Scanned Hugging Face cache")
         } catch {
             telemetry.appendLog("Cache scan failed: \(error)")
@@ -229,12 +249,16 @@ final class DashboardViewModel: ObservableObject {
         }
     }
 
-    func installModel(_ model: HuggingFaceModelSummary) async {
+    func installModel(_ model: HuggingFaceModelSummary, isContinuation: Bool = false) async {
         isInstallingModel = true
         defer { isInstallingModel = false }
 
         do {
-            updateInstallProgress(.preparing, modelID: model.id, detail: "Preparing to install \(model.id).")
+            if isContinuation {
+                updateInstallProgress(.preparing, modelID: model.id, detail: "Preparing to continue downloading \(model.id).")
+            } else {
+                updateInstallProgress(.preparing, modelID: model.id, detail: "Preparing to install \(model.id).")
+            }
             updateInstallProgress(.checkingPackages, modelID: model.id, detail: "Checking local Python packages before downloading.")
             let status = try await environmentManager.status()
             guard status.isReady else {
@@ -263,23 +287,42 @@ final class DashboardViewModel: ObservableObject {
 
             registry.upsert(ModelRecord(id: model.id, status: .installing, message: "Installing from Hugging Face"))
             try registry.save()
-            installedModels = registry.records
+            installedModels = Self.visibleInstalledModels(from: registry.records)
 
-            updateInstallProgress(.downloading, modelID: model.id, detail: "Downloading \(model.id). Large models can take a while.")
-            let result = try await modelInstaller.install(modelID: model.id, pythonExecutable: status.pythonExecutable)
+            let downloadDetail = isContinuation
+                ? "Continuing download for \(model.id). Existing Hugging Face cache files will be reused when available."
+                : "Downloading \(model.id). Large models can take a while."
+            updateInstallProgress(.downloading, modelID: model.id, detail: downloadDetail)
+            let result = try await modelInstaller.install(
+                modelID: model.id,
+                pythonExecutable: status.pythonExecutable,
+                progressHandler: { [weak self] progress in
+                    Task { @MainActor [weak self] in
+                        self?.updateInstallProgress(
+                            .downloading,
+                            modelID: model.id,
+                            detail: downloadDetail,
+                            downloadProgress: progress
+                        )
+                    }
+                }
+            )
+            try Task.checkCancellation()
             updateInstallProgress(.finalizing, modelID: model.id, detail: "Finalizing cache record for \(model.id).")
             registry.upsert(ModelRecord(id: model.id, status: .installed, localPath: result.localPath, message: "Installed"))
             try registry.save()
-            installedModels = registry.records
+            installedModels = Self.visibleInstalledModels(from: registry.records)
             scanModelCache()
             updateInstallProgress(.installed, modelID: model.id, detail: "Installed \(model.id) at \(result.localPath)")
             telemetry.appendLog("Installed \(model.id)")
+        } catch is CancellationError {
+            markModelDownloadPaused(modelID: model.id)
         } catch {
             let message = friendlyInstallMessage(for: error)
             updateInstallProgress(.failed, modelID: model.id, detail: "Install failed for \(model.id): \(message)")
             registry.upsert(ModelRecord(id: model.id, status: .failed, message: message))
             try? registry.save()
-            installedModels = registry.records
+            installedModels = Self.visibleInstalledModels(from: registry.records)
             telemetry.appendLog("Install failed for \(model.id): \(error)")
         }
     }
@@ -293,6 +336,62 @@ final class DashboardViewModel: ObservableObject {
             return
         }
         await installModel(model)
+    }
+
+    func startSelectedModelInstall() {
+        startInstallTask {
+            await self.installSelectedModel()
+        }
+    }
+
+    func continueLastModelInstall() async {
+        guard canContinueLastModelInstall,
+              let modelID = modelInstallProgress?.modelID
+        else {
+            modelInstallMessage = "No failed model download is available to continue."
+            return
+        }
+        await installModel(HuggingFaceModelSummary(id: modelID), isContinuation: true)
+    }
+
+    func startContinueLastModelInstall() {
+        startInstallTask {
+            await self.continueLastModelInstall()
+        }
+    }
+
+    func continueSelectedInstalledModelInstall() async {
+        guard canContinueSelectedInstalledModelInstall,
+              let modelID = selectedInstalledModelID
+        else {
+            modelInstallProgress = nil
+            modelInstallMessage = "Select a failed or incomplete model before continuing."
+            return
+        }
+        await installModel(HuggingFaceModelSummary(id: modelID), isContinuation: true)
+    }
+
+    func startContinueSelectedInstalledModelInstall() {
+        startInstallTask {
+            await self.continueSelectedInstalledModelInstall()
+        }
+    }
+
+    func pauseActiveModelInstall() {
+        guard let activeInstallTask,
+              let modelID = modelInstallProgress?.modelID
+        else {
+            modelInstallMessage = "No active model download is running."
+            return
+        }
+
+        activeInstallTask.cancel()
+        markModelDownloadPaused(modelID: modelID)
+    }
+
+    func notifyCloseBlockedForRunningDownloads() {
+        modelInstallMessage = "A model download is still running. Pause it before closing MLXDashboard."
+        telemetry.appendLog("Close prevented while a model download is running")
     }
 
     func setSelectedInstalledModelActive() {
@@ -328,7 +427,8 @@ final class DashboardViewModel: ObservableObject {
             )
             registry.markRemoved(id: record.id)
             try registry.save()
-            installedModels = registry.records
+            installedModels = Self.visibleInstalledModels(from: registry.records)
+            self.selectedInstalledModelID = nil
             if settings.activeModel == record.id {
                 settings.activeModel = nil
                 saveSettings()
@@ -347,9 +447,44 @@ final class DashboardViewModel: ObservableObject {
             .appending(path: ".cache/huggingface/hub", directoryHint: .isDirectory)
     }
 
-    private func updateInstallProgress(_ phase: ModelInstallPhase, modelID: String, detail: String) {
-        modelInstallProgress = ModelInstallProgress(modelID: modelID, phase: phase, detail: detail)
+    private func startInstallTask(_ operation: @escaping @MainActor () async -> Void) {
+        guard activeInstallTask == nil else {
+            modelInstallMessage = "A model download is already running."
+            return
+        }
+
+        activeInstallTask = Task { @MainActor [weak self] in
+            await operation()
+            self?.activeInstallTask = nil
+        }
+    }
+
+    private func updateInstallProgress(
+        _ phase: ModelInstallPhase,
+        modelID: String,
+        detail: String,
+        downloadProgress: HuggingFaceDownloadProgress? = nil
+    ) {
+        modelInstallProgress = ModelInstallProgress(
+            modelID: modelID,
+            phase: phase,
+            detail: detail,
+            downloadProgress: downloadProgress
+        )
         modelInstallMessage = detail
+    }
+
+    private func markModelDownloadPaused(modelID: String) {
+        let detail = "Paused download for \(modelID). Use Continue Downloading to resume with cached files."
+        updateInstallProgress(.paused, modelID: modelID, detail: detail)
+        registry.upsert(ModelRecord(id: modelID, status: .paused, message: "Paused; continue downloading to resume"))
+        try? registry.save()
+        installedModels = Self.visibleInstalledModels(from: registry.records)
+        telemetry.appendLog("Paused download for \(modelID)")
+    }
+
+    private static func visibleInstalledModels(from records: [ModelRecord]) -> [ModelRecord] {
+        records.filter { $0.status != .removed }
     }
 
     private func friendlyInstallMessage(for error: Error) -> String {

@@ -3,6 +3,7 @@ import Foundation
 public enum ModelStatus: String, Codable, Equatable, Sendable {
     case installing
     case installed
+    case paused
     case failed
     case removed
 }

@@ -1,4 +1,5 @@
 import Foundation
+import MLXPythonBridge
 
 enum ModelInstallPhase: String, Equatable {
     case preparing
@@ -7,6 +8,7 @@ enum ModelInstallPhase: String, Equatable {
     case downloading
     case finalizing
     case installed
+    case paused
     case blocked
     case failed
 
@@ -24,6 +26,8 @@ enum ModelInstallPhase: String, Equatable {
             return "Finalizing"
         case .installed:
             return "Installed"
+        case .paused:
+            return "Paused"
         case .blocked:
             return "Needs setup"
         case .failed:
@@ -43,6 +47,8 @@ enum ModelInstallPhase: String, Equatable {
             return "Step 4 of 5"
         case .finalizing, .installed:
             return "Step 5 of 5"
+        case .paused:
+            return "Paused"
         case .blocked:
             return "Paused"
         case .failed:
@@ -62,8 +68,17 @@ enum ModelInstallPhase: String, Equatable {
             return 0.68
         case .finalizing:
             return 0.90
-        case .installed, .blocked, .failed:
+        case .installed, .paused, .blocked, .failed:
             return 1.0
+        }
+    }
+
+    var canContinueDownloading: Bool {
+        switch self {
+        case .paused, .failed:
+            return true
+        case .preparing, .checkingPackages, .checkingLogin, .downloading, .finalizing, .installed, .blocked:
+            return false
         }
     }
 }
@@ -72,6 +87,7 @@ struct ModelInstallProgress: Equatable {
     var modelID: String
     var phase: ModelInstallPhase
     var detail: String
+    var downloadProgress: HuggingFaceDownloadProgress? = nil
 
     var title: String {
         phase.title
@@ -82,6 +98,21 @@ struct ModelInstallProgress: Equatable {
     }
 
     var fractionCompleted: Double {
-        phase.fractionCompleted
+        if phase == .downloading, let downloadProgress {
+            return downloadProgress.fractionCompleted
+        }
+        return phase.fractionCompleted
+    }
+
+    var downloadStatusText: String? {
+        guard phase == .downloading, let downloadProgress else { return nil }
+        var parts = [downloadProgress.percentText]
+        if let etaText = downloadProgress.etaText {
+            parts.append("ETA \(etaText)")
+        }
+        if let rateText = downloadProgress.rateText {
+            parts.append(rateText)
+        }
+        return parts.joined(separator: " • ")
     }
 }

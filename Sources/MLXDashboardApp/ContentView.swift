@@ -48,6 +48,7 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 980, minHeight: 680)
+        .background(WindowCloseGuardView())
     }
 
     @ViewBuilder
@@ -216,7 +217,7 @@ private struct DiscoverModelsView: View {
 
             HStack(spacing: 10) {
                 Button("Install Selected") {
-                    Task { await viewModel.installSelectedModel() }
+                    viewModel.startSelectedModelInstall()
                 }
                 .disabled(!ModelDiscoveryPolicy.canInstallSelected(
                     hasSelection: viewModel.selectedSearchModelID != nil,
@@ -225,6 +226,14 @@ private struct DiscoverModelsView: View {
                 if viewModel.isInstallingModel {
                     ProgressView()
                         .controlSize(.small)
+                    Button("Pause Download") {
+                        viewModel.pauseActiveModelInstall()
+                    }
+                }
+                if viewModel.canContinueLastModelInstall {
+                    Button("Continue Downloading") {
+                        viewModel.startContinueLastModelInstall()
+                    }
                 }
                 Spacer()
             }
@@ -247,7 +256,7 @@ private struct DiscoverModelsView: View {
                     } else {
                         Button("Install") {
                             viewModel.selectedSearchModelID = model.id
-                            Task { await viewModel.installSelectedModel() }
+                            viewModel.startSelectedModelInstall()
                         }
                         .disabled(viewModel.isInstallingModel)
                     }
@@ -271,6 +280,15 @@ private struct InstalledModelsView: View {
                 Text("Installed Models").font(.title3.bold())
                 Spacer()
                 Button("Scan Cache") { viewModel.scanModelCache() }
+                if viewModel.hasRunningDownloads {
+                    Button("Pause Download") {
+                        viewModel.pauseActiveModelInstall()
+                    }
+                }
+                Button("Continue Downloading") {
+                    viewModel.startContinueSelectedInstalledModelInstall()
+                }
+                .disabled(!viewModel.canContinueSelectedInstalledModelInstall)
                 Button("Set Active") { viewModel.setSelectedInstalledModelActive() }
                     .disabled(viewModel.selectedInstalledModelID == nil)
                 Button("Delete from Cache", role: .destructive) {
@@ -312,6 +330,47 @@ private struct InstalledModelsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This removes all cached snapshots for the selected Hugging Face model.")
+        }
+    }
+}
+
+private struct WindowCloseGuardView: NSViewRepresentable {
+    @EnvironmentObject private var viewModel: DashboardViewModel
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        context.coordinator.viewModel = viewModel
+        DispatchQueue.main.async {
+            view.window?.delegate = context.coordinator
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.viewModel = viewModel
+        DispatchQueue.main.async {
+            nsView.window?.delegate = context.coordinator
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSWindowDelegate {
+        weak var viewModel: DashboardViewModel?
+
+        func windowShouldClose(_ sender: NSWindow) -> Bool {
+            guard let viewModel,
+                  !DashboardClosePolicy.canClose(hasRunningDownloads: viewModel.hasRunningDownloads)
+            else {
+                return true
+            }
+
+            viewModel.notifyCloseBlockedForRunningDownloads()
+            AppForegrounder().bringToFront()
+            return false
         }
     }
 }
@@ -361,6 +420,11 @@ private struct InstallProgressBanner: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer()
+                if let downloadStatusText = progress.downloadStatusText {
+                    Text(downloadStatusText)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
             }
             ProgressView(value: progress.fractionCompleted)
                 .tint(tintColor)

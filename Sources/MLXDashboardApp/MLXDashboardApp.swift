@@ -14,6 +14,9 @@ struct MLXDashboardApp: App {
             ContentView()
                 .environmentObject(viewModel)
                 .frame(minWidth: 980, minHeight: 680)
+                .onAppear {
+                    appDelegate.closeState = viewModel
+                }
         }
         .commands {
             CommandGroup(after: .appInfo) {

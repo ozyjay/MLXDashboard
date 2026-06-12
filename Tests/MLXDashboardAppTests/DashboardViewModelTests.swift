@@ -255,6 +255,23 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.modelInstallProgress?.stepText, "Step 5 of 5")
     }
 
+    func testDownloadProgressUsesTransferPercentETAAndRate() {
+        let progress = ModelInstallProgress(
+            modelID: "mlx-community/Tiny",
+            phase: .downloading,
+            detail: "Downloading mlx-community/Tiny.",
+            downloadProgress: HuggingFaceDownloadProgress(
+                fractionCompleted: 0.42,
+                percentText: "42%",
+                etaText: "7m 12s",
+                rateText: "13.4MB/s"
+            )
+        )
+
+        XCTAssertEqual(progress.fractionCompleted, 0.42, accuracy: 0.001)
+        XCTAssertEqual(progress.downloadStatusText, "42% • ETA 7m 12s • 13.4MB/s")
+    }
+
     func testInstallSelectedModelFinishesWithFailedProgress() async throws {
         let paths = try temporaryAppPaths()
         let python = paths.venvDirectory.appending(path: "bin/python")
@@ -287,6 +304,125 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.modelInstallProgress?.phase, .failed)
         XCTAssertEqual(viewModel.modelInstallProgress?.fractionCompleted, 1.0)
         XCTAssertTrue(viewModel.modelInstallProgress?.detail.contains("download failed") == true)
+    }
+
+    func testContinueLastModelInstallRetriesFailedModelID() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(
+            at: python.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = FakeCommandRunner(results: [
+            "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "whoami": CommandResult(exitCode: 0, standardOutput: #"{"name":"octocat"}"#, standardError: ""),
+            "install": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/resumed"}"#,
+                standardError: ""
+            )
+        ])
+        let registry = ModelRegistry(fileURL: paths.modelRegistryFile)
+        registry.upsert(ModelRecord(id: "mlx-community/Tiny", status: .failed, message: "network interrupted"))
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            tokenStore: StubTokenStore(),
+            registry: registry,
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelInstaller: HuggingFaceModelInstaller(runner: runner),
+            authChecker: HuggingFaceAuthChecker(runner: runner)
+        )
+        viewModel.modelInstallProgress = ModelInstallProgress(
+            modelID: "mlx-community/Tiny",
+            phase: .failed,
+            detail: "Install failed for mlx-community/Tiny: network interrupted"
+        )
+
+        await viewModel.continueLastModelInstall()
+
+        let installCommands = runner.commands.filter { ($0.arguments.last ?? "").contains("snapshot_download") }
+        XCTAssertEqual(installCommands.count, 1)
+        XCTAssertEqual(registry.record(id: "mlx-community/Tiny")?.status, .installed)
+        XCTAssertEqual(viewModel.modelInstallProgress?.phase, .installed)
+        XCTAssertEqual(viewModel.modelInstallMessage, "Installed mlx-community/Tiny at /tmp/cache/models--mlx-community--Tiny/snapshots/resumed")
+    }
+
+    func testContinueSelectedInstalledModelRetriesFailedRecord() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(
+            at: python.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = FakeCommandRunner(results: [
+            "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "whoami": CommandResult(exitCode: 0, standardOutput: #"{"name":"octocat"}"#, standardError: ""),
+            "install": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/resumed"}"#,
+                standardError: ""
+            )
+        ])
+        let registry = ModelRegistry(fileURL: paths.modelRegistryFile)
+        registry.upsert(ModelRecord(id: "mlx-community/Tiny", status: .failed, message: "network interrupted"))
+        try registry.save()
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            tokenStore: StubTokenStore(),
+            registry: registry,
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelInstaller: HuggingFaceModelInstaller(runner: runner),
+            authChecker: HuggingFaceAuthChecker(runner: runner)
+        )
+        viewModel.selectedInstalledModelID = "mlx-community/Tiny"
+
+        await viewModel.continueSelectedInstalledModelInstall()
+
+        XCTAssertEqual(registry.record(id: "mlx-community/Tiny")?.status, .installed)
+        XCTAssertEqual(viewModel.modelInstallProgress?.phase, .installed)
+    }
+
+    func testPauseActiveModelInstallMarksDownloadPausedAndAllowsContinue() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(
+            at: python.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = PausingCommandRunner()
+        let registry = ModelRegistry(fileURL: paths.modelRegistryFile)
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            tokenStore: StubTokenStore(),
+            registry: registry,
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelInstaller: HuggingFaceModelInstaller(runner: runner),
+            authChecker: HuggingFaceAuthChecker(runner: runner)
+        )
+        viewModel.searchResults = [HuggingFaceModelSummary(id: "mlx-community/Tiny")]
+        viewModel.selectedSearchModelID = "mlx-community/Tiny"
+
+        viewModel.startSelectedModelInstall()
+        await runner.waitForInstallStart()
+
+        XCTAssertTrue(viewModel.hasRunningDownloads)
+
+        viewModel.pauseActiveModelInstall()
+        await runner.waitForInstallCancellation()
+
+        XCTAssertFalse(viewModel.hasRunningDownloads)
+        XCTAssertTrue(runner.wasInstallCancelled)
+        XCTAssertEqual(viewModel.modelInstallProgress?.phase, .paused)
+        XCTAssertEqual(registry.record(id: "mlx-community/Tiny")?.status, .paused)
+        XCTAssertTrue(viewModel.canContinueLastModelInstall)
     }
 
     func testSetSelectedInstalledModelActiveSavesSettings() throws {
@@ -331,6 +467,7 @@ final class DashboardViewModelTests: XCTestCase {
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: cacheRoot.appending(path: "models--mlx-community--Tiny").path))
         XCTAssertEqual(registry.record(id: "mlx-community/Tiny")?.status, .removed)
+        XCTAssertFalse(viewModel.installedModels.contains(where: { $0.id == "mlx-community/Tiny" }))
         XCTAssertEqual(viewModel.modelInstallMessage, "Deleted cache for mlx-community/Tiny.")
     }
 
@@ -401,6 +538,60 @@ private final class FakeCommandRunner: CommandRunning, @unchecked Sendable {
             key = script
         }
         return results[key] ?? CommandResult(exitCode: 127, standardOutput: "", standardError: "unexpected command \(key)")
+    }
+}
+
+private final class PausingCommandRunner: CommandRunning, @unchecked Sendable {
+    private let lock = NSLock()
+    private var installStarted = false
+    private var installCancelled = false
+
+    var wasInstallCancelled: Bool {
+        lock.withLock { installCancelled }
+    }
+
+    func run(_ command: Command) async throws -> CommandResult {
+        let script = command.arguments.last ?? ""
+        if script.contains("snapshot_download") {
+            lock.withLock {
+                installStarted = true
+            }
+            do {
+                try await Task.sleep(nanoseconds: 5_000_000_000)
+                return CommandResult(
+                    exitCode: 0,
+                    standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/abc"}"#,
+                    standardError: ""
+                )
+            } catch {
+                lock.withLock {
+                    installCancelled = true
+                }
+                throw CancellationError()
+            }
+        }
+        if script.contains("whoami") {
+            return CommandResult(exitCode: 0, standardOutput: #"{"name":"octocat"}"#, standardError: "")
+        }
+        if script.contains("import mlx_lm") || script.contains("import huggingface_hub") {
+            return CommandResult(exitCode: 0, standardOutput: "", standardError: "")
+        }
+        return CommandResult(exitCode: 127, standardOutput: "", standardError: "unexpected command")
+    }
+
+    func waitForInstallStart() async {
+        await waitUntil { self.lock.withLock { self.installStarted } }
+    }
+
+    func waitForInstallCancellation() async {
+        await waitUntil { self.lock.withLock { self.installCancelled } }
+    }
+
+    private func waitUntil(_ condition: @escaping () -> Bool) async {
+        for _ in 0..<200 {
+            if condition() { return }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
     }
 }
 

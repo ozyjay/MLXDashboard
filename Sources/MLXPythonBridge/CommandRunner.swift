@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public struct Command: Sendable, Equatable {
@@ -31,36 +32,155 @@ public struct CommandResult: Sendable, Equatable {
     }
 }
 
+public typealias CommandOutputHandler = @Sendable (String) -> Void
+
 public protocol CommandRunning: Sendable {
     func run(_ command: Command) async throws -> CommandResult
+    func run(_ command: Command, outputHandler: CommandOutputHandler?) async throws -> CommandResult
+}
+
+public extension CommandRunning {
+    func run(_ command: Command, outputHandler: CommandOutputHandler?) async throws -> CommandResult {
+        let result = try await run(command)
+        if let outputHandler {
+            if !result.standardOutput.isEmpty {
+                outputHandler(result.standardOutput)
+            }
+            if !result.standardError.isEmpty {
+                outputHandler(result.standardError)
+            }
+        }
+        return result
+    }
 }
 
 public struct ShellCommandRunner: CommandRunning {
     public init() {}
 
     public func run(_ command: Command) async throws -> CommandResult {
-        try await Task.detached(priority: .utility) {
-            let process = Process()
-            process.executableURL = command.executableURL
-            process.arguments = command.arguments
-            if !command.environment.isEmpty {
-                process.environment = ProcessInfo.processInfo.environment.merging(command.environment) { _, new in new }
+        try await run(command, outputHandler: nil)
+    }
+
+    public func run(_ command: Command, outputHandler: CommandOutputHandler?) async throws -> CommandResult {
+        let processBox = RunningProcessBox()
+        return try await withTaskCancellationHandler {
+            let result = try await Task.detached(priority: .utility) {
+                let process = Process()
+                processBox.set(process)
+                defer { processBox.clear(process) }
+
+                process.executableURL = command.executableURL
+                process.arguments = command.arguments
+                if !command.environment.isEmpty {
+                    process.environment = ProcessInfo.processInfo.environment.merging(command.environment) { _, new in new }
+                }
+                if let workingDirectory = command.workingDirectory {
+                    process.currentDirectoryURL = workingDirectory
+                }
+
+                let stdout = Pipe()
+                let stderr = Pipe()
+                process.standardOutput = stdout
+                process.standardError = stderr
+                let outputBuffer = CommandOutputBuffer()
+                stdout.fileHandleForReading.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    guard !data.isEmpty else { return }
+                    outputBuffer.appendStandardOutput(data)
+                    if let chunk = String(data: data, encoding: .utf8) {
+                        outputHandler?(chunk)
+                    }
+                }
+                stderr.fileHandleForReading.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    guard !data.isEmpty else { return }
+                    outputBuffer.appendStandardError(data)
+                    if let chunk = String(data: data, encoding: .utf8) {
+                        outputHandler?(chunk)
+                    }
+                }
+
+                try process.run()
+                process.waitUntilExit()
+                stdout.fileHandleForReading.readabilityHandler = nil
+                stderr.fileHandleForReading.readabilityHandler = nil
+
+                let output = outputBuffer.standardOutputString
+                let error = outputBuffer.standardErrorString
+                return CommandResult(exitCode: process.terminationStatus, standardOutput: output, standardError: error)
+            }.value
+            try Task.checkCancellation()
+            return result
+        } onCancel: {
+            processBox.terminate()
+        }
+    }
+}
+
+private final class CommandOutputBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var standardOutput = Data()
+    private var standardError = Data()
+
+    var standardOutputString: String {
+        lock.withLock {
+            String(data: standardOutput, encoding: .utf8) ?? ""
+        }
+    }
+
+    var standardErrorString: String {
+        lock.withLock {
+            String(data: standardError, encoding: .utf8) ?? ""
+        }
+    }
+
+    func appendStandardOutput(_ data: Data) {
+        lock.withLock {
+            standardOutput.append(data)
+        }
+    }
+
+    func appendStandardError(_ data: Data) {
+        lock.withLock {
+            standardError.append(data)
+        }
+    }
+}
+
+private final class RunningProcessBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+
+    func set(_ process: Process) {
+        lock.withLock {
+            self.process = process
+        }
+    }
+
+    func clear(_ process: Process) {
+        lock.withLock {
+            if self.process === process {
+                self.process = nil
             }
-            if let workingDirectory = command.workingDirectory {
-                process.currentDirectoryURL = workingDirectory
+        }
+    }
+
+    func terminate() {
+        let target = lock.withLock {
+            process
+        }
+        guard let target else { return }
+        if target.isRunning {
+            target.terminate()
+        }
+        let processIdentifier = target.processIdentifier
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) { [weak self] in
+            let shouldForceKill = self?.lock.withLock {
+                self?.process === target && target.isRunning
+            } ?? false
+            if shouldForceKill {
+                kill(processIdentifier, SIGKILL)
             }
-
-            let stdout = Pipe()
-            let stderr = Pipe()
-            process.standardOutput = stdout
-            process.standardError = stderr
-
-            try process.run()
-            process.waitUntilExit()
-
-            let output = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            let error = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            return CommandResult(exitCode: process.terminationStatus, standardOutput: output, standardError: error)
-        }.value
+        }
     }
 }

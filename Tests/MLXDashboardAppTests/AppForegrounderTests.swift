@@ -13,6 +13,11 @@ final class AppForegrounderTests: XCTestCase {
         XCTAssertEqual(application.activationPolicies, [.regular])
         XCTAssertEqual(application.activateIgnoringOtherApps, [true])
     }
+
+    func testDashboardClosePolicyBlocksCloseWhileDownloadsRun() {
+        XCTAssertFalse(DashboardClosePolicy.canClose(hasRunningDownloads: true))
+        XCTAssertTrue(DashboardClosePolicy.canClose(hasRunningDownloads: false))
+    }
 }
 
 @MainActor

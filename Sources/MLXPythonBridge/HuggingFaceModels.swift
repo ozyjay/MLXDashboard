@@ -99,6 +99,118 @@ public struct HuggingFaceInstallResult: Sendable, Equatable, Codable {
     }
 }
 
+public struct HuggingFaceDownloadProgress: Sendable, Equatable {
+    public var fractionCompleted: Double
+    public var percentText: String
+    public var etaText: String?
+    public var rateText: String?
+
+    public init(fractionCompleted: Double, percentText: String, etaText: String? = nil, rateText: String? = nil) {
+        self.fractionCompleted = fractionCompleted
+        self.percentText = percentText
+        self.etaText = etaText
+        self.rateText = rateText
+    }
+
+    public static func parse(from output: String) -> HuggingFaceDownloadProgress? {
+        for line in output.split(whereSeparator: \.isNewline).reversed() {
+            if let progress = parseLine(String(line)) {
+                return progress
+            }
+        }
+        return parseLine(output)
+    }
+
+    private static func parseLine(_ line: String) -> HuggingFaceDownloadProgress? {
+        guard let percentMatch = line.range(
+            of: #"(\d+(?:\.\d+)?)%"#,
+            options: .regularExpression
+        ) else { return nil }
+
+        let percentString = String(line[percentMatch].dropLast())
+        guard let percentValue = Double(percentString) else { return nil }
+        let fraction = min(max(percentValue / 100, 0), 1)
+        let percentText = formattedPercent(percentValue)
+        let bracketText = bracketContent(in: line)
+        return HuggingFaceDownloadProgress(
+            fractionCompleted: fraction,
+            percentText: percentText,
+            etaText: etaText(from: bracketText),
+            rateText: rateText(from: bracketText)
+        )
+    }
+
+    private static func formattedPercent(_ value: Double) -> String {
+        if value.rounded() == value {
+            return "\(Int(value))%"
+        }
+        return String(format: "%.1f%%", value)
+    }
+
+    private static func bracketContent(in line: String) -> String? {
+        guard let start = line.lastIndex(of: "["),
+              let end = line.lastIndex(of: "]"),
+              start < end
+        else { return nil }
+        return String(line[line.index(after: start)..<end])
+    }
+
+    private static func etaText(from bracketText: String?) -> String? {
+        guard let bracketText,
+              let etaStart = bracketText.firstIndex(of: "<")
+        else { return nil }
+        let remainder = bracketText[bracketText.index(after: etaStart)...]
+        let rawETA = remainder.split(separator: ",", maxSplits: 1).first.map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let rawETA, !rawETA.isEmpty, rawETA != "?" else { return nil }
+        return formattedDuration(rawETA)
+    }
+
+    private static func rateText(from bracketText: String?) -> String? {
+        guard let bracketText else { return nil }
+        let parts = bracketText.split(separator: ",", maxSplits: 1)
+        guard parts.count == 2 else { return nil }
+        let rate = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+        return rate.isEmpty ? nil : rate
+    }
+
+    private static func formattedDuration(_ raw: String) -> String {
+        let parts = raw.split(separator: ":").compactMap { Int($0) }
+        guard parts.count == raw.split(separator: ":").count else { return raw }
+        let hours: Int
+        let minutes: Int
+        let seconds: Int
+        switch parts.count {
+        case 3:
+            hours = parts[0]
+            minutes = parts[1]
+            seconds = parts[2]
+        case 2:
+            hours = 0
+            minutes = parts[0]
+            seconds = parts[1]
+        case 1:
+            hours = 0
+            minutes = 0
+            seconds = parts[0]
+        default:
+            return raw
+        }
+
+        var components: [String] = []
+        if hours > 0 {
+            components.append("\(hours)h")
+        }
+        if minutes > 0 {
+            components.append("\(minutes)m")
+        }
+        if seconds > 0 || components.isEmpty {
+            components.append("\(seconds)s")
+        }
+        return components.joined(separator: " ")
+    }
+}
+
 public struct HuggingFaceModelInstaller: Sendable {
     private let runner: any CommandRunning
 
@@ -106,14 +218,21 @@ public struct HuggingFaceModelInstaller: Sendable {
         self.runner = runner
     }
 
-    public func install(modelID: String, pythonExecutable: URL) async throws -> HuggingFaceInstallResult {
+    public func install(
+        modelID: String,
+        pythonExecutable: URL,
+        progressHandler: (@Sendable (HuggingFaceDownloadProgress) -> Void)? = nil
+    ) async throws -> HuggingFaceInstallResult {
         let script = """
         import json
         from huggingface_hub import snapshot_download
         path = snapshot_download(repo_id='\(modelID.replacingOccurrences(of: "'", with: "\\'"))')
         print(json.dumps({'local_path': path}))
         """
-        let result = try await runner.run(Command(executableURL: pythonExecutable, arguments: ["-c", script]))
+        let result = try await runner.run(Command(executableURL: pythonExecutable, arguments: ["-c", script])) { output in
+            guard let progress = HuggingFaceDownloadProgress.parse(from: output) else { return }
+            progressHandler?(progress)
+        }
         guard result.exitCode == 0 else {
             throw HuggingFaceError.installFailed(result.standardError)
         }

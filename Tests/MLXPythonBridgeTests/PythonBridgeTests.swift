@@ -129,6 +129,38 @@ final class PythonBridgeTests: XCTestCase {
         XCTAssertEqual(result.localPath, "/tmp/cache/models--mlx-community--Tiny/snapshots/abc")
     }
 
+    func testHuggingFaceDownloadProgressParsesTqdmETA() throws {
+        let line = "model.safetensors:  42%|####      | 4.20G/10.0G [05:10<07:12, 13.4MB/s]"
+
+        let progress = try XCTUnwrap(HuggingFaceDownloadProgress.parse(from: line))
+
+        XCTAssertEqual(progress.fractionCompleted, 0.42, accuracy: 0.001)
+        XCTAssertEqual(progress.percentText, "42%")
+        XCTAssertEqual(progress.etaText, "7m 12s")
+        XCTAssertEqual(progress.rateText, "13.4MB/s")
+    }
+
+    func testHuggingFaceInstallerReportsDownloadProgressFromCommandOutput() async throws {
+        let runner = FakeCommandRunner(results: [
+            "install": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/abc"}"#,
+                standardError: "model.safetensors:  42%|####      | 4.20G/10.0G [05:10<07:12, 13.4MB/s]"
+            )
+        ])
+        let installer = HuggingFaceModelInstaller(runner: runner)
+        let recorder = DownloadProgressRecorder()
+
+        _ = try await installer.install(
+            modelID: "mlx-community/Tiny",
+            pythonExecutable: URL(filePath: "/tmp/python"),
+            progressHandler: { recorder.append($0) }
+        )
+
+        XCTAssertEqual(recorder.last?.etaText, "7m 12s")
+        XCTAssertEqual(recorder.last?.fractionCompleted ?? 0, 0.42, accuracy: 0.001)
+    }
+
     func testHuggingFaceInstallerReportsInstallFailure() async throws {
         let runner = FakeCommandRunner(results: [
             "install": CommandResult(exitCode: 1, standardOutput: "", standardError: "download failed")
@@ -167,5 +199,22 @@ private struct FakeCommandRunner: CommandRunning {
             key = script
         }
         return results[key] ?? CommandResult(exitCode: 127, standardOutput: "", standardError: "unexpected command \(key)")
+    }
+}
+
+private final class DownloadProgressRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [HuggingFaceDownloadProgress] = []
+
+    var last: HuggingFaceDownloadProgress? {
+        lock.withLock {
+            events.last
+        }
+    }
+
+    func append(_ progress: HuggingFaceDownloadProgress) {
+        lock.withLock {
+            events.append(progress)
+        }
     }
 }
