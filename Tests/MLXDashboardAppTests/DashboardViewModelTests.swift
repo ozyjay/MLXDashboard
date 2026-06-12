@@ -425,6 +425,51 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertTrue(viewModel.canContinueLastModelInstall)
     }
 
+    func testDownloadCacheSamplerReportsSizeAndIncompleteBlobs() throws {
+        let root = try temporaryDirectory()
+        let repo = root.appending(path: "models--mlx-community--Tiny", directoryHint: .isDirectory)
+        let blobs = repo.appending(path: "blobs", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: blobs, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: blobs.appending(path: "complete").path, contents: Data(repeating: 1, count: 4))
+        FileManager.default.createFile(atPath: blobs.appending(path: "weights.safetensors.incomplete").path, contents: Data())
+
+        let summary = try DownloadCacheSampler().summary(modelID: "mlx-community/Tiny", cacheRoot: root)
+
+        XCTAssertEqual(summary.incompleteBlobCount, 1)
+        XCTAssertEqual(summary.pendingFileNames, ["weights.safetensors.incomplete"])
+        XCTAssertGreaterThanOrEqual(summary.totalBytes, 4)
+    }
+
+    func testDownloadCacheSummaryFormatsQuietStatus() {
+        let summary = DownloadCacheSummary(
+            totalBytes: 33 * 1024 * 1024,
+            incompleteBlobCount: 3,
+            pendingFileNames: ["a.incomplete", "b.incomplete", "c.incomplete"],
+            secondsSinceGrowth: 45
+        )
+
+        XCTAssertEqual(summary.statusText, "Cache 33 MB • 3 incomplete blobs • no growth for 45s")
+    }
+
+    func testXetLogActivityReaderClassifiesConnectionStrugglingMessages() throws {
+        let root = try temporaryDirectory()
+        let logs = root.appending(path: "xet/logs", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        let log = logs.appending(path: "xet_20260612.log")
+        try #"{"fields":{"message":"Concurrency control for download: Decreased concurrency from 2 to 1; reason: success ratio below threshold (connection struggling)"}}"#
+            .write(to: log, atomically: true, encoding: .utf8)
+
+        let activities = try XetLogActivityReader().activities(logRoot: logs)
+
+        XCTAssertEqual(activities, [
+            HuggingFaceDownloadActivity(
+                message: "Xet transfer: connection struggling, concurrency reduced",
+                tone: .warning,
+                source: .xetLog
+            )
+        ])
+    }
+
     func testSetSelectedInstalledModelActiveSavesSettings() throws {
         let paths = try temporaryAppPaths()
         let viewModel = DashboardViewModel(
