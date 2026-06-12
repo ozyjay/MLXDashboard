@@ -140,6 +140,34 @@ final class PythonBridgeTests: XCTestCase {
         XCTAssertEqual(progress.rateText, "13.4MB/s")
     }
 
+    func testHuggingFaceDownloadActivityParsesXetConnectionStrugglingJSON() throws {
+        let line = #"{"timestamp":"2026-06-12T14:00:45Z","level":"INFO","fields":{"message":"Concurrency control for download: Decreased concurrency from 1 to 1; reason: success ratio below threshold (connection struggling) (success_ratio = 1.000, threshold = 0.500)"}}"#
+
+        let activities = HuggingFaceDownloadActivity.parse(from: line)
+
+        XCTAssertEqual(activities, [
+            HuggingFaceDownloadActivity(
+                message: "Xet transfer: connection struggling, concurrency reduced",
+                tone: .warning,
+                source: .xetLog
+            )
+        ])
+    }
+
+    func testHuggingFaceDownloadActivityParsesSnapshotStartMarker() throws {
+        let output = "MLXDashboard: Started Hugging Face snapshot download for mlx-community/Tiny\n"
+
+        let activities = HuggingFaceDownloadActivity.parse(from: output)
+
+        XCTAssertEqual(activities, [
+            HuggingFaceDownloadActivity(
+                message: "Started Hugging Face snapshot download for mlx-community/Tiny",
+                tone: .info,
+                source: .commandOutput
+            )
+        ])
+    }
+
     func testHuggingFaceInstallerReportsDownloadProgressFromCommandOutput() async throws {
         let runner = FakeCommandRunner(results: [
             "install": CommandResult(
@@ -159,6 +187,32 @@ final class PythonBridgeTests: XCTestCase {
 
         XCTAssertEqual(recorder.last?.etaText, "7m 12s")
         XCTAssertEqual(recorder.last?.fractionCompleted ?? 0, 0.42, accuracy: 0.001)
+    }
+
+    func testHuggingFaceInstallerReportsDownloadActivityFromCommandOutput() async throws {
+        let runner = FakeCommandRunner(results: [
+            "install": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/abc"}"#,
+                standardError: "MLXDashboard: Started Hugging Face snapshot download for mlx-community/Tiny"
+            )
+        ])
+        let installer = HuggingFaceModelInstaller(runner: runner)
+        let recorder = DownloadActivityRecorder()
+
+        _ = try await installer.install(
+            modelID: "mlx-community/Tiny",
+            pythonExecutable: URL(filePath: "/tmp/python"),
+            activityHandler: { recorder.append($0) }
+        )
+
+        XCTAssertEqual(recorder.events, [
+            HuggingFaceDownloadActivity(
+                message: "Started Hugging Face snapshot download for mlx-community/Tiny",
+                tone: .info,
+                source: .commandOutput
+            )
+        ])
     }
 
     func testHuggingFaceInstallerReportsInstallFailure() async throws {
@@ -215,6 +269,21 @@ private final class DownloadProgressRecorder: @unchecked Sendable {
     func append(_ progress: HuggingFaceDownloadProgress) {
         lock.withLock {
             events.append(progress)
+        }
+    }
+}
+
+private final class DownloadActivityRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedEvents: [HuggingFaceDownloadActivity] = []
+
+    var events: [HuggingFaceDownloadActivity] {
+        lock.withLock { recordedEvents }
+    }
+
+    func append(_ activity: HuggingFaceDownloadActivity) {
+        lock.withLock {
+            recordedEvents.append(activity)
         }
     }
 }

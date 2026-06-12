@@ -211,6 +211,56 @@ public struct HuggingFaceDownloadProgress: Sendable, Equatable {
     }
 }
 
+public struct HuggingFaceDownloadActivity: Sendable, Equatable {
+    public enum Tone: String, Sendable, Equatable {
+        case info
+        case warning
+        case error
+    }
+
+    public enum Source: String, Sendable, Equatable {
+        case commandOutput
+        case cacheScan
+        case xetLog
+    }
+
+    public var message: String
+    public var tone: Tone
+    public var source: Source
+
+    public init(message: String, tone: Tone, source: Source) {
+        self.message = message
+        self.tone = tone
+        self.source = source
+    }
+
+    public static func parse(from output: String) -> [HuggingFaceDownloadActivity] {
+        output
+            .split(whereSeparator: \.isNewline)
+            .compactMap { parseLine(String($0)) }
+    }
+
+    private static func parseLine(_ line: String) -> HuggingFaceDownloadActivity? {
+        if line.hasPrefix("MLXDashboard: ") {
+            return HuggingFaceDownloadActivity(
+                message: String(line.dropFirst("MLXDashboard: ".count)),
+                tone: .info,
+                source: .commandOutput
+            )
+        }
+
+        guard line.localizedCaseInsensitiveContains("connection struggling"),
+              line.localizedCaseInsensitiveContains("concurrency")
+        else { return nil }
+
+        return HuggingFaceDownloadActivity(
+            message: "Xet transfer: connection struggling, concurrency reduced",
+            tone: .warning,
+            source: .xetLog
+        )
+    }
+}
+
 public struct HuggingFaceModelInstaller: Sendable {
     private let runner: any CommandRunning
 
@@ -221,17 +271,24 @@ public struct HuggingFaceModelInstaller: Sendable {
     public func install(
         modelID: String,
         pythonExecutable: URL,
-        progressHandler: (@Sendable (HuggingFaceDownloadProgress) -> Void)? = nil
+        progressHandler: (@Sendable (HuggingFaceDownloadProgress) -> Void)? = nil,
+        activityHandler: (@Sendable (HuggingFaceDownloadActivity) -> Void)? = nil
     ) async throws -> HuggingFaceInstallResult {
         let script = """
         import json
+        import sys
         from huggingface_hub import snapshot_download
+        print('MLXDashboard: Started Hugging Face snapshot download for \(modelID.replacingOccurrences(of: "'", with: "\\'"))', file=sys.stderr, flush=True)
         path = snapshot_download(repo_id='\(modelID.replacingOccurrences(of: "'", with: "\\'"))')
         print(json.dumps({'local_path': path}))
         """
         let result = try await runner.run(Command(executableURL: pythonExecutable, arguments: ["-c", script])) { output in
-            guard let progress = HuggingFaceDownloadProgress.parse(from: output) else { return }
-            progressHandler?(progress)
+            if let progress = HuggingFaceDownloadProgress.parse(from: output) {
+                progressHandler?(progress)
+            }
+            for activity in HuggingFaceDownloadActivity.parse(from: output) {
+                activityHandler?(activity)
+            }
         }
         guard result.exitCode == 0 else {
             throw HuggingFaceError.installFailed(result.standardError)
