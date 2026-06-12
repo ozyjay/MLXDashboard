@@ -215,6 +215,37 @@ final class PythonBridgeTests: XCTestCase {
         ])
     }
 
+    func testHuggingFaceInstallerReportsDownloadActivityFromSplitCommandOutputChunks() async throws {
+        let runner = SplitOutputCommandRunner(
+            chunks: [
+                "MLXDash",
+                "board: Started Hugging Face snapshot ",
+                "download for mlx-community/Tiny"
+            ],
+            result: CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/abc"}"#,
+                standardError: ""
+            )
+        )
+        let installer = HuggingFaceModelInstaller(runner: runner)
+        let recorder = DownloadActivityRecorder()
+
+        _ = try await installer.install(
+            modelID: "mlx-community/Tiny",
+            pythonExecutable: URL(filePath: "/tmp/python"),
+            activityHandler: { recorder.append($0) }
+        )
+
+        XCTAssertEqual(recorder.events, [
+            HuggingFaceDownloadActivity(
+                message: "Started Hugging Face snapshot download for mlx-community/Tiny",
+                tone: .info,
+                source: .commandOutput
+            )
+        ])
+    }
+
     func testHuggingFaceInstallerReportsInstallFailure() async throws {
         let runner = FakeCommandRunner(results: [
             "install": CommandResult(exitCode: 1, standardOutput: "", standardError: "download failed")
@@ -253,6 +284,22 @@ private struct FakeCommandRunner: CommandRunning {
             key = script
         }
         return results[key] ?? CommandResult(exitCode: 127, standardOutput: "", standardError: "unexpected command \(key)")
+    }
+}
+
+private struct SplitOutputCommandRunner: CommandRunning {
+    let chunks: [String]
+    let result: CommandResult
+
+    func run(_ command: Command) async throws -> CommandResult {
+        result
+    }
+
+    func run(_ command: Command, outputHandler: CommandOutputHandler?) async throws -> CommandResult {
+        for chunk in chunks {
+            outputHandler?(chunk)
+        }
+        return result
     }
 }
 

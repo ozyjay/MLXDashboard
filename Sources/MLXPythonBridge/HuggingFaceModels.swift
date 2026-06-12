@@ -274,6 +274,7 @@ public struct HuggingFaceModelInstaller: Sendable {
         progressHandler: (@Sendable (HuggingFaceDownloadProgress) -> Void)? = nil,
         activityHandler: (@Sendable (HuggingFaceDownloadActivity) -> Void)? = nil
     ) async throws -> HuggingFaceInstallResult {
+        let activityBuffer = HuggingFaceDownloadActivityBuffer()
         let script = """
         import json
         import sys
@@ -286,14 +287,48 @@ public struct HuggingFaceModelInstaller: Sendable {
             if let progress = HuggingFaceDownloadProgress.parse(from: output) {
                 progressHandler?(progress)
             }
-            for activity in HuggingFaceDownloadActivity.parse(from: output) {
+            for activity in activityBuffer.append(output) {
                 activityHandler?(activity)
             }
+        }
+        for activity in activityBuffer.flush() {
+            activityHandler?(activity)
         }
         guard result.exitCode == 0 else {
             throw HuggingFaceError.installFailed(result.standardError)
         }
         return try JSONDecoder().decode(HuggingFaceInstallResult.self, from: Data(result.standardOutput.utf8))
+    }
+}
+
+private final class HuggingFaceDownloadActivityBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pendingOutput = ""
+
+    func append(_ output: String) -> [HuggingFaceDownloadActivity] {
+        lock.withLock {
+            if output.hasPrefix("MLXDashboard: "),
+               !pendingOutput.isEmpty,
+               !pendingOutput.hasPrefix("MLXDashboard: ") {
+                pendingOutput = ""
+            }
+            pendingOutput.append(output)
+            guard let lastNewline = pendingOutput.lastIndex(where: \.isNewline) else {
+                return []
+            }
+
+            let completeOutput = String(pendingOutput[...lastNewline])
+            pendingOutput = String(pendingOutput[pendingOutput.index(after: lastNewline)...])
+            return HuggingFaceDownloadActivity.parse(from: completeOutput)
+        }
+    }
+
+    func flush() -> [HuggingFaceDownloadActivity] {
+        lock.withLock {
+            let output = pendingOutput
+            pendingOutput = ""
+            return HuggingFaceDownloadActivity.parse(from: output)
+        }
     }
 }
 
