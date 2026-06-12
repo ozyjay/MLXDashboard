@@ -434,10 +434,10 @@ private struct InstallProgressBanner: View {
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
-            if !progress.activityMessages.isEmpty {
+            if !progress.activityRows.isEmpty {
                 VStack(alignment: .leading, spacing: 3) {
-                    ForEach(progress.activityMessages, id: \.self) { message in
-                        Text(message)
+                    ForEach(progress.activityRows) { row in
+                        Text(row.message)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)

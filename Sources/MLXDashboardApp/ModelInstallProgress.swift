@@ -84,6 +84,11 @@ enum ModelInstallPhase: String, Equatable {
 }
 
 struct ModelInstallProgress: Equatable {
+    struct ActivityRow: Equatable, Identifiable {
+        var id: Int
+        var message: String
+    }
+
     var modelID: String
     var phase: ModelInstallPhase
     var detail: String
@@ -124,7 +129,14 @@ struct ModelInstallProgress: Equatable {
     }
 
     var activityMessages: [String] {
-        activities.map(\.message)
+        activityRows.map(\.message)
+    }
+
+    var activityRows: [ActivityRow] {
+        guard phase == .downloading else { return [] }
+        return activities.enumerated().map { offset, activity in
+            ActivityRow(id: offset, message: activity.message)
+        }
     }
 
     func appendingActivity(_ activity: HuggingFaceDownloadActivity) -> ModelInstallProgress {

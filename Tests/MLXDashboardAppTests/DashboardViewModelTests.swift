@@ -388,6 +388,35 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(progress.activityMessages, ["Xet transfer: connection struggling, concurrency reduced"])
     }
 
+    func testModelInstallProgressHidesActivityStatusTextOutsideDownloading() {
+        let progress = ModelInstallProgress(
+            modelID: "mlx-community/Tiny",
+            phase: .installed,
+            detail: "Installed.",
+            activities: [
+                HuggingFaceDownloadActivity(message: "Xet transfer: connection struggling", tone: .warning, source: .xetLog)
+            ]
+        )
+
+        XCTAssertEqual(progress.activityMessages, [])
+        XCTAssertEqual(progress.activityRows, [])
+    }
+
+    func testModelInstallProgressActivityRowsKeepDuplicateMessagesDistinct() {
+        let progress = ModelInstallProgress(
+            modelID: "mlx-community/Tiny",
+            phase: .downloading,
+            detail: "Downloading.",
+            activities: [
+                HuggingFaceDownloadActivity(message: "Retrying transfer", tone: .warning, source: .xetLog),
+                HuggingFaceDownloadActivity(message: "Retrying transfer", tone: .warning, source: .xetLog)
+            ]
+        )
+
+        XCTAssertEqual(progress.activityRows.map(\.message), ["Retrying transfer", "Retrying transfer"])
+        XCTAssertNotEqual(progress.activityRows[0].id, progress.activityRows[1].id)
+    }
+
     func testModelInstallProgressCapsActivityToLatestFiveEntries() {
         var progress = ModelInstallProgress(
             modelID: "mlx-community/Tiny",
