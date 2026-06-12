@@ -428,6 +428,24 @@ private struct InstallProgressBanner: View {
             }
             ProgressView(value: progress.fractionCompleted)
                 .tint(tintColor)
+            if let cacheStatusText = progress.cacheStatusText {
+                Text(cacheStatusText)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            if !progress.activityMessages.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(progress.activityMessages, id: \.self) { message in
+                        Text(message)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
             Text(progress.detail)
                 .font(.caption)
                 .foregroundStyle(.secondary)

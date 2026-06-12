@@ -123,6 +123,10 @@ struct ModelInstallProgress: Equatable {
         return cacheSummary?.statusText
     }
 
+    var activityMessages: [String] {
+        activities.map(\.message)
+    }
+
     func appendingActivity(_ activity: HuggingFaceDownloadActivity) -> ModelInstallProgress {
         guard activities.last != activity else { return self }
 

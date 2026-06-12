@@ -368,6 +368,26 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(progress.downloadStatusText, "42% • ETA 7m 12s • 13.4MB/s")
     }
 
+    func testModelInstallProgressExposesCacheAndActivityStatusText() {
+        let progress = ModelInstallProgress(
+            modelID: "mlx-community/Tiny",
+            phase: .downloading,
+            detail: "Downloading.",
+            cacheSummary: DownloadCacheSummary(
+                totalBytes: 33 * 1024 * 1024,
+                incompleteBlobCount: 3,
+                pendingFileNames: ["a.incomplete", "b.incomplete", "c.incomplete"],
+                secondsSinceGrowth: 45
+            ),
+            activities: [
+                HuggingFaceDownloadActivity(message: "Xet transfer: connection struggling, concurrency reduced", tone: .warning, source: .xetLog)
+            ]
+        )
+
+        XCTAssertEqual(progress.cacheStatusText, "Cache 33 MB • 3 incomplete blobs • no growth for 45s")
+        XCTAssertEqual(progress.activityMessages, ["Xet transfer: connection struggling, concurrency reduced"])
+    }
+
     func testModelInstallProgressCapsActivityToLatestFiveEntries() {
         var progress = ModelInstallProgress(
             modelID: "mlx-community/Tiny",
