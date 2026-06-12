@@ -38,6 +38,8 @@ final class DashboardViewModel: ObservableObject {
     private var providerServer: NIOProviderServer?
     private var activeInstallTask: Task<Void, Never>?
     private var downloadActivityMonitorTask: Task<Void, Never>?
+    private var installSessionCounter = 0
+    private var activeInstallSessionID: Int?
 
     init(
         settingsStore: SettingsStore = SettingsStore(),
@@ -251,8 +253,13 @@ final class DashboardViewModel: ObservableObject {
     }
 
     func installModel(_ model: HuggingFaceModelSummary, isContinuation: Bool = false) async {
+        let installSessionID = beginInstallSession()
         isInstallingModel = true
-        defer { isInstallingModel = false }
+        defer {
+            stopDownloadActivityMonitor(installSessionID: installSessionID)
+            finishInstallSession(installSessionID)
+            isInstallingModel = false
+        }
 
         do {
             if isContinuation {
@@ -294,13 +301,13 @@ final class DashboardViewModel: ObservableObject {
                 ? "Continuing download for \(model.id). Existing Hugging Face cache files will be reused when available."
                 : "Downloading \(model.id). Large models can take a while."
             updateInstallProgress(.downloading, modelID: model.id, detail: downloadDetail)
-            startDownloadActivityMonitor(modelID: model.id)
-            defer { stopDownloadActivityMonitor() }
+            startDownloadActivityMonitor(modelID: model.id, installSessionID: installSessionID)
             let result = try await modelInstaller.install(
                 modelID: model.id,
                 pythonExecutable: status.pythonExecutable,
                 progressHandler: { [weak self] progress in
                     Task { @MainActor [weak self] in
+                        guard self?.canApplyDownloadCallback(modelID: model.id, installSessionID: installSessionID) == true else { return }
                         self?.updateInstallProgress(
                             .downloading,
                             modelID: model.id,
@@ -311,10 +318,11 @@ final class DashboardViewModel: ObservableObject {
                 },
                 activityHandler: { [weak self] activity in
                     Task { @MainActor [weak self] in
-                        self?.appendInstallActivity(activity, modelID: model.id)
+                        self?.appendInstallActivity(activity, modelID: model.id, installSessionID: installSessionID)
                     }
                 }
             )
+            await Task.yield()
             try Task.checkCancellation()
             updateInstallProgress(.finalizing, modelID: model.id, detail: "Finalizing cache record for \(model.id).")
             registry.upsert(ModelRecord(id: model.id, status: .installed, localPath: result.localPath, message: "Installed"))
@@ -467,6 +475,23 @@ final class DashboardViewModel: ObservableObject {
         }
     }
 
+    private func beginInstallSession() -> Int {
+        installSessionCounter += 1
+        activeInstallSessionID = installSessionCounter
+        return installSessionCounter
+    }
+
+    private func finishInstallSession(_ installSessionID: Int) {
+        guard activeInstallSessionID == installSessionID else { return }
+        activeInstallSessionID = nil
+    }
+
+    private func canApplyDownloadCallback(modelID: String, installSessionID: Int) -> Bool {
+        activeInstallSessionID == installSessionID
+            && modelInstallProgress?.modelID == modelID
+            && modelInstallProgress?.phase == .downloading
+    }
+
     private func updateInstallProgress(
         _ phase: ModelInstallPhase,
         modelID: String,
@@ -474,6 +499,9 @@ final class DashboardViewModel: ObservableObject {
         downloadProgress: HuggingFaceDownloadProgress? = nil
     ) {
         let existingProgress = modelInstallProgress?.modelID == modelID ? modelInstallProgress : nil
+        if phase == .downloading, existingProgress?.phase.isTerminalInstallPhase == true {
+            return
+        }
         modelInstallProgress = ModelInstallProgress(
             modelID: modelID,
             phase: phase,
@@ -485,7 +513,14 @@ final class DashboardViewModel: ObservableObject {
         modelInstallMessage = detail
     }
 
-    private func appendInstallActivity(_ activity: HuggingFaceDownloadActivity, modelID: String) {
+    private func appendInstallActivity(
+        _ activity: HuggingFaceDownloadActivity,
+        modelID: String,
+        installSessionID: Int? = nil
+    ) {
+        if let installSessionID {
+            guard canApplyDownloadCallback(modelID: modelID, installSessionID: installSessionID) else { return }
+        }
         guard let progress = modelInstallProgress,
               progress.modelID == modelID
         else { return }
@@ -502,23 +537,36 @@ final class DashboardViewModel: ObservableObject {
         modelInstallProgress = progress
     }
 
-    private func startDownloadActivityMonitor(modelID: String) {
+    private func startDownloadActivityMonitor(modelID: String, installSessionID: Int) {
         stopDownloadActivityMonitor()
-        downloadActivityMonitorTask = Task { @MainActor [weak self] in
-            await self?.monitorDownloadActivity(modelID: modelID)
-        }
-    }
-
-    private func stopDownloadActivityMonitor() {
-        downloadActivityMonitorTask?.cancel()
-        downloadActivityMonitorTask = nil
-    }
-
-    private func monitorDownloadActivity(modelID: String) async {
         let cacheRoot = huggingFaceCacheRoot
         let xetLogRoot = cacheRoot
             .deletingLastPathComponent()
             .appending(path: "xet/logs", directoryHint: .isDirectory)
+        downloadActivityMonitorTask = Task.detached(priority: .utility) { [weak self, cacheRoot, xetLogRoot] in
+            await self?.monitorDownloadActivity(
+                modelID: modelID,
+                installSessionID: installSessionID,
+                cacheRoot: cacheRoot,
+                xetLogRoot: xetLogRoot
+            )
+        }
+    }
+
+    private func stopDownloadActivityMonitor(installSessionID: Int? = nil) {
+        if let installSessionID, activeInstallSessionID != installSessionID {
+            return
+        }
+        downloadActivityMonitorTask?.cancel()
+        downloadActivityMonitorTask = nil
+    }
+
+    private nonisolated func monitorDownloadActivity(
+        modelID: String,
+        installSessionID: Int,
+        cacheRoot: URL,
+        xetLogRoot: URL
+    ) async {
         let cacheSampler = DownloadCacheSampler()
         let xetLogReader = XetLogActivityReader()
 
@@ -528,9 +576,10 @@ final class DashboardViewModel: ObservableObject {
         var seenXetActivityKeys = Set<String>()
 
         while !Task.isCancelled {
-            guard modelInstallProgress?.modelID == modelID,
-                  modelInstallProgress?.phase == .downloading
-            else { return }
+            let canContinue = await MainActor.run { [weak self] in
+                self?.canApplyDownloadCallback(modelID: modelID, installSessionID: installSessionID) == true
+            }
+            guard canContinue else { return }
 
             let now = Date()
             if var summary = try? cacheSampler.summary(modelID: modelID, cacheRoot: cacheRoot) {
@@ -546,17 +595,20 @@ final class DashboardViewModel: ObservableObject {
 
                 let secondsSinceGrowth = max(0, Int(now.timeIntervalSince(lastGrowthDate)))
                 summary.secondsSinceGrowth = secondsSinceGrowth
-                updateInstallCacheSummary(summary, modelID: modelID)
+                await MainActor.run { [weak self] in
+                    guard self?.canApplyDownloadCallback(modelID: modelID, installSessionID: installSessionID) == true else { return }
+                    self?.updateInstallCacheSummary(summary, modelID: modelID)
+                }
 
                 if secondsSinceGrowth >= 30, !warnedAboutNoGrowth {
-                    appendInstallActivity(
-                        HuggingFaceDownloadActivity(
-                            message: "No cache growth for \(secondsSinceGrowth)s",
-                            tone: .warning,
-                            source: .cacheScan
-                        ),
-                        modelID: modelID
+                    let activity = HuggingFaceDownloadActivity(
+                        message: "No cache growth for \(secondsSinceGrowth)s",
+                        tone: .warning,
+                        source: .cacheScan
                     )
+                    await MainActor.run { [weak self] in
+                        self?.appendInstallActivity(activity, modelID: modelID, installSessionID: installSessionID)
+                    }
                     warnedAboutNoGrowth = true
                 }
             }
@@ -566,7 +618,9 @@ final class DashboardViewModel: ObservableObject {
                     let key = "\(activity.source.rawValue):\(activity.message)"
                     guard !seenXetActivityKeys.contains(key) else { continue }
                     seenXetActivityKeys.insert(key)
-                    appendInstallActivity(activity, modelID: modelID)
+                    await MainActor.run { [weak self] in
+                        self?.appendInstallActivity(activity, modelID: modelID, installSessionID: installSessionID)
+                    }
                 }
             }
 
@@ -602,5 +656,16 @@ final class DashboardViewModel: ObservableObject {
             return "A required Python package is missing. Use Install Packages, then try again. Details: \(raw)"
         }
         return raw
+    }
+}
+
+private extension ModelInstallPhase {
+    var isTerminalInstallPhase: Bool {
+        switch self {
+        case .installed, .paused, .blocked, .failed:
+            return true
+        case .preparing, .checkingPackages, .checkingLogin, .downloading, .finalizing:
+            return false
+        }
     }
 }

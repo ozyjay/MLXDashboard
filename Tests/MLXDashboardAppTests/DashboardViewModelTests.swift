@@ -291,6 +291,66 @@ final class DashboardViewModelTests: XCTestCase {
         } == true)
     }
 
+    func testLateDownloadProgressDoesNotRegressInstalledProgressPhase() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = LateOutputCommandRunner(
+            lateOutput: "model.safetensors:  42%|####      | 4.20G/10.0G [05:10<07:12, 13.4MB/s]\n"
+        )
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            tokenStore: StubTokenStore(),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelInstaller: HuggingFaceModelInstaller(runner: runner),
+            authChecker: HuggingFaceAuthChecker(runner: runner),
+            huggingFaceCacheRoot: paths.applicationSupport.appending(path: "hub", directoryHint: .isDirectory)
+        )
+        viewModel.searchResults = [HuggingFaceModelSummary(id: "mlx-community/Tiny")]
+        viewModel.selectedSearchModelID = "mlx-community/Tiny"
+
+        await viewModel.installSelectedModel()
+        await runner.waitForLateOutput()
+        await Task.yield()
+
+        XCTAssertEqual(viewModel.modelInstallProgress?.phase, .installed)
+        XCTAssertEqual(viewModel.modelInstallProgress?.downloadStatusText, nil)
+    }
+
+    func testLateDownloadActivityDoesNotAppendAfterInstallCompletes() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = LateOutputCommandRunner(
+            lateOutput: "MLXDashboard: Late Hugging Face snapshot event\n"
+        )
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            tokenStore: StubTokenStore(),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelInstaller: HuggingFaceModelInstaller(runner: runner),
+            authChecker: HuggingFaceAuthChecker(runner: runner),
+            huggingFaceCacheRoot: paths.applicationSupport.appending(path: "hub", directoryHint: .isDirectory)
+        )
+        viewModel.searchResults = [HuggingFaceModelSummary(id: "mlx-community/Tiny")]
+        viewModel.selectedSearchModelID = "mlx-community/Tiny"
+
+        await viewModel.installSelectedModel()
+        await runner.waitForLateOutput()
+        await Task.yield()
+
+        XCTAssertEqual(viewModel.modelInstallProgress?.phase, .installed)
+        XCTAssertFalse(viewModel.modelInstallProgress?.activities.contains {
+            $0.message == "Late Hugging Face snapshot event"
+        } == true)
+    }
+
     func testDownloadProgressUsesTransferPercentETAAndRate() {
         let progress = ModelInstallProgress(
             modelID: "mlx-community/Tiny",
@@ -673,6 +733,73 @@ private final class FakeCommandRunner: CommandRunning, @unchecked Sendable {
             key = script
         }
         return results[key] ?? CommandResult(exitCode: 127, standardOutput: "", standardError: "unexpected command \(key)")
+    }
+}
+
+private final class LateOutputCommandRunner: CommandRunning, @unchecked Sendable {
+    private let lateOutput: String
+    private let lock = NSLock()
+    private var lateOutputEmitted = false
+    private var lateOutputContinuation: CheckedContinuation<Void, Never>?
+
+    init(lateOutput: String) {
+        self.lateOutput = lateOutput
+    }
+
+    func run(_ command: Command) async throws -> CommandResult {
+        let script = command.arguments.last ?? ""
+        if script.contains("whoami") {
+            return CommandResult(exitCode: 0, standardOutput: #"{"name":"octocat"}"#, standardError: "")
+        }
+        if script.contains("import mlx_lm") || script.contains("import huggingface_hub") {
+            return CommandResult(exitCode: 0, standardOutput: "", standardError: "")
+        }
+        return CommandResult(exitCode: 127, standardOutput: "", standardError: "unexpected command")
+    }
+
+    func run(_ command: Command, outputHandler: CommandOutputHandler?) async throws -> CommandResult {
+        let script = command.arguments.last ?? ""
+        guard script.contains("snapshot_download") else {
+            return try await run(command)
+        }
+
+        if let outputHandler {
+            Task {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+                outputHandler(lateOutput)
+                markLateOutputEmitted()
+            }
+        } else {
+            markLateOutputEmitted()
+        }
+
+        return CommandResult(
+            exitCode: 0,
+            standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/abc"}"#,
+            standardError: ""
+        )
+    }
+
+    func waitForLateOutput() async {
+        await withCheckedContinuation { continuation in
+            lock.withLock {
+                if lateOutputEmitted {
+                    continuation.resume()
+                } else {
+                    lateOutputContinuation = continuation
+                }
+            }
+        }
+    }
+
+    private func markLateOutputEmitted() {
+        let continuation = lock.withLock {
+            lateOutputEmitted = true
+            let continuation = lateOutputContinuation
+            lateOutputContinuation = nil
+            return continuation
+        }
+        continuation?.resume()
     }
 }
 
