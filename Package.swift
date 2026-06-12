@@ -63,6 +63,10 @@ let package = Package(
         .testTarget(
             name: "MLXProviderServerTests",
             dependencies: ["MLXProviderServer"]
+        ),
+        .testTarget(
+            name: "MLXDashboardAppTests",
+            dependencies: ["MLXDashboardApp"]
         )
     ]
 )

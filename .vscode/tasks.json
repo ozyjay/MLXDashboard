@@ -1,0 +1,70 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "swift: Build Debug MLXDashboard",
+            "type": "shell",
+            "command": "swift",
+            "args": [
+                "build",
+                "--configuration",
+                "debug",
+                "--product",
+                "MLXDashboard"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "swift: Build Release MLXDashboard",
+            "type": "shell",
+            "command": "swift",
+            "args": [
+                "build",
+                "--configuration",
+                "release",
+                "--product",
+                "MLXDashboard"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build"
+        },
+        {
+            "label": "swift: Test",
+            "type": "shell",
+            "command": "swift",
+            "args": [
+                "test"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "test"
+        },
+        {
+            "label": "Package MLXDashboard.app",
+            "type": "shell",
+            "command": "./scripts/package-app.sh",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build"
+        },
+        {
+            "label": "Install MLXDashboard.app to ~/Applications",
+            "type": "shell",
+            "command": "./scripts/install-app.sh",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build"
+        }
+    ]
+}

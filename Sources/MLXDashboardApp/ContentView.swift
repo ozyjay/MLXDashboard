@@ -94,6 +94,17 @@ private struct ModelsTab: View {
                         .textFieldStyle(.roundedBorder)
                     Button("Search") { Task { await viewModel.searchModels() } }
                 }
+                if let message = viewModel.modelSearchMessage {
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        Text(message)
+                            .foregroundStyle(.secondary)
+                        if viewModel.shouldOfferPythonPackageInstall {
+                            Button("Install Packages") {
+                                Task { await viewModel.installPythonPackages() }
+                            }
+                        }
+                    }
+                }
                 Table(viewModel.searchResults) {
                     TableColumn("Model", value: \.id)
                     TableColumn("Downloads") { model in

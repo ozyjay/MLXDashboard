@@ -1,10 +1,11 @@
 {
+    "version": "0.2.0",
     "configurations": [
         {
             "type": "swift",
             "request": "launch",
             "args": [],
-            "cwd": "${workspaceFolder:MLXDashboard}",
+            "cwd": "${workspaceFolder}",
             "name": "Debug MLXDashboard",
             "target": "MLXDashboard",
             "configuration": "debug",
@@ -14,7 +15,7 @@
             "type": "swift",
             "request": "launch",
             "args": [],
-            "cwd": "${workspaceFolder:MLXDashboard}",
+            "cwd": "${workspaceFolder}",
             "name": "Release MLXDashboard",
             "target": "MLXDashboard",
             "configuration": "release",

@@ -14,6 +14,8 @@ final class DashboardViewModel: ObservableObject {
     @Published var installedModels: [ModelRecord] = []
     @Published var searchResults: [HuggingFaceModelSummary] = []
     @Published var modelQuery = "mlx-community"
+    @Published var modelSearchMessage: String?
+    @Published var shouldOfferPythonPackageInstall = false
 
     let telemetry = TelemetryStore()
     let serverController = ServerProcessController()
@@ -69,9 +71,12 @@ final class DashboardViewModel: ObservableObject {
         do {
             try await environmentManager.installRequiredPackages()
             pythonStatus = "Ready"
+            shouldOfferPythonPackageInstall = false
+            modelSearchMessage = "Python packages installed. Search is ready."
             telemetry.appendLog("Installed Python packages")
         } catch {
             pythonStatus = "Error: \(error)"
+            modelSearchMessage = "Python package installation failed: \(error)"
             telemetry.appendLog("Python setup failed: \(error)")
         }
     }
@@ -146,10 +151,22 @@ final class DashboardViewModel: ObservableObject {
 
     func searchModels() async {
         do {
-            let python = try await environmentManager.ensureVenv()
-            searchResults = try await modelSearcher.search(query: modelQuery, pythonExecutable: python)
+            let status = try await environmentManager.status()
+            guard status.isReady else {
+                let missingPackages = status.packageReport.missingInstallNames.joined(separator: ", ")
+                searchResults = []
+                shouldOfferPythonPackageInstall = true
+                modelSearchMessage = "Python packages are required before searching: \(missingPackages)."
+                telemetry.appendLog("Model search needs Python packages: \(missingPackages)")
+                return
+            }
+
+            shouldOfferPythonPackageInstall = false
+            modelSearchMessage = nil
+            searchResults = try await modelSearcher.search(query: modelQuery, pythonExecutable: status.pythonExecutable)
             telemetry.appendLog("Found \(searchResults.count) Hugging Face models for \(modelQuery)")
         } catch {
+            modelSearchMessage = "Model search failed: \(error)"
             telemetry.appendLog("Model search failed: \(error)")
         }
     }
