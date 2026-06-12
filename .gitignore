@@ -2,5 +2,6 @@
 .swiftpm/
 .DS_Store
 .superpowers/
+.worktrees/
 dist/
 *.xcuserstate
