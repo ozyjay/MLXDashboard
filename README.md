@@ -1,6 +1,6 @@
 # MLXDashboard
 
-Native macOS SwiftUI dashboard for owning a local `mlx-lm` server, installing MLX-compatible Hugging Face models, and exposing a token-protected OpenAI-compatible localhost provider for MLXChat.
+Native macOS SwiftUI dashboard for owning a local `mlx-lm` server, installing MLX-compatible Hugging Face models, and exposing an OpenAI-compatible localhost provider for MLXChat.
 
 ## Project Notes
 

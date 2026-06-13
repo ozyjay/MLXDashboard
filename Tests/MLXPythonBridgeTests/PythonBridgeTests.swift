@@ -109,6 +109,24 @@ final class PythonBridgeTests: XCTestCase {
         XCTAssertEqual(results, [HuggingFaceModelSummary(id: "mlx-community/Tiny", downloads: 42, likes: 7)])
     }
 
+    func testHuggingFaceSearcherScopesToMLXCommunityAndSortsByDownloads() async throws {
+        let runner = RecordingCommandRunner(result: CommandResult(
+            exitCode: 0,
+            standardOutput: #"[]"#,
+            standardError: ""
+        ))
+        let searcher = HuggingFaceModelSearcher(runner: runner)
+
+        _ = try await searcher.search(query: "Devstral", pythonExecutable: URL(filePath: "/tmp/python"), limit: 50)
+
+        let script = try XCTUnwrap(runner.commands.last?.arguments.last)
+        XCTAssertTrue(script.contains("author='mlx-community'"))
+        XCTAssertTrue(script.contains("filter='mlx'"))
+        XCTAssertTrue(script.contains("sort='downloads'"))
+        XCTAssertFalse(script.contains("direction="))
+        XCTAssertTrue(script.contains("limit=50"))
+    }
+
     func testHuggingFaceAuthCheckerReportsLoggedInAndLoggedOutStates() async throws {
         let loggedInRunner = FakeCommandRunner(results: [
             "whoami": CommandResult(exitCode: 0, standardOutput: #"{"name":"octocat"}"#, standardError: "")
@@ -276,6 +294,23 @@ final class PythonBridgeTests: XCTestCase {
         ])
     }
 
+    func testHuggingFaceInstallerDisablesXetWhenRequested() async throws {
+        let runner = RecordingCommandRunner(result: CommandResult(
+            exitCode: 0,
+            standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/abc"}"#,
+            standardError: ""
+        ))
+        let installer = HuggingFaceModelInstaller(runner: runner)
+
+        _ = try await installer.install(
+            modelID: "mlx-community/Tiny",
+            pythonExecutable: URL(filePath: "/tmp/python"),
+            disableXet: true
+        )
+
+        XCTAssertEqual(runner.commands.last?.environment["HF_HUB_DISABLE_XET"], "1")
+    }
+
     func testHuggingFaceInstallerDoesNotReplaceReliableProgressWithFileCounterOnlyOutput() async throws {
         let runner = FakeCommandRunner(results: [
             "install": CommandResult(
@@ -350,6 +385,20 @@ final class PythonBridgeTests: XCTestCase {
             .appending(path: "MLXPythonBridgeTests-\(UUID().uuidString)", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+}
+
+private final class RecordingCommandRunner: CommandRunning, @unchecked Sendable {
+    private(set) var commands: [Command] = []
+    let result: CommandResult
+
+    init(result: CommandResult) {
+        self.result = result
+    }
+
+    func run(_ command: Command) async throws -> CommandResult {
+        commands.append(command)
+        return result
     }
 }
 

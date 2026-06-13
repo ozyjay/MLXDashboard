@@ -71,12 +71,20 @@ public struct HuggingFaceModelSearcher: Sendable {
         self.runner = runner
     }
 
-    public func search(query: String, pythonExecutable: URL, limit: Int = 20) async throws -> [HuggingFaceModelSummary] {
+    public func search(
+        query: String,
+        pythonExecutable: URL,
+        author: String = "mlx-community",
+        sort: String = "downloads",
+        limit: Int = 50
+    ) async throws -> [HuggingFaceModelSummary] {
         let escapedQuery = query.replacingOccurrences(of: "'", with: "\\'")
+        let escapedAuthor = author.replacingOccurrences(of: "'", with: "\\'")
+        let escapedSort = sort.replacingOccurrences(of: "'", with: "\\'")
         let script = """
         import json
         from huggingface_hub import list_models
-        models = list_models(search='\(escapedQuery)', filter='mlx', limit=\(limit))
+        models = list_models(search='\(escapedQuery)', author='\(escapedAuthor)', filter='mlx', sort='\(escapedSort)', limit=\(limit))
         print(json.dumps([{'id': m.modelId, 'downloads': m.downloads, 'likes': m.likes} for m in models]))
         """
         let result = try await runner.run(Command(executableURL: pythonExecutable, arguments: ["-c", script]))
@@ -279,19 +287,28 @@ public struct HuggingFaceModelInstaller: Sendable {
     public func install(
         modelID: String,
         pythonExecutable: URL,
+        disableXet: Bool = false,
         progressHandler: (@Sendable (HuggingFaceDownloadProgress) -> Void)? = nil,
         activityHandler: (@Sendable (HuggingFaceDownloadActivity) -> Void)? = nil
     ) async throws -> HuggingFaceInstallResult {
         let activityBuffer = HuggingFaceDownloadActivityBuffer()
+        let startMessage = disableXet
+            ? "Started Hugging Face snapshot download for \(modelID.replacingOccurrences(of: "'", with: "\\'")) with Xet disabled"
+            : "Started Hugging Face snapshot download for \(modelID.replacingOccurrences(of: "'", with: "\\'"))"
         let script = """
         import json
         import sys
         from huggingface_hub import snapshot_download
-        print('MLXDashboard: Started Hugging Face snapshot download for \(modelID.replacingOccurrences(of: "'", with: "\\'"))', file=sys.stderr, flush=True)
+        print('MLXDashboard: \(startMessage)', file=sys.stderr, flush=True)
         path = snapshot_download(repo_id='\(modelID.replacingOccurrences(of: "'", with: "\\'"))')
         print(json.dumps({'local_path': path}))
         """
-        let result = try await runner.run(Command(executableURL: pythonExecutable, arguments: ["-c", script])) { output in
+        let environment = disableXet ? ["HF_HUB_DISABLE_XET": "1"] : [:]
+        let result = try await runner.run(Command(
+            executableURL: pythonExecutable,
+            arguments: ["-c", script],
+            environment: environment
+        )) { output in
             if let progress = HuggingFaceDownloadProgress.parse(from: output) {
                 progressHandler?(progress)
             }

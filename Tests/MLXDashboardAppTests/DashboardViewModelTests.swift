@@ -1,117 +1,124 @@
 import XCTest
+import Combine
 import MLXCore
 import MLXPythonBridge
+import MLXServerControl
 @testable import MLXDashboardApp
 
 @MainActor
 final class DashboardViewModelTests: XCTestCase {
-    func testStartupDoesNotReadProviderToken() throws {
-        let paths = try temporaryAppPaths()
-        let tokenStore = CountingTokenStore(token: "secret-token")
-
-        let viewModel = DashboardViewModel(
-            settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: tokenStore,
-            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
-            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
-        )
-
-        XCTAssertEqual(tokenStore.tokenReadCount, 0)
-        XCTAssertEqual(viewModel.tokenPreview, "Hidden")
+    func testAppLaunchOptionsEnableAutostartProvider() {
+        XCTAssertTrue(AppLaunchOptions(arguments: ["MLXDashboard", "--autostart-provider"]).autostartProvider)
+        XCTAssertTrue(AppLaunchOptions(arguments: ["MLXDashboard", "--autostart"]).autostartProvider)
+        XCTAssertFalse(AppLaunchOptions(arguments: ["MLXDashboard"]).autostartProvider)
     }
 
-    func testRevealProviderTokenRequiresSuccessfulBiometricAuthorization() async throws {
-        let paths = try temporaryAppPaths()
-        let tokenStore = CountingTokenStore(token: "secret-token")
-        let viewModel = DashboardViewModel(
-            settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: tokenStore,
-            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
-            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
-        )
-
-        await viewModel.revealProviderToken(authorizer: StubBiometricAuthorizer(result: .authorized))
-
-        XCTAssertEqual(viewModel.tokenPreview, "secret-token")
-        XCTAssertEqual(tokenStore.tokenReadCount, 1)
-        XCTAssertEqual(viewModel.providerTokenMessage, "Provider token revealed.")
+    func testDashboardLowerSectionsUseSharedMinimumHeight() {
+        XCTAssertEqual(DashboardLayoutPolicy.activeModelMinHeight, DashboardLayoutPolicy.recentLogsMinHeight)
+        XCTAssertEqual(DashboardLayoutPolicy.activeModelMinHeight, 240)
     }
 
-    func testFailedBiometricAuthorizationDoesNotExposeProviderToken() async throws {
-        let paths = try temporaryAppPaths()
-        let tokenStore = CountingTokenStore(token: "secret-token")
-        let viewModel = DashboardViewModel(
-            settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: tokenStore,
-            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
-            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
-        )
+    func testControllerButtonPolicyFollowsServerState() {
+        XCTAssertTrue(ControllerButtonPolicy.canStartServer(state: .stopped))
+        XCTAssertTrue(ControllerButtonPolicy.canStartServer(state: .failed))
+        XCTAssertFalse(ControllerButtonPolicy.canStartServer(state: .starting))
+        XCTAssertFalse(ControllerButtonPolicy.canStartServer(state: .running))
+        XCTAssertFalse(ControllerButtonPolicy.canStartServer(state: .stopping))
 
-        await viewModel.revealProviderToken(authorizer: StubBiometricAuthorizer(result: .cancelled))
+        XCTAssertTrue(ControllerButtonPolicy.canStopServer(state: .starting))
+        XCTAssertTrue(ControllerButtonPolicy.canStopServer(state: .running))
+        XCTAssertFalse(ControllerButtonPolicy.canStopServer(state: .stopped))
+        XCTAssertFalse(ControllerButtonPolicy.canStopServer(state: .failed))
+        XCTAssertFalse(ControllerButtonPolicy.canStopServer(state: .stopping))
 
-        XCTAssertEqual(viewModel.tokenPreview, "Hidden")
-        XCTAssertEqual(tokenStore.tokenReadCount, 0)
-        XCTAssertEqual(viewModel.providerTokenMessage, "Token reveal cancelled.")
+        XCTAssertTrue(ControllerButtonPolicy.canRestartServer(state: .running))
+        XCTAssertFalse(ControllerButtonPolicy.canRestartServer(state: .stopped))
+        XCTAssertFalse(ControllerButtonPolicy.canRestartServer(state: .starting))
+        XCTAssertFalse(ControllerButtonPolicy.canRestartServer(state: .stopping))
+        XCTAssertFalse(ControllerButtonPolicy.canRestartServer(state: .failed))
     }
 
-    func testCopyProviderTokenRequiresAuthorizationAndCopiesBearerToken() async throws {
+    func testControllerAvailabilityRefreshesWhenServerStateChanges() throws {
         let paths = try temporaryAppPaths()
-        let tokenStore = CountingTokenStore(token: "secret-token")
-        let copier = StubProviderTokenCopier()
+        let process = FakeManagedProcess()
+        let serverController = ServerProcessController(
+            processLauncher: FakeProcessLauncher(processes: [process])
+        )
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: tokenStore,
             registry: ModelRegistry(fileURL: paths.modelRegistryFile),
-            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:])),
+            serverController: serverController
         )
+        var refreshCount = 0
+        let cancellable = viewModel.objectWillChange.sink {
+            refreshCount += 1
+        }
 
-        await viewModel.copyProviderToken(
-            authorizer: StubBiometricAuthorizer(result: .authorized),
-            copier: copier
-        )
+        XCTAssertTrue(viewModel.canStartServer)
+        XCTAssertFalse(viewModel.canStopServer)
+        XCTAssertFalse(viewModel.canRestartServer)
 
-        XCTAssertEqual(copier.copiedText, "Bearer secret-token")
-        XCTAssertEqual(viewModel.tokenPreview, "Hidden")
-        XCTAssertEqual(viewModel.providerTokenMessage, "Provider token copied.")
+        try serverController.start(settings: DashboardSettings(), pythonExecutable: URL(filePath: "/venv/bin/python"))
+
+        XCTAssertFalse(viewModel.canStartServer)
+        XCTAssertTrue(viewModel.canStopServer)
+        XCTAssertTrue(viewModel.canRestartServer)
+        XCTAssertGreaterThan(refreshCount, 0)
+        cancellable.cancel()
     }
 
-    func testRegenerateProviderTokenRequiresAuthorization() async throws {
+    func testRestartServerRestartsRunningController() async throws {
         let paths = try temporaryAppPaths()
-        let tokenStore = CountingTokenStore(token: "old-token", regeneratedToken: "new-token")
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+        let originalProcess = FakeManagedProcess()
+        let restartedProcess = FakeManagedProcess()
+        let serverController = ServerProcessController(
+            processLauncher: FakeProcessLauncher(processes: [originalProcess, restartedProcess])
+        )
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: tokenStore,
             registry: ModelRegistry(fileURL: paths.modelRegistryFile),
-            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [
+                "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+                "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: "")
+            ])),
+            serverController: serverController
         )
 
-        await viewModel.regenerateProviderToken(authorizer: StubBiometricAuthorizer(result: .authorized))
+        try serverController.start(settings: DashboardSettings(), pythonExecutable: python)
+        await viewModel.restartServer()
 
-        XCTAssertEqual(viewModel.tokenPreview, "new-token")
-        XCTAssertEqual(tokenStore.regenerateCount, 1)
-        XCTAssertEqual(viewModel.providerTokenMessage, "Provider token regenerated.")
+        XCTAssertTrue(originalProcess.wasTerminated)
+        XCTAssertTrue(restartedProcess.wasLaunched)
+        XCTAssertEqual(serverController.state, .running)
     }
 
-    func testProviderStartCanReadTokenWithoutBiometricAuthorization() throws {
+    func testProviderStartStopAvailabilityFollowsProviderState() throws {
         let paths = try temporaryAppPaths()
-        let tokenStore = CountingTokenStore(token: "secret-token")
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: tokenStore,
             registry: ModelRegistry(fileURL: paths.modelRegistryFile),
             environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
         )
+        viewModel.settings.providerPort = 0
 
-        _ = try viewModel.providerAuthorizationTokenForTesting()
+        XCTAssertTrue(viewModel.canStartProvider)
+        XCTAssertFalse(viewModel.canStopProvider)
 
-        XCTAssertEqual(tokenStore.tokenReadCount, 1)
+        try viewModel.startProvider()
+        defer { viewModel.stopProvider() }
+
+        XCTAssertFalse(viewModel.canStartProvider)
+        XCTAssertTrue(viewModel.canStopProvider)
     }
 
     func testDefaultsModelQueryToDevstralSmall() throws {
         let paths = try temporaryAppPaths()
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: StubTokenStore(),
             registry: ModelRegistry(fileURL: paths.modelRegistryFile),
             environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
         )
@@ -139,7 +146,6 @@ final class DashboardViewModelTests: XCTestCase {
         ])
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: StubTokenStore(),
             registry: ModelRegistry(fileURL: paths.modelRegistryFile),
             environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
             modelSearcher: HuggingFaceModelSearcher(runner: runner)
@@ -148,8 +154,121 @@ final class DashboardViewModelTests: XCTestCase {
         await viewModel.searchDefaultModelsIfReady()
 
         XCTAssertEqual(viewModel.searchResults.map(\.id), ["lmstudio-community/Devstral-Small-2505-MLX-4bit"])
-        XCTAssertEqual(viewModel.modelSearchMessage, nil)
+        XCTAssertEqual(viewModel.modelSearchMessage, "Showing 1 mlx-community result sorted by downloads.")
         XCTAssertFalse(viewModel.shouldOfferPythonPackageInstall)
+    }
+
+    func testSearchModelsRequestsInitialMLXCommunityPageAndCanLoadMoreWhenPageIsFull() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = FakeCommandRunner(results: [
+            "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "search-limit-50": CommandResult(exitCode: 0, standardOutput: Self.modelListJSON(count: 50), standardError: "")
+        ])
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelSearcher: HuggingFaceModelSearcher(runner: runner)
+        )
+
+        await viewModel.searchModels()
+
+        XCTAssertEqual(viewModel.searchResults.count, 50)
+        XCTAssertTrue(viewModel.canLoadMoreSearchResults)
+        XCTAssertFalse(viewModel.isLoadingMoreSearchResults)
+        XCTAssertTrue(runner.commands.contains { ($0.arguments.last ?? "").contains("limit=50") })
+        XCTAssertEqual(viewModel.modelSearchMessage, "Showing 50 mlx-community results sorted by downloads.")
+    }
+
+    func testLoadMoreSearchResultsRefetchesWithNextLimit() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = FakeCommandRunner(results: [
+            "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "search-limit-50": CommandResult(exitCode: 0, standardOutput: Self.modelListJSON(count: 50), standardError: ""),
+            "search-limit-100": CommandResult(exitCode: 0, standardOutput: Self.modelListJSON(count: 100), standardError: "")
+        ])
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelSearcher: HuggingFaceModelSearcher(runner: runner)
+        )
+
+        await viewModel.searchModels()
+        await viewModel.loadMoreSearchResults()
+
+        XCTAssertEqual(viewModel.searchResults.count, 100)
+        XCTAssertTrue(viewModel.canLoadMoreSearchResults)
+        XCTAssertTrue(runner.commands.contains { ($0.arguments.last ?? "").contains("limit=100") })
+        XCTAssertEqual(viewModel.modelSearchMessage, "Showing 100 mlx-community results sorted by downloads.")
+    }
+
+    func testLoadMoreSearchResultsStopsWhenFewerResultsReturn() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = FakeCommandRunner(results: [
+            "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "search-limit-50": CommandResult(exitCode: 0, standardOutput: Self.modelListJSON(count: 50), standardError: ""),
+            "search-limit-100": CommandResult(exitCode: 0, standardOutput: Self.modelListJSON(count: 64), standardError: "")
+        ])
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelSearcher: HuggingFaceModelSearcher(runner: runner)
+        )
+
+        await viewModel.searchModels()
+        await viewModel.loadMoreSearchResults()
+
+        XCTAssertEqual(viewModel.searchResults.count, 64)
+        XCTAssertFalse(viewModel.canLoadMoreSearchResults)
+        XCTAssertEqual(viewModel.modelSearchMessage, "Showing 64 mlx-community results sorted by downloads.")
+    }
+
+    func testSearchModelsResetsLimitForNewQuery() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = FakeCommandRunner(results: [
+            "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "search-limit-50": CommandResult(exitCode: 0, standardOutput: Self.modelListJSON(count: 50), standardError: ""),
+            "search-limit-100": CommandResult(exitCode: 0, standardOutput: Self.modelListJSON(count: 100), standardError: "")
+        ])
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelSearcher: HuggingFaceModelSearcher(runner: runner)
+        )
+
+        await viewModel.searchModels()
+        await viewModel.loadMoreSearchResults()
+        viewModel.modelQuery = "Qwen"
+        await viewModel.searchModels()
+
+        let searchScripts = runner.commands
+            .compactMap { $0.arguments.last }
+            .filter { $0.contains("list_models") }
+        XCTAssertTrue(searchScripts.suffix(1).allSatisfy { $0.contains("limit=50") })
+        XCTAssertEqual(viewModel.searchResults.count, 50)
     }
 
     func testSearchDefaultModelsIfReadyPromptsForPackagesWithoutSearchingWhenMissing() async throws {
@@ -172,7 +291,6 @@ final class DashboardViewModelTests: XCTestCase {
         ])
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: StubTokenStore(),
             registry: ModelRegistry(fileURL: paths.modelRegistryFile),
             environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
             modelSearcher: HuggingFaceModelSearcher(runner: runner)
@@ -201,7 +319,6 @@ final class DashboardViewModelTests: XCTestCase {
         ])
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: StubTokenStore(),
             registry: ModelRegistry(fileURL: paths.modelRegistryFile),
             environmentManager: PythonEnvironmentManager(paths: paths, runner: runner)
         )
@@ -228,7 +345,6 @@ final class DashboardViewModelTests: XCTestCase {
         ])
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: StubTokenStore(),
             registry: ModelRegistry(fileURL: paths.modelRegistryFile),
             environmentManager: PythonEnvironmentManager(paths: paths, runner: runner)
         )
@@ -261,7 +377,6 @@ final class DashboardViewModelTests: XCTestCase {
         let registry = ModelRegistry(fileURL: paths.modelRegistryFile)
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: StubTokenStore(),
             registry: registry,
             environmentManager: PythonEnvironmentManager(paths: paths, runner: runner)
         )
@@ -297,7 +412,6 @@ final class DashboardViewModelTests: XCTestCase {
         let registry = ModelRegistry(fileURL: paths.modelRegistryFile)
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: StubTokenStore(),
             registry: registry,
             environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
             modelInstaller: HuggingFaceModelInstaller(runner: runner),
@@ -340,7 +454,6 @@ final class DashboardViewModelTests: XCTestCase {
         ])
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: StubTokenStore(),
             registry: ModelRegistry(fileURL: paths.modelRegistryFile),
             environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
             modelInstaller: HuggingFaceModelInstaller(runner: runner),
@@ -375,7 +488,6 @@ final class DashboardViewModelTests: XCTestCase {
         ])
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: StubTokenStore(),
             registry: ModelRegistry(fileURL: paths.modelRegistryFile),
             environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
             modelInstaller: HuggingFaceModelInstaller(runner: runner),
@@ -404,7 +516,6 @@ final class DashboardViewModelTests: XCTestCase {
         )
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: StubTokenStore(),
             registry: ModelRegistry(fileURL: paths.modelRegistryFile),
             environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
             modelInstaller: HuggingFaceModelInstaller(runner: runner),
@@ -433,7 +544,6 @@ final class DashboardViewModelTests: XCTestCase {
         )
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: StubTokenStore(),
             registry: ModelRegistry(fileURL: paths.modelRegistryFile),
             environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
             modelInstaller: HuggingFaceModelInstaller(runner: runner),
@@ -486,6 +596,17 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(progress.downloadStatusText, "42% • Calculating ETA • 13.4MB/s")
     }
 
+    func testDownloadProgressShowsWaitingStatusBeforeReliableTransferProgress() {
+        let progress = ModelInstallProgress(
+            modelID: "mlx-community/Tiny",
+            phase: .downloading,
+            detail: "Downloading mlx-community/Tiny."
+        )
+
+        XCTAssertTrue(progress.isWaitingForDownloadData)
+        XCTAssertEqual(progress.downloadStatusText, "Waiting for download data")
+    }
+
     func testModelInstallProgressExposesCacheAndActivityStatusText() {
         let progress = ModelInstallProgress(
             modelID: "mlx-community/Tiny",
@@ -504,6 +625,25 @@ final class DashboardViewModelTests: XCTestCase {
 
         XCTAssertEqual(progress.cacheStatusText, "Cache 33 MB • 3 incomplete blobs • no growth for 45s")
         XCTAssertEqual(progress.activityMessages, ["Xet transfer: connection struggling, concurrency reduced"])
+    }
+
+    func testModelInstallProgressSuggestsNonXetRetryForStalledXetDownloads() {
+        let progress = ModelInstallProgress(
+            modelID: "mlx-community/Tiny",
+            phase: .downloading,
+            detail: "Downloading.",
+            cacheSummary: DownloadCacheSummary(
+                totalBytes: 33 * 1024 * 1024,
+                incompleteBlobCount: 3,
+                pendingFileNames: ["a.incomplete", "b.incomplete", "c.incomplete"],
+                secondsSinceGrowth: 75
+            ),
+            activities: [
+                HuggingFaceDownloadActivity(message: "Xet transfer: connection struggling, concurrency reduced", tone: .warning, source: .xetLog)
+            ]
+        )
+
+        XCTAssertEqual(progress.xetFallbackHint, "Xet download is stalled. Pause, then retry without Xet.")
     }
 
     func testModelInstallProgressHidesActivityStatusTextOutsideDownloading() {
@@ -568,7 +708,6 @@ final class DashboardViewModelTests: XCTestCase {
         ])
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: StubTokenStore(),
             registry: ModelRegistry(fileURL: paths.modelRegistryFile),
             environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
             modelInstaller: HuggingFaceModelInstaller(runner: runner),
@@ -608,7 +747,6 @@ final class DashboardViewModelTests: XCTestCase {
         registry.upsert(ModelRecord(id: "mlx-community/Tiny", status: .failed, message: "network interrupted"))
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: StubTokenStore(),
             registry: registry,
             environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
             modelInstaller: HuggingFaceModelInstaller(runner: runner),
@@ -653,7 +791,6 @@ final class DashboardViewModelTests: XCTestCase {
         try registry.save()
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: StubTokenStore(),
             registry: registry,
             environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
             modelInstaller: HuggingFaceModelInstaller(runner: runner),
@@ -664,6 +801,45 @@ final class DashboardViewModelTests: XCTestCase {
         await viewModel.continueSelectedInstalledModelInstall()
 
         XCTAssertEqual(registry.record(id: "mlx-community/Tiny")?.status, .installed)
+        XCTAssertEqual(viewModel.modelInstallProgress?.phase, .installed)
+    }
+
+    func testRetryLastModelInstallWithoutXetDisablesXetForInstallCommand() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(
+            at: python.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = FakeCommandRunner(results: [
+            "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "whoami": CommandResult(exitCode: 0, standardOutput: #"{"name":"octocat"}"#, standardError: ""),
+            "install": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/resumed"}"#,
+                standardError: ""
+            )
+        ])
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelInstaller: HuggingFaceModelInstaller(runner: runner),
+            authChecker: HuggingFaceAuthChecker(runner: runner)
+        )
+        viewModel.modelInstallProgress = ModelInstallProgress(
+            modelID: "mlx-community/Tiny",
+            phase: .failed,
+            detail: "Install failed for mlx-community/Tiny: network interrupted"
+        )
+
+        await viewModel.retryLastModelInstallWithoutXet()
+
+        let installCommands = runner.commands.filter { ($0.arguments.last ?? "").contains("snapshot_download") }
+        XCTAssertEqual(installCommands.last?.environment["HF_HUB_DISABLE_XET"], "1")
         XCTAssertEqual(viewModel.modelInstallProgress?.phase, .installed)
     }
 
@@ -680,7 +856,6 @@ final class DashboardViewModelTests: XCTestCase {
         let registry = ModelRegistry(fileURL: paths.modelRegistryFile)
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: StubTokenStore(),
             registry: registry,
             environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
             modelInstaller: HuggingFaceModelInstaller(runner: runner),
@@ -791,7 +966,6 @@ final class DashboardViewModelTests: XCTestCase {
         let paths = try temporaryAppPaths()
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: StubTokenStore(),
             registry: ModelRegistry(fileURL: paths.modelRegistryFile),
             environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
         )
@@ -818,7 +992,6 @@ final class DashboardViewModelTests: XCTestCase {
         try registry.save()
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: StubTokenStore(),
             registry: registry,
             environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:])),
             huggingFaceCacheRoot: cacheRoot
@@ -845,7 +1018,6 @@ final class DashboardViewModelTests: XCTestCase {
         try registry.save()
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            tokenStore: StubTokenStore(),
             registry: registry,
             environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:])),
             huggingFaceCacheRoot: cacheRoot
@@ -876,6 +1048,13 @@ final class DashboardViewModelTests: XCTestCase {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
+
+    private static func modelListJSON(count: Int) -> String {
+        let models = (1...count).map { index in
+            #"{"id":"mlx-community/Model-\#(index)","downloads":\#(1000 - index),"likes":\#(index)}"#
+        }
+        return "[\(models.joined(separator: ","))]"
+    }
 }
 
 private final class FakeCommandRunner: CommandRunning, @unchecked Sendable {
@@ -895,7 +1074,13 @@ private final class FakeCommandRunner: CommandRunning, @unchecked Sendable {
         } else if script.contains("whoami") {
             key = "whoami"
         } else if script.contains("list_models") {
-            key = "search"
+            if script.contains("limit=50"), results["search-limit-50"] != nil {
+                key = "search-limit-50"
+            } else if script.contains("limit=100"), results["search-limit-100"] != nil {
+                key = "search-limit-100"
+            } else {
+                key = "search"
+            }
         } else {
             key = script
         }
@@ -1024,70 +1209,33 @@ private final class PausingCommandRunner: CommandRunning, @unchecked Sendable {
     }
 }
 
-private struct StubTokenStore: ProviderTokenStoring {
-    func token() throws -> String {
-        "test-token"
+private final class FakeManagedProcess: ManagedProcess {
+    var executableURL: URL?
+    var arguments: [String] = []
+    var environment: [String: String]?
+    var wasLaunched = false
+    var wasTerminated = false
+    var isRunning = false
+
+    func launch() throws {
+        wasLaunched = true
+        isRunning = true
     }
 
-    func regenerateToken() throws -> String {
-        "new-test-token"
-    }
-}
-
-private final class CountingTokenStore: ProviderTokenStoring, @unchecked Sendable {
-    private let lock = NSLock()
-    private let storedToken: String
-    private let regeneratedToken: String
-    private var reads = 0
-    private var regenerations = 0
-
-    var tokenReadCount: Int {
-        lock.withLock { reads }
-    }
-
-    var regenerateCount: Int {
-        lock.withLock { regenerations }
-    }
-
-    init(token: String, regeneratedToken: String? = nil) {
-        self.storedToken = token
-        self.regeneratedToken = regeneratedToken ?? token
-    }
-
-    func token() throws -> String {
-        lock.withLock {
-            reads += 1
-        }
-        return storedToken
-    }
-
-    func regenerateToken() throws -> String {
-        lock.withLock {
-            regenerations += 1
-        }
-        return regeneratedToken
+    func terminate() {
+        wasTerminated = true
+        isRunning = false
     }
 }
 
-private struct StubBiometricAuthorizer: BiometricAuthorizing {
-    let result: BiometricAuthorizationResult
+private final class FakeProcessLauncher: ProcessLaunching {
+    private var processes: [FakeManagedProcess]
 
-    func authorize(reason: String) async -> BiometricAuthorizationResult {
-        result
-    }
-}
-
-private final class StubProviderTokenCopier: ProviderTokenCopying, @unchecked Sendable {
-    private let lock = NSLock()
-    private var text: String?
-
-    var copiedText: String? {
-        lock.withLock { text }
+    init(processes: [FakeManagedProcess]) {
+        self.processes = processes
     }
 
-    func copy(_ text: String) {
-        lock.withLock {
-            self.text = text
-        }
+    func makeProcess() -> ManagedProcess {
+        processes.removeFirst()
     }
 }

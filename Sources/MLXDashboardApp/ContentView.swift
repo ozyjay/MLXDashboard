@@ -68,6 +68,12 @@ struct ContentView: View {
     }
 }
 
+struct DashboardLayoutPolicy {
+    static let spacing: CGFloat = 16
+    static let activeModelMinHeight: CGFloat = 240
+    static let recentLogsMinHeight: CGFloat = 240
+}
+
 private struct AppHeader: View {
     @EnvironmentObject private var viewModel: DashboardViewModel
     let section: DashboardSection
@@ -111,21 +117,15 @@ private struct DashboardTab: View {
     @EnvironmentObject private var viewModel: DashboardViewModel
 
     var body: some View {
-        Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 16) {
-            GridRow {
+        VStack(alignment: .leading, spacing: DashboardLayoutPolicy.spacing) {
+            HStack(alignment: .top, spacing: DashboardLayoutPolicy.spacing) {
                 MetricTile(title: "mlx-lm", value: viewModel.serverController.state.rawValue.capitalized)
                 MetricTile(title: "Provider", value: viewModel.providerStatus)
                 MetricTile(title: "Requests", value: "\(viewModel.telemetry.requestCount)")
             }
-            GridRow {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Active Model").font(.headline)
-                    Text(viewModel.settings.activeModel ?? "No model selected")
-                        .font(.title3)
-                    Text("MLX: \(viewModel.settings.mlxBaseURL.absoluteString)")
-                    Text("MLXChat: \(viewModel.providerBaseURL)")
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(alignment: .top, spacing: DashboardLayoutPolicy.spacing) {
+                ActiveModelView()
                 RecentLogsView()
             }
         }
@@ -155,15 +155,19 @@ private struct ControllerTab: View {
                     .frame(width: 140)
                 Button("Save") { viewModel.saveSettings() }
                 Button("Start") { Task { await viewModel.startServer() } }
+                    .disabled(!viewModel.canStartServer)
                     .keyboardShortcut("r", modifiers: [.command])
                 Button("Stop") { viewModel.stopServer() }
-                Button("Restart") { Task { await viewModel.startServer() } }
+                    .disabled(!viewModel.canStopServer)
+                Button("Restart") { Task { await viewModel.restartServer() } }
+                    .disabled(!viewModel.canRestartServer)
             }
             Text("Python: \(viewModel.pythonStatus)")
                 .foregroundStyle(.secondary)
             HStack {
                 Button("Check Python") { Task { await viewModel.refreshPythonStatus() } }
                 Button("Install Packages") { Task { await viewModel.installPythonPackages() } }
+                    .disabled(!viewModel.shouldOfferPythonPackageInstall)
             }
             Spacer()
         }
@@ -182,6 +186,16 @@ private struct DiscoverModelsView: View {
                         Task { await viewModel.searchModels() }
                     }
                 Button("Search") { Task { await viewModel.searchModels() } }
+                if viewModel.canLoadMoreSearchResults || viewModel.isLoadingMoreSearchResults {
+                    Button("Load More") {
+                        Task { await viewModel.loadMoreSearchResults() }
+                    }
+                    .disabled(!viewModel.canLoadMoreSearchResults)
+                    if viewModel.isLoadingMoreSearchResults {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
                 Button("Check Login") { Task { await viewModel.refreshHuggingFaceAuthStatus() } }
                 if viewModel.shouldOfferPythonPackageInstall {
                     Button("Install Packages") {
@@ -233,6 +247,11 @@ private struct DiscoverModelsView: View {
                 if viewModel.canContinueLastModelInstall {
                     Button("Continue Downloading") {
                         viewModel.startContinueLastModelInstall()
+                    }
+                }
+                if viewModel.canRetryLastModelInstallWithoutXet {
+                    Button("Retry without Xet") {
+                        viewModel.startRetryLastModelInstallWithoutXet()
                     }
                 }
                 Spacer()
@@ -300,6 +319,10 @@ private struct InstalledModelsView: View {
                     viewModel.startContinueSelectedInstalledModelInstall()
                 }
                 .disabled(!viewModel.canContinueSelectedInstalledModelInstall)
+                Button("Retry without Xet") {
+                    viewModel.startRetrySelectedInstalledModelInstallWithoutXet()
+                }
+                .disabled(!viewModel.canRetrySelectedInstalledModelInstallWithoutXet)
                 Button("Set Active") { viewModel.setSelectedInstalledModelActive() }
                     .disabled(viewModel.selectedInstalledModelID == nil)
                 Button("Delete from Cache", role: .destructive) {
@@ -448,12 +471,24 @@ private struct InstallProgressBanner: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            ProgressView(value: progress.fractionCompleted)
-                .tint(tintColor)
+            if progress.isWaitingForDownloadData {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(tintColor)
+            } else {
+                ProgressView(value: progress.fractionCompleted)
+                    .tint(tintColor)
+            }
             if let cacheStatusText = progress.cacheStatusText {
                 Text(cacheStatusText)
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            if let xetFallbackHint = progress.xetFallbackHint {
+                Text(xetFallbackHint)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
                     .textSelection(.enabled)
             }
             if !progress.activityRows.isEmpty {
@@ -486,7 +521,7 @@ private struct ProviderTab: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("MLXChat Provider").font(.title2.bold())
             LabeledContent("Base URL", value: viewModel.providerBaseURL)
-            LabeledContent("Authorization", value: viewModel.tokenPreview == "Hidden" ? "Bearer ********" : "Bearer \(viewModel.tokenPreview)")
+            LabeledContent("Access", value: "Localhost only")
             HStack {
                 Button("Start Provider") {
                     do {
@@ -495,22 +530,9 @@ private struct ProviderTab: View {
                         viewModel.telemetry.appendLog("Provider start failed: \(error)")
                     }
                 }
+                .disabled(!viewModel.canStartProvider)
                 Button("Stop Provider") { viewModel.stopProvider() }
-                Button("Reveal Token") {
-                    Task { await viewModel.revealProviderToken() }
-                }
-                Button("Copy Token") {
-                    Task { await viewModel.copyProviderToken() }
-                }
-                Button("Regenerate Token") {
-                    Task { await viewModel.regenerateProviderToken() }
-                }
-            }
-            if let providerTokenMessage = viewModel.providerTokenMessage {
-                Text(providerTokenMessage)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+                    .disabled(!viewModel.canStopProvider)
             }
             Divider()
             Text("Routes").font(.headline)
@@ -520,6 +542,25 @@ private struct ProviderTab: View {
             Text("POST /v1/completions")
             Spacer()
         }
+    }
+}
+
+private struct ActiveModelView: View {
+    @EnvironmentObject private var viewModel: DashboardViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Active Model").font(.headline)
+            Text(viewModel.settings.activeModel ?? "No model selected")
+                .font(.title3)
+            Text("MLX: \(viewModel.settings.mlxBaseURL.absoluteString)")
+            Text("MLXChat: \(viewModel.providerBaseURL)")
+        }
+        .frame(
+            maxWidth: .infinity,
+            minHeight: DashboardLayoutPolicy.activeModelMinHeight,
+            alignment: .topLeading
+        )
     }
 }
 
@@ -554,6 +595,10 @@ private struct RecentLogsView: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 240, alignment: .topLeading)
+        .frame(
+            maxWidth: .infinity,
+            minHeight: DashboardLayoutPolicy.recentLogsMinHeight,
+            alignment: .topLeading
+        )
     }
 }

@@ -111,8 +111,13 @@ struct ModelInstallProgress: Equatable {
         return phase.fractionCompleted
     }
 
+    var isWaitingForDownloadData: Bool {
+        phase == .downloading && downloadProgress == nil
+    }
+
     var downloadStatusText: String? {
-        guard phase == .downloading, let downloadProgress else { return nil }
+        guard phase == .downloading else { return nil }
+        guard let downloadProgress else { return "Waiting for download data" }
         var parts = [downloadProgress.percentText]
         if let etaText = downloadProgress.etaText {
             parts.append("ETA \(etaText)")
@@ -128,6 +133,15 @@ struct ModelInstallProgress: Equatable {
     var cacheStatusText: String? {
         guard phase == .downloading else { return nil }
         return cacheSummary?.statusText
+    }
+
+    var xetFallbackHint: String? {
+        guard phase == .downloading,
+              cacheSummary?.secondsSinceGrowth ?? 0 >= 60,
+              activities.contains(where: { $0.source == .xetLog && $0.tone == .warning })
+        else { return nil }
+
+        return "Xet download is stalled. Pause, then retry without Xet."
     }
 
     var activityMessages: [String] {

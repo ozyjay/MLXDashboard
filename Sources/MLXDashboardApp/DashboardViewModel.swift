@@ -5,11 +5,23 @@ import MLXPythonBridge
 import MLXProviderServer
 import MLXServerControl
 
+struct ControllerButtonPolicy {
+    static func canStartServer(state: ServerState) -> Bool {
+        state == .stopped || state == .failed
+    }
+
+    static func canStopServer(state: ServerState) -> Bool {
+        state == .starting || state == .running
+    }
+
+    static func canRestartServer(state: ServerState) -> Bool {
+        state == .running
+    }
+}
+
 @MainActor
 final class DashboardViewModel: ObservableObject {
     @Published var settings: DashboardSettings
-    @Published var tokenPreview = "Hidden"
-    @Published var providerTokenMessage: String?
     @Published var pythonStatus = "Not checked"
     @Published var providerStatus = "Stopped"
     @Published var installedModels: [ModelRecord] = []
@@ -22,13 +34,13 @@ final class DashboardViewModel: ObservableObject {
     @Published var selectedSearchModelID: String?
     @Published var selectedInstalledModelID: String?
     @Published var isInstallingModel = false
+    @Published var isLoadingMoreSearchResults = false
     @Published var modelInstallProgress: ModelInstallProgress?
 
     let telemetry = TelemetryStore()
-    let serverController = ServerProcessController()
+    let serverController: ServerProcessController
 
     private let settingsStore: SettingsStore
-    private let tokenStore: ProviderTokenStoring
     private let registry: ModelRegistry
     private let environmentManager: PythonEnvironmentManager
     private let cacheManager: MLXModelCacheManager
@@ -36,25 +48,27 @@ final class DashboardViewModel: ObservableObject {
     private let modelInstaller: HuggingFaceModelInstaller
     private let authChecker: HuggingFaceAuthChecker
     private let configuredHuggingFaceCacheRoot: URL?
+    private var serverControllerCancellable: AnyCancellable?
     private var providerServer: NIOProviderServer?
     private var activeInstallTask: Task<Void, Never>?
     private var downloadActivityMonitorTask: Task<Void, Never>?
     private var installSessionCounter = 0
     private var activeInstallSessionID: Int?
+    private let modelSearchPageSize = 50
+    private var modelSearchLimit = 50
 
     init(
         settingsStore: SettingsStore = SettingsStore(),
-        tokenStore: ProviderTokenStoring = KeychainProviderTokenStore(),
         registry: ModelRegistry = ModelRegistry(),
         environmentManager: PythonEnvironmentManager = PythonEnvironmentManager(),
         cacheManager: MLXModelCacheManager = MLXModelCacheManager(),
         modelSearcher: HuggingFaceModelSearcher = HuggingFaceModelSearcher(),
         modelInstaller: HuggingFaceModelInstaller = HuggingFaceModelInstaller(),
         authChecker: HuggingFaceAuthChecker = HuggingFaceAuthChecker(),
-        huggingFaceCacheRoot: URL? = nil
+        huggingFaceCacheRoot: URL? = nil,
+        serverController: ServerProcessController = ServerProcessController()
     ) {
         self.settingsStore = settingsStore
-        self.tokenStore = tokenStore
         self.registry = registry
         self.environmentManager = environmentManager
         self.cacheManager = cacheManager
@@ -62,17 +76,47 @@ final class DashboardViewModel: ObservableObject {
         self.modelInstaller = modelInstaller
         self.authChecker = authChecker
         self.configuredHuggingFaceCacheRoot = huggingFaceCacheRoot
+        self.serverController = serverController
         self.settings = (try? settingsStore.load()) ?? DashboardSettings()
         try? registry.load()
         self.installedModels = Self.visibleInstalledModels(from: registry.records)
+        self.serverControllerCancellable = serverController.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
     }
 
     var providerBaseURL: String {
         settings.providerBaseURL.absoluteString
     }
 
+    var canStartProvider: Bool {
+        providerServer == nil
+    }
+
+    var canStopProvider: Bool {
+        providerServer != nil
+    }
+
     var hasRunningDownloads: Bool {
         isInstallingModel || activeInstallTask != nil
+    }
+
+    var canStartServer: Bool {
+        ControllerButtonPolicy.canStartServer(state: serverController.state)
+    }
+
+    var canStopServer: Bool {
+        ControllerButtonPolicy.canStopServer(state: serverController.state)
+    }
+
+    var canRestartServer: Bool {
+        ControllerButtonPolicy.canRestartServer(state: serverController.state)
+    }
+
+    var canLoadMoreSearchResults: Bool {
+        !isLoadingMoreSearchResults
+            && !searchResults.isEmpty
+            && searchResults.count == modelSearchLimit
     }
 
     var canContinueLastModelInstall: Bool {
@@ -82,12 +126,20 @@ final class DashboardViewModel: ObservableObject {
         return progress.phase.canContinueDownloading
     }
 
+    var canRetryLastModelInstallWithoutXet: Bool {
+        canContinueLastModelInstall
+    }
+
     var canContinueSelectedInstalledModelInstall: Bool {
         guard !isInstallingModel,
               let selectedInstalledModelID,
               let record = installedModels.first(where: { $0.id == selectedInstalledModelID })
         else { return false }
         return record.status == .failed || record.status == .paused || record.status == .installing
+    }
+
+    var canRetrySelectedInstalledModelInstallWithoutXet: Bool {
+        canContinueSelectedInstalledModelInstall
     }
 
     func saveSettings() {
@@ -138,14 +190,30 @@ final class DashboardViewModel: ObservableObject {
         telemetry.appendLog("Stopped mlx-lm")
     }
 
+    func restartServer() async {
+        do {
+            let python = try await environmentManager.ensureVenv()
+            try serverController.restart(settings: settings, pythonExecutable: python)
+            telemetry.appendLog("Restarted mlx-lm on \(DashboardSettings.localMLXHost):\(settings.mlxPort)")
+        } catch {
+            telemetry.appendLog("Failed to restart server: \(error)")
+        }
+    }
+
     func startProvider() throws {
         guard providerServer == nil else { return }
         let upstream = URLSessionProviderUpstreamClient { [settings] in
             settings.mlxBaseURL
         }
         let router = ProviderRouter(
-            tokenProvider: { [tokenStore] in try tokenStore.token() },
-            upstream: upstream
+            upstream: upstream,
+            activeModelProvider: { [settings] in settings.activeModel },
+            eventLogger: { [weak self] message in
+                Task { @MainActor [weak self] in
+                    self?.telemetry.recordRequest(latency: 0)
+                    self?.telemetry.appendLog(message)
+                }
+            }
         )
         let server = NIOProviderServer(host: settings.providerHost, port: settings.providerPort, router: router)
         try server.start()
@@ -163,66 +231,6 @@ final class DashboardViewModel: ObservableObject {
         } catch {
             telemetry.appendLog("Failed to stop provider: \(error)")
         }
-    }
-
-    func revealProviderToken(authorizer: any BiometricAuthorizing = LocalBiometricAuthorizer()) async {
-        guard await authorizeProviderTokenAccess(
-            authorizer: authorizer,
-            reason: "Authenticate to reveal the MLXDashboard provider token.",
-            cancelledMessage: "Token reveal cancelled."
-        ) else { return }
-
-        do {
-            tokenPreview = try tokenStore.token()
-            providerTokenMessage = "Provider token revealed."
-            telemetry.appendLog("Revealed provider token")
-        } catch {
-            tokenPreview = "Hidden"
-            providerTokenMessage = "Could not reveal provider token: \(error)"
-            telemetry.appendLog("Token reveal failed: \(error)")
-        }
-    }
-
-    func copyProviderToken(
-        authorizer: any BiometricAuthorizing = LocalBiometricAuthorizer(),
-        copier: any ProviderTokenCopying = PasteboardProviderTokenCopier()
-    ) async {
-        guard await authorizeProviderTokenAccess(
-            authorizer: authorizer,
-            reason: "Authenticate to copy the MLXDashboard provider token.",
-            cancelledMessage: "Token copy cancelled."
-        ) else { return }
-
-        do {
-            copier.copy("Bearer \(try tokenStore.token())")
-            providerTokenMessage = "Provider token copied."
-            telemetry.appendLog("Copied provider token")
-        } catch {
-            providerTokenMessage = "Could not copy provider token: \(error)"
-            telemetry.appendLog("Token copy failed: \(error)")
-        }
-    }
-
-    func regenerateProviderToken(authorizer: any BiometricAuthorizing = LocalBiometricAuthorizer()) async {
-        guard await authorizeProviderTokenAccess(
-            authorizer: authorizer,
-            reason: "Authenticate to regenerate the MLXDashboard provider token.",
-            cancelledMessage: "Token regeneration cancelled."
-        ) else { return }
-
-        do {
-            tokenPreview = try tokenStore.regenerateToken()
-            providerTokenMessage = "Provider token regenerated."
-            telemetry.appendLog("Regenerated provider token")
-        } catch {
-            tokenPreview = "Hidden"
-            providerTokenMessage = "Could not regenerate provider token: \(error)"
-            telemetry.appendLog("Token regeneration failed: \(error)")
-        }
-    }
-
-    func providerAuthorizationTokenForTesting() throws -> String {
-        try tokenStore.token()
     }
 
     func scanModelCache() {
@@ -255,24 +263,49 @@ final class DashboardViewModel: ObservableObject {
     }
 
     func searchModels() async {
+        modelSearchLimit = modelSearchPageSize
+        await runModelSearch(limit: modelSearchLimit, defaultSearch: false)
+    }
+
+    func loadMoreSearchResults() async {
+        guard canLoadMoreSearchResults else { return }
+        let nextLimit = modelSearchLimit + modelSearchPageSize
+        isLoadingMoreSearchResults = true
+        defer { isLoadingMoreSearchResults = false }
+        await runModelSearch(limit: nextLimit, defaultSearch: false)
+    }
+
+    private func runModelSearch(limit: Int, defaultSearch: Bool) async {
         do {
             let status = try await environmentManager.status()
             guard status.isReady else {
                 let missingPackages = status.packageReport.missingInstallNames.joined(separator: ", ")
                 searchResults = []
                 shouldOfferPythonPackageInstall = true
-                modelSearchMessage = "Python packages are required before searching: \(missingPackages)."
-                telemetry.appendLog("Model search needs Python packages: \(missingPackages)")
+                if defaultSearch {
+                    modelSearchMessage = "Install Python packages to search default MLX models: \(missingPackages)."
+                    telemetry.appendLog("Default model search needs Python packages: \(missingPackages)")
+                } else {
+                    modelSearchMessage = "Python packages are required before searching: \(missingPackages)."
+                    telemetry.appendLog("Model search needs Python packages: \(missingPackages)")
+                }
                 return
             }
 
             shouldOfferPythonPackageInstall = false
-            modelSearchMessage = nil
-            searchResults = try await modelSearcher.search(query: modelQuery, pythonExecutable: status.pythonExecutable)
-            telemetry.appendLog("Found \(searchResults.count) Hugging Face models for \(modelQuery)")
+            searchResults = try await modelSearcher.search(query: modelQuery, pythonExecutable: status.pythonExecutable, limit: limit)
+            modelSearchLimit = limit
+            modelSearchMessage = searchResultStatusText(count: searchResults.count)
+            let logPrefix = defaultSearch ? "Loaded default" : "Found"
+            telemetry.appendLog("\(logPrefix) \(searchResults.count) mlx-community models for \(modelQuery)")
         } catch {
-            modelSearchMessage = "Model search failed: \(error)"
-            telemetry.appendLog("Model search failed: \(error)")
+            if defaultSearch {
+                modelSearchMessage = "Default model search failed: \(error)"
+                telemetry.appendLog("Default model search failed: \(error)")
+            } else {
+                modelSearchMessage = "Model search failed: \(error)"
+                telemetry.appendLog("Model search failed: \(error)")
+            }
         }
     }
 
@@ -293,17 +326,24 @@ final class DashboardViewModel: ObservableObject {
                 return
             }
 
-            shouldOfferPythonPackageInstall = false
-            modelSearchMessage = nil
-            searchResults = try await modelSearcher.search(query: modelQuery, pythonExecutable: status.pythonExecutable)
-            telemetry.appendLog("Loaded default Hugging Face model search for \(modelQuery)")
+            modelSearchLimit = modelSearchPageSize
+            await runModelSearch(limit: modelSearchLimit, defaultSearch: true)
         } catch {
             modelSearchMessage = "Default model search failed: \(error)"
             telemetry.appendLog("Default model search failed: \(error)")
         }
     }
 
-    func installModel(_ model: HuggingFaceModelSummary, isContinuation: Bool = false) async {
+    private func searchResultStatusText(count: Int) -> String {
+        let noun = count == 1 ? "result" : "results"
+        return "Showing \(count) mlx-community \(noun) sorted by downloads."
+    }
+
+    func installModel(
+        _ model: HuggingFaceModelSummary,
+        isContinuation: Bool = false,
+        disableXet: Bool = false
+    ) async {
         let installSessionID = beginInstallSession()
         isInstallingModel = true
         defer {
@@ -313,7 +353,9 @@ final class DashboardViewModel: ObservableObject {
         }
 
         do {
-            if isContinuation {
+            if disableXet {
+                updateInstallProgress(.preparing, modelID: model.id, detail: "Preparing to retry \(model.id) without Xet.")
+            } else if isContinuation {
                 updateInstallProgress(.preparing, modelID: model.id, detail: "Preparing to continue downloading \(model.id).")
             } else {
                 updateInstallProgress(.preparing, modelID: model.id, detail: "Preparing to install \(model.id).")
@@ -349,13 +391,16 @@ final class DashboardViewModel: ObservableObject {
             installedModels = Self.visibleInstalledModels(from: registry.records)
 
             let downloadDetail = isContinuation
-                ? "Continuing download for \(model.id). Existing Hugging Face cache files will be reused when available."
+                ? (disableXet
+                    ? "Retrying \(model.id) with standard Hugging Face download. Existing cache files will be reused when available."
+                    : "Continuing download for \(model.id). Existing Hugging Face cache files will be reused when available.")
                 : "Downloading \(model.id). Large models can take a while."
             updateInstallProgress(.downloading, modelID: model.id, detail: downloadDetail)
             startDownloadActivityMonitor(modelID: model.id, installSessionID: installSessionID)
             let result = try await modelInstaller.install(
                 modelID: model.id,
                 pythonExecutable: status.pythonExecutable,
+                disableXet: disableXet,
                 progressHandler: { [weak self] progress in
                     Task { @MainActor [weak self] in
                         guard self?.canApplyDownloadCallback(modelID: model.id, installSessionID: installSessionID) == true else { return }
@@ -427,6 +472,22 @@ final class DashboardViewModel: ObservableObject {
         }
     }
 
+    func retryLastModelInstallWithoutXet() async {
+        guard canRetryLastModelInstallWithoutXet,
+              let modelID = modelInstallProgress?.modelID
+        else {
+            modelInstallMessage = "No failed or paused model download is available to retry without Xet."
+            return
+        }
+        await installModel(HuggingFaceModelSummary(id: modelID), isContinuation: true, disableXet: true)
+    }
+
+    func startRetryLastModelInstallWithoutXet() {
+        startInstallTask {
+            await self.retryLastModelInstallWithoutXet()
+        }
+    }
+
     func continueSelectedInstalledModelInstall() async {
         guard canContinueSelectedInstalledModelInstall,
               let modelID = selectedInstalledModelID
@@ -441,6 +502,23 @@ final class DashboardViewModel: ObservableObject {
     func startContinueSelectedInstalledModelInstall() {
         startInstallTask {
             await self.continueSelectedInstalledModelInstall()
+        }
+    }
+
+    func retrySelectedInstalledModelInstallWithoutXet() async {
+        guard canRetrySelectedInstalledModelInstallWithoutXet,
+              let modelID = selectedInstalledModelID
+        else {
+            modelInstallProgress = nil
+            modelInstallMessage = "Select a failed or incomplete model before retrying without Xet."
+            return
+        }
+        await installModel(HuggingFaceModelSummary(id: modelID), isContinuation: true, disableXet: true)
+    }
+
+    func startRetrySelectedInstalledModelInstallWithoutXet() {
+        startInstallTask {
+            await self.retrySelectedInstalledModelInstallWithoutXet()
         }
     }
 
@@ -512,23 +590,6 @@ final class DashboardViewModel: ObservableObject {
     private var huggingFaceCacheRoot: URL {
         configuredHuggingFaceCacheRoot ?? FileManager.default.homeDirectoryForCurrentUser
             .appending(path: ".cache/huggingface/hub", directoryHint: .isDirectory)
-    }
-
-    private func authorizeProviderTokenAccess(
-        authorizer: any BiometricAuthorizing,
-        reason: String,
-        cancelledMessage: String
-    ) async -> Bool {
-        switch await authorizer.authorize(reason: reason) {
-        case .authorized:
-            return true
-        case .cancelled:
-            providerTokenMessage = cancelledMessage
-            return false
-        case .failed(let message):
-            providerTokenMessage = "Authentication failed: \(message)"
-            return false
-        }
     }
 
     private func startInstallTask(_ operation: @escaping @MainActor () async -> Void) {
