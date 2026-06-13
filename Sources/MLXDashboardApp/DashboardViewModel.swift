@@ -19,6 +19,44 @@ struct ControllerButtonPolicy {
     }
 }
 
+private final class ActiveModelSelection: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedModel: String?
+
+    init(model: String?) {
+        self.storedModel = model
+    }
+
+    var model: String? {
+        lock.withLock { storedModel }
+    }
+
+    func update(_ model: String?) {
+        lock.withLock {
+            storedModel = model
+        }
+    }
+}
+
+private final class ProviderDebugCaptureState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedEnabled: Bool
+
+    init(enabled: Bool) {
+        self.storedEnabled = enabled
+    }
+
+    var isEnabled: Bool {
+        lock.withLock { storedEnabled }
+    }
+
+    func update(_ enabled: Bool) {
+        lock.withLock {
+            storedEnabled = enabled
+        }
+    }
+}
+
 @MainActor
 final class DashboardViewModel: ObservableObject {
     @Published var settings: DashboardSettings
@@ -37,7 +75,7 @@ final class DashboardViewModel: ObservableObject {
     @Published var isLoadingMoreSearchResults = false
     @Published var modelInstallProgress: ModelInstallProgress?
 
-    let telemetry = TelemetryStore()
+    let telemetry: TelemetryStore
     let serverController: ServerProcessController
 
     private let settingsStore: SettingsStore
@@ -48,6 +86,8 @@ final class DashboardViewModel: ObservableObject {
     private let modelInstaller: HuggingFaceModelInstaller
     private let authChecker: HuggingFaceAuthChecker
     private let configuredHuggingFaceCacheRoot: URL?
+    private let activeModelSelection: ActiveModelSelection
+    private let providerDebugCaptureState: ProviderDebugCaptureState
     private var serverControllerCancellable: AnyCancellable?
     private var providerServer: NIOProviderServer?
     private var activeInstallTask: Task<Void, Never>?
@@ -66,7 +106,8 @@ final class DashboardViewModel: ObservableObject {
         modelInstaller: HuggingFaceModelInstaller = HuggingFaceModelInstaller(),
         authChecker: HuggingFaceAuthChecker = HuggingFaceAuthChecker(),
         huggingFaceCacheRoot: URL? = nil,
-        serverController: ServerProcessController = ServerProcessController()
+        serverController: ServerProcessController = ServerProcessController(),
+        telemetry: TelemetryStore? = nil
     ) {
         self.settingsStore = settingsStore
         self.registry = registry
@@ -77,7 +118,13 @@ final class DashboardViewModel: ObservableObject {
         self.authChecker = authChecker
         self.configuredHuggingFaceCacheRoot = huggingFaceCacheRoot
         self.serverController = serverController
-        self.settings = (try? settingsStore.load()) ?? DashboardSettings()
+        self.telemetry = telemetry ?? TelemetryStore(
+            logFileURL: environmentManager.paths.logsDirectory.appending(path: "mlxdashboard.log")
+        )
+        let loadedSettings = (try? settingsStore.load()) ?? DashboardSettings()
+        self.settings = loadedSettings
+        self.activeModelSelection = ActiveModelSelection(model: loadedSettings.activeModel)
+        self.providerDebugCaptureState = ProviderDebugCaptureState(enabled: loadedSettings.providerDebugCaptureEnabled)
         try? registry.load()
         self.installedModels = Self.visibleInstalledModels(from: registry.records)
         self.serverControllerCancellable = serverController.objectWillChange.sink { [weak self] _ in
@@ -87,6 +134,10 @@ final class DashboardViewModel: ObservableObject {
 
     var providerBaseURL: String {
         settings.providerBaseURL.absoluteString
+    }
+
+    var providerDebugLogPath: String {
+        environmentManager.paths.logsDirectory.appending(path: "provider-debug.jsonl").path
     }
 
     var canStartProvider: Bool {
@@ -144,11 +195,19 @@ final class DashboardViewModel: ObservableObject {
 
     func saveSettings() {
         do {
+            providerDebugCaptureState.update(settings.providerDebugCaptureEnabled)
             try settingsStore.save(settings)
             telemetry.appendLog("Saved settings")
         } catch {
             telemetry.appendLog("Failed to save settings: \(error)")
         }
+    }
+
+    func setProviderDebugCaptureEnabled(_ enabled: Bool) {
+        settings.providerDebugCaptureEnabled = enabled
+        providerDebugCaptureState.update(enabled)
+        saveSettings()
+        telemetry.appendLog(enabled ? "Enabled provider debug payload capture" : "Disabled provider debug payload capture")
     }
 
     func refreshPythonStatus() async {
@@ -181,7 +240,7 @@ final class DashboardViewModel: ObservableObject {
             telemetry.appendLog("Started mlx-lm on \(DashboardSettings.localMLXHost):\(settings.mlxPort)")
             try startProvider()
         } catch {
-            telemetry.appendLog("Failed to start server: \(error)")
+            telemetry.appendLog("Failed to start server: \(error.localizedDescription)")
         }
     }
 
@@ -196,7 +255,7 @@ final class DashboardViewModel: ObservableObject {
             try serverController.restart(settings: settings, pythonExecutable: python)
             telemetry.appendLog("Restarted mlx-lm on \(DashboardSettings.localMLXHost):\(settings.mlxPort)")
         } catch {
-            telemetry.appendLog("Failed to restart server: \(error)")
+            telemetry.appendLog("Failed to restart server: \(error.localizedDescription)")
         }
     }
 
@@ -207,13 +266,17 @@ final class DashboardViewModel: ObservableObject {
         }
         let router = ProviderRouter(
             upstream: upstream,
-            activeModelProvider: { [settings] in settings.activeModel },
+            activeModelProvider: { [activeModelSelection] in activeModelSelection.model },
             eventLogger: { [weak self] message in
                 Task { @MainActor [weak self] in
                     self?.telemetry.recordRequest(latency: 0)
                     self?.telemetry.appendLog(message)
                 }
-            }
+            },
+            debugRecorder: ProviderDebugRecorder(
+                fileURL: environmentManager.paths.logsDirectory.appending(path: "provider-debug.jsonl"),
+                isEnabled: { [providerDebugCaptureState] in providerDebugCaptureState.isEnabled }
+            )
         )
         let server = NIOProviderServer(host: settings.providerHost, port: settings.providerPort, router: router)
         try server.start()
@@ -230,6 +293,15 @@ final class DashboardViewModel: ObservableObject {
             telemetry.appendLog("Stopped provider")
         } catch {
             telemetry.appendLog("Failed to stop provider: \(error)")
+        }
+    }
+
+    func stopOwnedServicesBeforeClose() {
+        if providerServer != nil {
+            stopProvider()
+        }
+        if canStopServer {
+            stopServer()
         }
     }
 
@@ -298,6 +370,14 @@ final class DashboardViewModel: ObservableObject {
             modelSearchMessage = searchResultStatusText(count: searchResults.count)
             let logPrefix = defaultSearch ? "Loaded default" : "Found"
             telemetry.appendLog("\(logPrefix) \(searchResults.count) mlx-community models for \(modelQuery)")
+        } catch is CancellationError {
+            if defaultSearch {
+                modelSearchMessage = "Default model search cancelled."
+                telemetry.appendLog("Default model search cancelled.")
+            } else {
+                modelSearchMessage = "Model search cancelled."
+                telemetry.appendLog("Model search cancelled.")
+            }
         } catch {
             if defaultSearch {
                 modelSearchMessage = "Default model search failed: \(error)"
@@ -328,6 +408,9 @@ final class DashboardViewModel: ObservableObject {
 
             modelSearchLimit = modelSearchPageSize
             await runModelSearch(limit: modelSearchLimit, defaultSearch: true)
+        } catch is CancellationError {
+            modelSearchMessage = "Default model search cancelled."
+            telemetry.appendLog("Default model search cancelled.")
         } catch {
             modelSearchMessage = "Default model search failed: \(error)"
             telemetry.appendLog("Default model search failed: \(error)")
@@ -550,6 +633,7 @@ final class DashboardViewModel: ObservableObject {
 
         modelInstallProgress = nil
         settings.activeModel = selectedInstalledModelID
+        activeModelSelection.update(selectedInstalledModelID)
         saveSettings()
         modelInstallMessage = "Selected \(selectedInstalledModelID) as the active model."
     }
@@ -576,6 +660,7 @@ final class DashboardViewModel: ObservableObject {
             self.selectedInstalledModelID = nil
             if settings.activeModel == record.id {
                 settings.activeModel = nil
+                activeModelSelection.update(nil)
                 saveSettings()
             }
             modelInstallMessage = "Deleted cache for \(record.id)."

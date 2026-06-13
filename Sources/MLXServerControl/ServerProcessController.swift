@@ -14,10 +14,15 @@ public final class ServerProcessController: ObservableObject {
     @Published public private(set) var state: ServerState
     @Published public private(set) var lastError: String?
     private let processLauncher: ProcessLaunching
+    private let portChecker: ServerPortChecking
     private var process: ManagedProcess?
 
-    public init(processLauncher: ProcessLaunching = FoundationProcessLauncher()) {
+    public init(
+        processLauncher: ProcessLaunching = FoundationProcessLauncher(),
+        portChecker: ServerPortChecking = TCPServerPortChecker()
+    ) {
         self.processLauncher = processLauncher
+        self.portChecker = portChecker
         self.state = .stopped
     }
 
@@ -27,6 +32,13 @@ public final class ServerProcessController: ObservableObject {
         }
         state = .starting
         lastError = nil
+
+        guard portChecker.isPortAvailable(host: DashboardSettings.localMLXHost, port: settings.mlxPort) else {
+            let error = ServerProcessControllerError.portUnavailable(host: DashboardSettings.localMLXHost, port: settings.mlxPort)
+            state = .failed
+            lastError = error.localizedDescription
+            throw error
+        }
 
         let nextProcess = processLauncher.makeProcess()
         nextProcess.executableURL = pythonExecutable
@@ -64,7 +76,7 @@ public final class ServerProcessController: ObservableObject {
 
     public func makeArguments(settings: DashboardSettings) -> [String] {
         var arguments = [
-            "-m", "mlx_lm.server",
+            "-m", "mlx_lm", "server",
             "--host", DashboardSettings.localMLXHost,
             "--port", String(settings.mlxPort)
         ]
@@ -93,6 +105,17 @@ public final class ServerProcessController: ObservableObject {
             sanitized.append(flag)
         }
         return sanitized
+    }
+}
+
+public enum ServerProcessControllerError: LocalizedError, Equatable {
+    case portUnavailable(host: String, port: Int)
+
+    public var errorDescription: String? {
+        switch self {
+        case let .portUnavailable(host, port):
+            return "Cannot start mlx-lm because \(host):\(port) is already in use."
+        }
     }
 }
 

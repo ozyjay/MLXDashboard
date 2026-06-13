@@ -6,7 +6,7 @@ final class ServerControlTests: XCTestCase {
     func testControllerStartsAndStopsOwnedMLXServerProcess() throws {
         let process = FakeManagedProcess()
         let launcher = FakeProcessLauncher(process: process)
-        let controller = ServerProcessController(processLauncher: launcher)
+        let controller = ServerProcessController(processLauncher: launcher, portChecker: FakePortChecker(isAvailable: true))
         let settings = DashboardSettings(activeModel: "mlx-community/Tiny")
 
         try controller.start(settings: settings, pythonExecutable: URL(filePath: "/venv/bin/python"))
@@ -14,7 +14,7 @@ final class ServerControlTests: XCTestCase {
         XCTAssertEqual(controller.state, .running)
         XCTAssertEqual(process.executableURL?.path, "/venv/bin/python")
         XCTAssertEqual(process.arguments, [
-            "-m", "mlx_lm.server",
+            "-m", "mlx_lm", "server",
             "--host", "127.0.0.1",
             "--port", "8080",
             "--model", "mlx-community/Tiny"
@@ -24,6 +24,22 @@ final class ServerControlTests: XCTestCase {
 
         XCTAssertEqual(controller.state, .stopped)
         XCTAssertTrue(process.wasTerminated)
+    }
+
+    func testControllerFailsBeforeLaunchingWhenMLXPortIsUnavailable() throws {
+        let process = FakeManagedProcess()
+        let launcher = FakeProcessLauncher(process: process)
+        let controller = ServerProcessController(processLauncher: launcher, portChecker: FakePortChecker(isAvailable: false))
+        let settings = DashboardSettings(mlxPort: 8080)
+
+        XCTAssertThrowsError(
+            try controller.start(settings: settings, pythonExecutable: URL(filePath: "/venv/bin/python"))
+        ) { error in
+            XCTAssertEqual(error as? ServerProcessControllerError, .portUnavailable(host: "127.0.0.1", port: 8080))
+        }
+        XCTAssertEqual(controller.state, .failed)
+        XCTAssertEqual(controller.lastError, "Cannot start mlx-lm because 127.0.0.1:8080 is already in use.")
+        XCTAssertFalse(process.wasLaunched)
     }
 
     func testMLXServerAlwaysBindsToLocalhostEvenWhenSettingsHostIsUnsafe() {
@@ -67,10 +83,12 @@ private final class FakeManagedProcess: ManagedProcess {
     var executableURL: URL?
     var arguments: [String] = []
     var environment: [String: String]?
+    var wasLaunched = false
     var wasTerminated = false
     var isRunning = false
 
     func launch() throws {
+        wasLaunched = true
         isRunning = true
     }
 
@@ -85,5 +103,13 @@ private struct FakeProcessLauncher: ProcessLaunching {
 
     func makeProcess() -> ManagedProcess {
         process
+    }
+}
+
+private struct FakePortChecker: ServerPortChecking {
+    let isAvailable: Bool
+
+    func isPortAvailable(host: String, port: Int) -> Bool {
+        isAvailable
     }
 }

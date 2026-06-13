@@ -9,6 +9,7 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
     public var providerHost: String
     public var providerPort: Int
     public var serverFlags: [String]
+    public var providerDebugCaptureEnabled: Bool
 
     public init(
         activeModel: String? = nil,
@@ -16,7 +17,8 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
         mlxPort: Int = 8080,
         providerHost: String = "127.0.0.1",
         providerPort: Int = 8123,
-        serverFlags: [String] = []
+        serverFlags: [String] = [],
+        providerDebugCaptureEnabled: Bool = true
     ) {
         self.activeModel = activeModel
         self.mlxHost = mlxHost
@@ -24,6 +26,28 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
         self.providerHost = providerHost
         self.providerPort = providerPort
         self.serverFlags = serverFlags
+        self.providerDebugCaptureEnabled = providerDebugCaptureEnabled
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case activeModel
+        case mlxHost
+        case mlxPort
+        case providerHost
+        case providerPort
+        case serverFlags
+        case providerDebugCaptureEnabled
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.activeModel = try container.decodeIfPresent(String.self, forKey: .activeModel)
+        self.mlxHost = try container.decodeIfPresent(String.self, forKey: .mlxHost) ?? "127.0.0.1"
+        self.mlxPort = try container.decodeIfPresent(Int.self, forKey: .mlxPort) ?? 8080
+        self.providerHost = try container.decodeIfPresent(String.self, forKey: .providerHost) ?? "127.0.0.1"
+        self.providerPort = try container.decodeIfPresent(Int.self, forKey: .providerPort) ?? 8123
+        self.serverFlags = try container.decodeIfPresent([String].self, forKey: .serverFlags) ?? []
+        self.providerDebugCaptureEnabled = try container.decodeIfPresent(Bool.self, forKey: .providerDebugCaptureEnabled) ?? true
     }
 
     public var providerBaseURL: URL {

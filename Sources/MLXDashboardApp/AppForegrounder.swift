@@ -26,6 +26,7 @@ struct AppForegrounder {
 protocol DashboardCloseState: AnyObject {
     var hasRunningDownloads: Bool { get }
     func notifyCloseBlockedForRunningDownloads()
+    func stopOwnedServicesBeforeClose()
 }
 
 struct DashboardClosePolicy {
@@ -52,6 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let closeState,
               !DashboardClosePolicy.canClose(hasRunningDownloads: closeState.hasRunningDownloads)
         else {
+            closeState?.stopOwnedServicesBeforeClose()
             return .terminateNow
         }
 

@@ -42,7 +42,8 @@ final class DashboardViewModelTests: XCTestCase {
         let paths = try temporaryAppPaths()
         let process = FakeManagedProcess()
         let serverController = ServerProcessController(
-            processLauncher: FakeProcessLauncher(processes: [process])
+            processLauncher: FakeProcessLauncher(processes: [process]),
+            portChecker: FakePortChecker(isAvailable: true)
         )
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
@@ -68,6 +69,20 @@ final class DashboardViewModelTests: XCTestCase {
         cancellable.cancel()
     }
 
+    func testDashboardTelemetryUsesEnvironmentLogPath() throws {
+        let paths = try temporaryAppPaths()
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+        )
+
+        viewModel.telemetry.appendLog("Temp-path telemetry check")
+
+        let logText = try String(contentsOf: paths.logsDirectory.appending(path: "mlxdashboard.log"), encoding: .utf8)
+        XCTAssertTrue(logText.contains("Temp-path telemetry check"))
+    }
+
     func testRestartServerRestartsRunningController() async throws {
         let paths = try temporaryAppPaths()
         let python = paths.venvDirectory.appending(path: "bin/python")
@@ -76,7 +91,8 @@ final class DashboardViewModelTests: XCTestCase {
         let originalProcess = FakeManagedProcess()
         let restartedProcess = FakeManagedProcess()
         let serverController = ServerProcessController(
-            processLauncher: FakeProcessLauncher(processes: [originalProcess, restartedProcess])
+            processLauncher: FakeProcessLauncher(processes: [originalProcess, restartedProcess]),
+            portChecker: FakePortChecker(isAvailable: true)
         )
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
@@ -96,6 +112,35 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(serverController.state, .running)
     }
 
+    func testStartServerLogsFriendlyMessageWhenMLXPortIsUnavailable() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+        let process = FakeManagedProcess()
+        let serverController = ServerProcessController(
+            processLauncher: FakeProcessLauncher(processes: [process]),
+            portChecker: FakePortChecker(isAvailable: false)
+        )
+        let runner = FakeCommandRunner(results: [
+            "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: "")
+        ])
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            serverController: serverController
+        )
+
+        await viewModel.startServer()
+
+        XCTAssertEqual(serverController.state, .failed)
+        XCTAssertFalse(process.wasLaunched)
+        let logText = try String(contentsOf: paths.logsDirectory.appending(path: "mlxdashboard.log"), encoding: .utf8)
+        XCTAssertTrue(logText.contains("Failed to start server: Cannot start mlx-lm because 127.0.0.1:8080 is already in use."))
+    }
+
     func testProviderStartStopAvailabilityFollowsProviderState() throws {
         let paths = try temporaryAppPaths()
         let viewModel = DashboardViewModel(
@@ -113,6 +158,35 @@ final class DashboardViewModelTests: XCTestCase {
 
         XCTAssertFalse(viewModel.canStartProvider)
         XCTAssertTrue(viewModel.canStopProvider)
+    }
+
+    func testRunningProviderUsesActiveModelSelectedAfterProviderStart() async throws {
+        let paths = try temporaryAppPaths()
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+        )
+        viewModel.settings.providerPort = 18123
+        viewModel.installedModels = [
+            ModelRecord(id: "mlx-community/Tiny", status: .installed, localPath: "/tmp/tiny")
+        ]
+
+        do {
+            try viewModel.startProvider()
+        } catch {
+            throw XCTSkip("Loopback listener unavailable in this sandbox: \(error)")
+        }
+        defer { viewModel.stopProvider() }
+
+        viewModel.selectedInstalledModelID = "mlx-community/Tiny"
+        viewModel.setSelectedInstalledModelActive()
+
+        let url = URL(string: "http://127.0.0.1:18123/v1/models")!
+        let (data, response) = try await URLSession.shared.data(from: url)
+
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(try Self.modelIDs(in: data), ["mlx-ask", "mlx-plan", "mlx-fast", "mlx-community/Tiny"])
     }
 
     func testDefaultsModelQueryToDevstralSmall() throws {
@@ -302,6 +376,39 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.modelSearchMessage, "Install Python packages to search default MLX models: mlx-lm, huggingface_hub.")
         XCTAssertTrue(viewModel.shouldOfferPythonPackageInstall)
         XCTAssertFalse(runner.commands.contains { ($0.arguments.last ?? "").contains("list_models") })
+    }
+
+    func testSearchDefaultModelsIfReadyShowsFriendlyCancellationMessage() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(
+            at: python.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = FakeCommandRunner(
+            results: [
+                "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+                "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: "")
+            ],
+            thrownErrors: [
+                "search": CancellationError()
+            ]
+        )
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelSearcher: HuggingFaceModelSearcher(runner: runner)
+        )
+
+        await viewModel.searchDefaultModelsIfReady()
+
+        XCTAssertEqual(viewModel.modelSearchMessage, "Default model search cancelled.")
+        let logText = try String(contentsOf: paths.logsDirectory.appending(path: "mlxdashboard.log"), encoding: .utf8)
+        XCTAssertTrue(logText.contains("Default model search cancelled."))
+        XCTAssertFalse(logText.contains("Default model search failed"))
     }
 
     func testSearchModelsWithMissingPythonPackagesPromptsInstallInsteadOfSearching() async throws {
@@ -1055,14 +1162,22 @@ final class DashboardViewModelTests: XCTestCase {
         }
         return "[\(models.joined(separator: ","))]"
     }
+
+    private static func modelIDs(in data: Data) throws -> [String] {
+        let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let models = object?["data"] as? [[String: Any]]
+        return models?.compactMap { $0["id"] as? String } ?? []
+    }
 }
 
 private final class FakeCommandRunner: CommandRunning, @unchecked Sendable {
     private(set) var commands: [Command] = []
     let results: [String: CommandResult]
+    let thrownErrors: [String: Error]
 
-    init(results: [String: CommandResult]) {
+    init(results: [String: CommandResult], thrownErrors: [String: Error] = [:]) {
         self.results = results
+        self.thrownErrors = thrownErrors
     }
 
     func run(_ command: Command) async throws -> CommandResult {
@@ -1083,6 +1198,9 @@ private final class FakeCommandRunner: CommandRunning, @unchecked Sendable {
             }
         } else {
             key = script
+        }
+        if let error = thrownErrors[key] {
+            throw error
         }
         return results[key] ?? CommandResult(exitCode: 127, standardOutput: "", standardError: "unexpected command \(key)")
     }
@@ -1237,5 +1355,13 @@ private final class FakeProcessLauncher: ProcessLaunching {
 
     func makeProcess() -> ManagedProcess {
         processes.removeFirst()
+    }
+}
+
+private struct FakePortChecker: ServerPortChecking {
+    let isAvailable: Bool
+
+    func isPortAvailable(host: String, port: Int) -> Bool {
+        isAvailable
     }
 }

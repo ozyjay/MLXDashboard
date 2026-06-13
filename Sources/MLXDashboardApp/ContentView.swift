@@ -410,6 +410,7 @@ private struct WindowCloseGuardView: NSViewRepresentable {
             guard let viewModel,
                   !DashboardClosePolicy.canClose(hasRunningDownloads: viewModel.hasRunningDownloads)
             else {
+                viewModel?.stopOwnedServicesBeforeClose()
                 return true
             }
 
@@ -522,6 +523,18 @@ private struct ProviderTab: View {
             Text("MLXChat Provider").font(.title2.bold())
             LabeledContent("Base URL", value: viewModel.providerBaseURL)
             LabeledContent("Access", value: "Localhost only")
+            Toggle(
+                "Full local payload capture",
+                isOn: Binding(
+                    get: { viewModel.settings.providerDebugCaptureEnabled },
+                    set: { viewModel.setProviderDebugCaptureEnabled($0) }
+                )
+            )
+            .toggleStyle(.switch)
+            Text("Debug log: \(viewModel.providerDebugLogPath)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
             HStack {
                 Button("Start Provider") {
                     do {
@@ -538,6 +551,7 @@ private struct ProviderTab: View {
             Text("Routes").font(.headline)
             Text("GET /health")
             Text("GET /v1/models")
+            Text("POST /v1/responses")
             Text("POST /v1/chat/completions")
             Text("POST /v1/completions")
             Spacer()

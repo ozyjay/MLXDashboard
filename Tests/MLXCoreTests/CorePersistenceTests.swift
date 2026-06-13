@@ -11,7 +11,8 @@ final class CorePersistenceTests: XCTestCase {
             mlxPort: 8080,
             providerHost: "127.0.0.1",
             providerPort: 8123,
-            serverFlags: ["--trust-remote-code"]
+            serverFlags: ["--trust-remote-code"],
+            providerDebugCaptureEnabled: false
         )
 
         try store.save(settings)
@@ -21,12 +22,17 @@ final class CorePersistenceTests: XCTestCase {
         XCTAssertEqual(reloaded.mlxPort, 8080)
         XCTAssertEqual(reloaded.providerPort, 8123)
         XCTAssertEqual(reloaded.serverFlags, ["--trust-remote-code"])
+        XCTAssertFalse(reloaded.providerDebugCaptureEnabled)
     }
 
     func testMLXBaseURLUsesLocalhostEvenIfPersistedHostIsUnsafe() {
         let settings = DashboardSettings(mlxHost: "0.0.0.0", mlxPort: 8080)
 
         XCTAssertEqual(settings.mlxBaseURL.absoluteString, "http://127.0.0.1:8080")
+    }
+
+    func testDashboardSettingsDefaultsProviderDebugCaptureOn() {
+        XCTAssertTrue(DashboardSettings().providerDebugCaptureEnabled)
     }
 
     func testTokenStoreCreatesStableTokenAndCanRegenerate() throws {

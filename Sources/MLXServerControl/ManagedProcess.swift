@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 public protocol ManagedProcess: AnyObject {
     var executableURL: URL? { get set }
@@ -54,5 +55,33 @@ public struct FoundationProcessLauncher: ProcessLaunching {
 
     public func makeProcess() -> ManagedProcess {
         FoundationManagedProcess()
+    }
+}
+
+public protocol ServerPortChecking: Sendable {
+    func isPortAvailable(host: String, port: Int) -> Bool
+}
+
+public struct TCPServerPortChecker: ServerPortChecking {
+    public init() {}
+
+    public func isPortAvailable(host: String, port: Int) -> Bool {
+        let socketDescriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard socketDescriptor >= 0 else { return false }
+        defer { Darwin.close(socketDescriptor) }
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(port).bigEndian
+        guard inet_pton(AF_INET, host, &address.sin_addr) == 1 else {
+            return false
+        }
+
+        return withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                Darwin.bind(socketDescriptor, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+            }
+        }
     }
 }
