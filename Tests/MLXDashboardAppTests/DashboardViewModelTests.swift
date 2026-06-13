@@ -1087,6 +1087,53 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(try SettingsStore(fileURL: paths.settingsFile).load().activeModel, "mlx-community/Tiny")
     }
 
+    func testSetSelectedInstallingModelActiveKeepsDownloadProgress() throws {
+        let paths = try temporaryAppPaths()
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+        )
+        let progress = ModelInstallProgress(
+            modelID: "mlx-community/Tiny",
+            phase: .downloading,
+            detail: "Downloading model files"
+        )
+        viewModel.installedModels = [
+            ModelRecord(id: "mlx-community/Tiny", status: .installing, message: "Installing from Hugging Face")
+        ]
+        viewModel.selectedInstalledModelID = "mlx-community/Tiny"
+        viewModel.modelInstallProgress = progress
+
+        XCTAssertFalse(viewModel.canSetSelectedInstalledModelActive)
+        XCTAssertFalse(viewModel.canAssignSelectedInstalledModelToProviderRole)
+
+        viewModel.setSelectedInstalledModelActive()
+
+        XCTAssertNil(viewModel.settings.activeModel)
+        XCTAssertEqual(viewModel.modelInstallProgress, progress)
+        XCTAssertEqual(viewModel.modelInstallMessage, "Select an installed model before setting it active.")
+    }
+
+    func testAssignSelectedInstalledModelToProviderRolePersistsSettings() throws {
+        let paths = try temporaryAppPaths()
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+        )
+        viewModel.installedModels = [
+            ModelRecord(id: "mlx-community/Tiny", status: .installed, localPath: "/tmp/tiny")
+        ]
+        viewModel.selectedInstalledModelID = "mlx-community/Tiny"
+
+        viewModel.assignSelectedInstalledModel(to: .coding)
+
+        XCTAssertEqual(viewModel.settings.providerRoleAssignments.coding, "mlx-community/Tiny")
+        XCTAssertEqual(try SettingsStore(fileURL: paths.settingsFile).load().providerRoleAssignments.coding, "mlx-community/Tiny")
+        XCTAssertEqual(viewModel.modelInstallMessage, "Assigned mlx-community/Tiny to Fast/Coding.")
+    }
+
     func testDeleteSelectedInstalledModelRemovesWholeRepoCacheFolderAndMarksRemoved() throws {
         let paths = try temporaryAppPaths()
         let cacheRoot = try temporaryDirectory()
@@ -1140,6 +1187,44 @@ final class DashboardViewModelTests: XCTestCase {
 
         XCTAssertNil(viewModel.modelInstallProgress)
         XCTAssertEqual(viewModel.modelInstallMessage, "Deleted cache for mlx-community/Tiny.")
+    }
+
+    func testDeleteSelectedInstalledModelClearsMatchingProviderRoleAssignments() throws {
+        let paths = try temporaryAppPaths()
+        try SettingsStore(fileURL: paths.settingsFile).save(
+            DashboardSettings(
+                providerRoleAssignments: ProviderRoleAssignments(
+                    ask: "mlx-community/Tiny",
+                    plan: "mlx-community/Plan",
+                    coding: "mlx-community/Tiny"
+                )
+            )
+        )
+        let cacheRoot = try temporaryDirectory()
+        let snapshot = cacheRoot.appending(path: "models--mlx-community--Tiny/snapshots/abc", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: snapshot.appending(path: "config.json").path, contents: Data())
+
+        let registry = ModelRegistry(fileURL: paths.modelRegistryFile)
+        registry.upsert(ModelRecord(id: "mlx-community/Tiny", status: .installed, localPath: snapshot.path))
+        try registry.save()
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: registry,
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:])),
+            huggingFaceCacheRoot: cacheRoot
+        )
+        viewModel.selectedInstalledModelID = "mlx-community/Tiny"
+
+        viewModel.deleteSelectedInstalledModelFromCache()
+
+        XCTAssertNil(viewModel.settings.providerRoleAssignments.ask)
+        XCTAssertEqual(viewModel.settings.providerRoleAssignments.plan, "mlx-community/Plan")
+        XCTAssertNil(viewModel.settings.providerRoleAssignments.coding)
+        let persisted = try SettingsStore(fileURL: paths.settingsFile).load().providerRoleAssignments
+        XCTAssertNil(persisted.ask)
+        XCTAssertEqual(persisted.plan, "mlx-community/Plan")
+        XCTAssertNil(persisted.coding)
     }
 
     private func temporaryAppPaths() throws -> AppPaths {

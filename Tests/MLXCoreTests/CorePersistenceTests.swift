@@ -12,7 +12,12 @@ final class CorePersistenceTests: XCTestCase {
             providerHost: "127.0.0.1",
             providerPort: 8123,
             serverFlags: ["--trust-remote-code"],
-            providerDebugCaptureEnabled: false
+            providerDebugCaptureEnabled: false,
+            providerRoleAssignments: ProviderRoleAssignments(
+                ask: "mlx-community/Ask",
+                plan: "mlx-community/Plan",
+                coding: "mlx-community/Coder"
+            )
         )
 
         try store.save(settings)
@@ -23,6 +28,9 @@ final class CorePersistenceTests: XCTestCase {
         XCTAssertEqual(reloaded.providerPort, 8123)
         XCTAssertEqual(reloaded.serverFlags, ["--trust-remote-code"])
         XCTAssertFalse(reloaded.providerDebugCaptureEnabled)
+        XCTAssertEqual(reloaded.providerRoleAssignments.ask, "mlx-community/Ask")
+        XCTAssertEqual(reloaded.providerRoleAssignments.plan, "mlx-community/Plan")
+        XCTAssertEqual(reloaded.providerRoleAssignments.coding, "mlx-community/Coder")
     }
 
     func testMLXBaseURLUsesLocalhostEvenIfPersistedHostIsUnsafe() {
@@ -33,6 +41,17 @@ final class CorePersistenceTests: XCTestCase {
 
     func testDashboardSettingsDefaultsProviderDebugCaptureOn() {
         XCTAssertTrue(DashboardSettings().providerDebugCaptureEnabled)
+    }
+
+    func testDashboardSettingsDefaultsProviderRoleAssignmentsEmptyWhenMissing() throws {
+        let json = Data(
+            #"{"activeModel":"mlx-community/Tiny","mlxHost":"127.0.0.1","mlxPort":8080,"providerHost":"127.0.0.1","providerPort":8123,"serverFlags":[],"providerDebugCaptureEnabled":true}"#.utf8
+        )
+
+        let settings = try JSONDecoder().decode(DashboardSettings.self, from: json)
+
+        XCTAssertEqual(settings.activeModel, "mlx-community/Tiny")
+        XCTAssertEqual(settings.providerRoleAssignments, ProviderRoleAssignments())
     }
 
     func testTokenStoreCreatesStableTokenAndCanRegenerate() throws {

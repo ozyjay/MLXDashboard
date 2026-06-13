@@ -57,6 +57,25 @@ private final class ProviderDebugCaptureState: @unchecked Sendable {
     }
 }
 
+private final class ProviderRoleAssignmentState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedAssignments: ProviderRoleAssignments
+
+    init(assignments: ProviderRoleAssignments) {
+        self.storedAssignments = assignments
+    }
+
+    var assignments: ProviderRoleAssignments {
+        lock.withLock { storedAssignments }
+    }
+
+    func update(_ assignments: ProviderRoleAssignments) {
+        lock.withLock {
+            storedAssignments = assignments
+        }
+    }
+}
+
 @MainActor
 final class DashboardViewModel: ObservableObject {
     @Published var settings: DashboardSettings
@@ -88,6 +107,7 @@ final class DashboardViewModel: ObservableObject {
     private let configuredHuggingFaceCacheRoot: URL?
     private let activeModelSelection: ActiveModelSelection
     private let providerDebugCaptureState: ProviderDebugCaptureState
+    private let providerRoleAssignmentState: ProviderRoleAssignmentState
     private var serverControllerCancellable: AnyCancellable?
     private var providerServer: NIOProviderServer?
     private var activeInstallTask: Task<Void, Never>?
@@ -125,6 +145,7 @@ final class DashboardViewModel: ObservableObject {
         self.settings = loadedSettings
         self.activeModelSelection = ActiveModelSelection(model: loadedSettings.activeModel)
         self.providerDebugCaptureState = ProviderDebugCaptureState(enabled: loadedSettings.providerDebugCaptureEnabled)
+        self.providerRoleAssignmentState = ProviderRoleAssignmentState(assignments: loadedSettings.providerRoleAssignments)
         try? registry.load()
         self.installedModels = Self.visibleInstalledModels(from: registry.records)
         self.serverControllerCancellable = serverController.objectWillChange.sink { [weak self] _ in
@@ -193,9 +214,18 @@ final class DashboardViewModel: ObservableObject {
         canContinueSelectedInstalledModelInstall
     }
 
+    var canSetSelectedInstalledModelActive: Bool {
+        selectedInstalledModelIsInstalled
+    }
+
+    var canAssignSelectedInstalledModelToProviderRole: Bool {
+        selectedInstalledModelIsInstalled
+    }
+
     func saveSettings() {
         do {
             providerDebugCaptureState.update(settings.providerDebugCaptureEnabled)
+            providerRoleAssignmentState.update(settings.providerRoleAssignments)
             try settingsStore.save(settings)
             telemetry.appendLog("Saved settings")
         } catch {
@@ -267,6 +297,7 @@ final class DashboardViewModel: ObservableObject {
         let router = ProviderRouter(
             upstream: upstream,
             activeModelProvider: { [activeModelSelection] in activeModelSelection.model },
+            roleAssignmentsProvider: { [providerRoleAssignmentState] in providerRoleAssignmentState.assignments },
             eventLogger: { [weak self] message in
                 Task { @MainActor [weak self] in
                     self?.telemetry.recordRequest(latency: 0)
@@ -624,9 +655,8 @@ final class DashboardViewModel: ObservableObject {
 
     func setSelectedInstalledModelActive() {
         guard let selectedInstalledModelID,
-              installedModels.contains(where: { $0.id == selectedInstalledModelID && $0.status == .installed })
+              selectedInstalledModelIsInstalled
         else {
-            modelInstallProgress = nil
             modelInstallMessage = "Select an installed model before setting it active."
             return
         }
@@ -636,6 +666,22 @@ final class DashboardViewModel: ObservableObject {
         activeModelSelection.update(selectedInstalledModelID)
         saveSettings()
         modelInstallMessage = "Selected \(selectedInstalledModelID) as the active model."
+    }
+
+    func assignSelectedInstalledModel(to role: ProviderModelRole) {
+        guard let selectedInstalledModelID,
+              selectedInstalledModelIsInstalled
+        else {
+            modelInstallMessage = "Select an installed model before assigning it to \(role.displayName)."
+            return
+        }
+
+        modelInstallProgress = nil
+        settings.providerRoleAssignments.setModel(selectedInstalledModelID, for: role)
+        providerRoleAssignmentState.update(settings.providerRoleAssignments)
+        saveSettings()
+        modelInstallMessage = "Assigned \(selectedInstalledModelID) to \(role.displayName)."
+        telemetry.appendLog("Assigned \(selectedInstalledModelID) to provider role \(role.rawValue)")
     }
 
     func deleteSelectedInstalledModelFromCache() {
@@ -661,6 +707,8 @@ final class DashboardViewModel: ObservableObject {
             if settings.activeModel == record.id {
                 settings.activeModel = nil
                 activeModelSelection.update(nil)
+            }
+            if clearProviderRoleAssignments(for: record.id) || settings.activeModel == nil {
                 saveSettings()
             }
             modelInstallMessage = "Deleted cache for \(record.id)."
@@ -860,6 +908,11 @@ final class DashboardViewModel: ObservableObject {
         records.filter { $0.status != .removed }
     }
 
+    private var selectedInstalledModelIsInstalled: Bool {
+        guard let selectedInstalledModelID else { return false }
+        return installedModels.contains { $0.id == selectedInstalledModelID && $0.status == .installed }
+    }
+
     private func friendlyInstallMessage(for error: Error) -> String {
         let raw = String(describing: error)
         let lowercased = raw.lowercased()
@@ -871,6 +924,20 @@ final class DashboardViewModel: ObservableObject {
         }
         return raw
     }
+
+    @discardableResult
+    private func clearProviderRoleAssignments(for modelID: String) -> Bool {
+        var assignments = settings.providerRoleAssignments
+        var changed = false
+        for role in [ProviderModelRole.ask, .plan, .coding] where assignments.model(for: role) == modelID {
+            assignments.setModel(nil, for: role)
+            changed = true
+        }
+        guard changed else { return false }
+        settings.providerRoleAssignments = assignments
+        providerRoleAssignmentState.update(assignments)
+        return true
+    }
 }
 
 private extension ModelInstallPhase {
@@ -880,6 +947,19 @@ private extension ModelInstallPhase {
             return true
         case .preparing, .checkingPackages, .checkingLogin, .downloading, .finalizing:
             return false
+        }
+    }
+}
+
+private extension ProviderModelRole {
+    var displayName: String {
+        switch self {
+        case .ask:
+            "Ask"
+        case .plan:
+            "Plan"
+        case .coding:
+            "Fast/Coding"
         }
     }
 }

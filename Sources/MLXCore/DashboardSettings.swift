@@ -1,5 +1,45 @@
 import Foundation
 
+public enum ProviderModelRole: String, Codable, Equatable, Sendable {
+    case ask
+    case plan
+    case coding
+}
+
+public struct ProviderRoleAssignments: Codable, Equatable, Sendable {
+    public var ask: String?
+    public var plan: String?
+    public var coding: String?
+
+    public init(ask: String? = nil, plan: String? = nil, coding: String? = nil) {
+        self.ask = ask
+        self.plan = plan
+        self.coding = coding
+    }
+
+    public func model(for role: ProviderModelRole) -> String? {
+        switch role {
+        case .ask:
+            ask
+        case .plan:
+            plan
+        case .coding:
+            coding
+        }
+    }
+
+    public mutating func setModel(_ model: String?, for role: ProviderModelRole) {
+        switch role {
+        case .ask:
+            ask = model
+        case .plan:
+            plan = model
+        case .coding:
+            coding = model
+        }
+    }
+}
+
 public struct DashboardSettings: Codable, Equatable, Sendable {
     public static let localMLXHost = "127.0.0.1"
 
@@ -10,6 +50,7 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
     public var providerPort: Int
     public var serverFlags: [String]
     public var providerDebugCaptureEnabled: Bool
+    public var providerRoleAssignments: ProviderRoleAssignments
 
     public init(
         activeModel: String? = nil,
@@ -18,7 +59,8 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
         providerHost: String = "127.0.0.1",
         providerPort: Int = 8123,
         serverFlags: [String] = [],
-        providerDebugCaptureEnabled: Bool = true
+        providerDebugCaptureEnabled: Bool = true,
+        providerRoleAssignments: ProviderRoleAssignments = ProviderRoleAssignments()
     ) {
         self.activeModel = activeModel
         self.mlxHost = mlxHost
@@ -27,6 +69,7 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
         self.providerPort = providerPort
         self.serverFlags = serverFlags
         self.providerDebugCaptureEnabled = providerDebugCaptureEnabled
+        self.providerRoleAssignments = providerRoleAssignments
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -37,6 +80,7 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
         case providerPort
         case serverFlags
         case providerDebugCaptureEnabled
+        case providerRoleAssignments
     }
 
     public init(from decoder: Decoder) throws {
@@ -48,6 +92,7 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
         self.providerPort = try container.decodeIfPresent(Int.self, forKey: .providerPort) ?? 8123
         self.serverFlags = try container.decodeIfPresent([String].self, forKey: .serverFlags) ?? []
         self.providerDebugCaptureEnabled = try container.decodeIfPresent(Bool.self, forKey: .providerDebugCaptureEnabled) ?? true
+        self.providerRoleAssignments = try container.decodeIfPresent(ProviderRoleAssignments.self, forKey: .providerRoleAssignments) ?? ProviderRoleAssignments()
     }
 
     public var providerBaseURL: URL {

@@ -324,7 +324,13 @@ private struct InstalledModelsView: View {
                 }
                 .disabled(!viewModel.canRetrySelectedInstalledModelInstallWithoutXet)
                 Button("Set Active") { viewModel.setSelectedInstalledModelActive() }
-                    .disabled(viewModel.selectedInstalledModelID == nil)
+                    .disabled(!viewModel.canSetSelectedInstalledModelActive)
+                Button("Set Ask") { viewModel.assignSelectedInstalledModel(to: .ask) }
+                    .disabled(!viewModel.canAssignSelectedInstalledModelToProviderRole)
+                Button("Set Plan") { viewModel.assignSelectedInstalledModel(to: .plan) }
+                    .disabled(!viewModel.canAssignSelectedInstalledModelToProviderRole)
+                Button("Set Fast") { viewModel.assignSelectedInstalledModel(to: .coding) }
+                    .disabled(!viewModel.canAssignSelectedInstalledModelToProviderRole)
                 Button("Delete from Cache", role: .destructive) {
                     isConfirmingCacheDelete = true
                 }
@@ -523,6 +529,14 @@ private struct ProviderTab: View {
             Text("MLXChat Provider").font(.title2.bold())
             LabeledContent("Base URL", value: viewModel.providerBaseURL)
             LabeledContent("Access", value: "Localhost only")
+            GroupBox("Role assignments") {
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
+                    roleRow("Ask", viewModel.settings.providerRoleAssignments.ask)
+                    roleRow("Plan", viewModel.settings.providerRoleAssignments.plan)
+                    roleRow("Fast/Coding", viewModel.settings.providerRoleAssignments.coding)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
             Toggle(
                 "Full local payload capture",
                 isOn: Binding(
@@ -555,6 +569,20 @@ private struct ProviderTab: View {
             Text("POST /v1/chat/completions")
             Text("POST /v1/completions")
             Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private func roleRow(_ label: String, _ model: String?) -> some View {
+        GridRow {
+            Text(label)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(model ?? "Not assigned")
+                .font(.caption)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
         }
     }
 }

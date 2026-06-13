@@ -10,11 +10,16 @@ public final class ProviderDebugRecorder: @unchecked Sendable {
         self.isEnabled = isEnabled
     }
 
+    public var isEnabledNow: Bool {
+        isEnabled()
+    }
+
     public func record(
         request: ProviderRequest,
         response: ProviderResponse,
         selectedModel: String?,
-        aliasResolution: String?
+        aliasResolution: String?,
+        routingDecision: [String: Any]? = nil
     ) {
         guard isEnabled() else { return }
 
@@ -34,6 +39,9 @@ public final class ProviderDebugRecorder: @unchecked Sendable {
         }
         if let aliasResolution {
             payload["alias_resolution"] = aliasResolution
+        }
+        if let routingDecision {
+            payload["routing_decision"] = routingDecision
         }
         if let requestText = String(data: request.body, encoding: .utf8) {
             payload["request_body_text"] = requestText

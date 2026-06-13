@@ -1,10 +1,12 @@
 import Foundation
+import MLXCore
 
 public struct ProviderRouter: Sendable {
     private static let modeAliases = ["mlx-ask", "mlx-plan", "mlx-fast"]
 
     private let upstream: any ProviderUpstreamClient
     private let activeModelProvider: @Sendable () -> String?
+    private let roleAssignmentsProvider: @Sendable () -> ProviderRoleAssignments
     private let eventLogger: @Sendable (String) -> Void
     private let debugRecorder: ProviderDebugRecorder?
     // Android Studio probes these local-provider discovery paths before using OpenAI-compatible chat routes.
@@ -25,27 +27,109 @@ public struct ProviderRouter: Sendable {
     public init(
         upstream: any ProviderUpstreamClient,
         activeModelProvider: @escaping @Sendable () -> String? = { nil },
+        roleAssignmentsProvider: @escaping @Sendable () -> ProviderRoleAssignments = { ProviderRoleAssignments() },
         eventLogger: @escaping @Sendable (String) -> Void = { _ in },
         debugRecorder: ProviderDebugRecorder? = nil
     ) {
         self.upstream = upstream
         self.activeModelProvider = activeModelProvider
+        self.roleAssignmentsProvider = roleAssignmentsProvider
         self.eventLogger = eventLogger
         self.debugRecorder = debugRecorder
     }
 
     public func handle(_ request: ProviderRequest) async throws -> ProviderResponse {
+        switch try await route(request) {
+        case .buffered(let response):
+            return response
+        case .streamed(let response):
+            var body = Data()
+            for try await chunk in response.chunks {
+                body.append(chunk)
+            }
+            return ProviderResponse(status: response.status, headers: response.headers, body: body)
+        }
+    }
+
+    public func route(_ request: ProviderRequest) async throws -> ProviderRouteResult {
         let request = requestWithCanonicalPath(request)
         let debugContext = debugContext(for: request)
 
-        func finish(_ response: ProviderResponse, context: ProviderDebugContext = debugContext) -> ProviderResponse {
+        func finish(_ response: ProviderResponse, context: ProviderDebugContext = debugContext) -> ProviderRouteResult {
             debugRecorder?.record(
                 request: request,
                 response: response,
                 selectedModel: context.selectedModel,
-                aliasResolution: context.aliasResolution
+                aliasResolution: context.aliasResolution,
+                routingDecision: context.routingDecision?.debugPayload
             )
-            return response
+            return .buffered(response)
+        }
+
+        func logStreamErrorIfNeeded(response: ProviderStreamedResponse, body: Data, upstreamRequest: ProviderRequest?) {
+            guard response.status >= 400 else { return }
+            eventLogger("Provider upstream error body for \(request.method) \(request.path) status \(response.status): \(sanitizedErrorBody(body))")
+            if let upstreamRequest {
+                eventLogger("Provider upstream request summary for \(request.method) \(request.path): \(requestSummary(from: upstreamRequest.body))")
+            }
+        }
+
+        func finishStream(
+            _ response: ProviderStreamedResponse,
+            context: ProviderDebugContext = debugContext,
+            upstreamRequest: ProviderRequest? = nil
+        ) -> ProviderRouteResult {
+            guard let debugRecorder else {
+                let chunks = AsyncThrowingStream<Data, Error> { continuation in
+                    Task {
+                        var body = Data()
+                        do {
+                            for try await chunk in response.chunks {
+                                body.append(chunk)
+                                continuation.yield(chunk)
+                            }
+                            logStreamErrorIfNeeded(response: response, body: body, upstreamRequest: upstreamRequest)
+                            continuation.finish()
+                        } catch {
+                            logStreamErrorIfNeeded(response: response, body: body, upstreamRequest: upstreamRequest)
+                            continuation.finish(throwing: error)
+                        }
+                    }
+                }
+                return .streamed(ProviderStreamedResponse(status: response.status, headers: response.headers, chunks: chunks))
+            }
+
+            let chunks = AsyncThrowingStream<Data, Error> { continuation in
+                Task {
+                    var body = Data()
+                    do {
+                        for try await chunk in response.chunks {
+                            body.append(chunk)
+                            continuation.yield(chunk)
+                        }
+                        logStreamErrorIfNeeded(response: response, body: body, upstreamRequest: upstreamRequest)
+                        debugRecorder.record(
+                            request: request,
+                            response: ProviderResponse(status: response.status, headers: response.headers, body: body),
+                            selectedModel: context.selectedModel,
+                            aliasResolution: context.aliasResolution,
+                            routingDecision: context.routingDecision?.debugPayload
+                        )
+                        continuation.finish()
+                    } catch {
+                        logStreamErrorIfNeeded(response: response, body: body, upstreamRequest: upstreamRequest)
+                        debugRecorder.record(
+                            request: request,
+                            response: ProviderResponse(status: response.status, headers: response.headers, body: body),
+                            selectedModel: context.selectedModel,
+                            aliasResolution: context.aliasResolution,
+                            routingDecision: context.routingDecision?.debugPayload
+                        )
+                        continuation.finish(throwing: error)
+                    }
+                }
+            }
+            return .streamed(ProviderStreamedResponse(status: response.status, headers: response.headers, chunks: chunks))
         }
 
         logIncomingRequestSummary(request)
@@ -117,6 +201,12 @@ public struct ProviderRouter: Sendable {
 
         let routed = requestWithActiveModelIfAvailable(request)
         let proxiedRequest = routed.request
+        if shouldStream(proxiedRequest) {
+            let response = try await upstream.proxyStream(proxiedRequest)
+            eventLogger("Provider streaming \(request.method) \(request.path) from upstream with status \(response.status)")
+            return finishStream(response, context: routed.debugContext, upstreamRequest: proxiedRequest)
+        }
+
         let response = try await upstream.proxy(proxiedRequest)
         eventLogger("Provider proxied \(request.method) \(request.path) to upstream with status \(response.status)")
         if response.status >= 400 {
@@ -186,6 +276,14 @@ public struct ProviderRouter: Sendable {
         )
     }
 
+    private func shouldStream(_ request: ProviderRequest) -> Bool {
+        guard request.method == "POST",
+              request.path == "/v1/chat/completions" || request.path == "/v1/completions",
+              let object = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any]
+        else { return false }
+        return object["stream"] as? Bool == true
+    }
+
     private func activeModel() -> String? {
         activeModelProvider().flatMap { $0.isEmpty ? nil : $0 }
     }
@@ -215,7 +313,8 @@ public struct ProviderRouter: Sendable {
         let selectedModel = selectedModel(from: request.body)
         return ProviderDebugContext(
             selectedModel: selectedModel,
-            aliasResolution: aliasResolution(for: selectedModel)
+            aliasResolution: aliasResolution(for: selectedModel),
+            routingDecision: nil
         )
     }
 
@@ -595,7 +694,8 @@ public struct ProviderRouter: Sendable {
         let selectedModel = selectedModel(from: request.body)
         var debugContext = ProviderDebugContext(
             selectedModel: selectedModel,
-            aliasResolution: aliasResolution(for: selectedModel)
+            aliasResolution: aliasResolution(for: selectedModel),
+            routingDecision: nil
         )
         guard request.method == "POST",
               request.path == "/v1/chat/completions" || request.path == "/v1/completions",
@@ -604,12 +704,34 @@ public struct ProviderRouter: Sendable {
         else { return (request, debugContext) }
 
         var payload = object
+        let routingDecision = routingDecision(
+            selectedModel: selectedModel,
+            payload: object,
+            activeModel: activeModel
+        )
+        debugContext.routingDecision = routingDecision
         if let selectedModel,
            Self.modeAliases.contains(selectedModel) {
             debugContext.aliasResolution = "\(selectedModel) -> \(activeModel)"
             eventLogger("Provider resolved model alias \(selectedModel) to active model \(activeModel)")
         }
+        if let selectedAlias = routingDecision.selectedAlias,
+           let desiredRoleModel = routingDecision.desiredRoleModel,
+           let fallbackReason = routingDecision.fallbackReason {
+            eventLogger("Provider routing fallback for \(selectedAlias): desired role model \(desiredRoleModel) is not loaded; using active model \(activeModel)")
+            eventLogger("Provider routing decision for \(selectedAlias): role=\(routingDecision.inferredRole?.rawValue ?? "none"), capability=\(routingDecision.clientCapability.rawValue), upstream=\(activeModel), fallback=\(fallbackReason)")
+        } else if let selectedAlias = routingDecision.selectedAlias {
+            eventLogger("Provider routing decision for \(selectedAlias): role=\(routingDecision.inferredRole?.rawValue ?? "none"), capability=\(routingDecision.clientCapability.rawValue), upstream=\(activeModel)")
+        }
         payload["model"] = activeModel
+        if routingDecision.shouldInjectMetadata,
+           debugRecorder?.isEnabledNow == true {
+            prependSystemMessage(
+                routingDecision.metadataMessage,
+                to: &payload
+            )
+            eventLogger("Provider injected selected model metadata for \(routingDecision.selectedAlias ?? routingDecision.requestedModel ?? "unknown")")
+        }
         if let normalizedMessages = normalizedMessages(from: payload["messages"]) {
             payload["messages"] = normalizedMessages
             eventLogger("Provider normalized \(request.method) \(request.path) messages for MLX upstream compatibility")
@@ -630,6 +752,77 @@ public struct ProviderRouter: Sendable {
             ProviderRequest(method: request.method, path: request.path, headers: request.headers, body: body),
             debugContext
         )
+    }
+
+    private func routingDecision(
+        selectedModel: String?,
+        payload: [String: Any],
+        activeModel: String
+    ) -> ProviderRoutingDecision {
+        let selectedAlias = selectedModel.flatMap { Self.modeAliases.contains($0) ? $0 : nil }
+        let aliasRole = selectedAlias.flatMap(role(forAlias:))
+        let inferredRole: ProviderModelRole?
+        if containsPlanningModePrompt(in: payload["messages"]) {
+            inferredRole = .plan
+        } else {
+            inferredRole = aliasRole
+        }
+        let desiredRoleModel = inferredRole.flatMap { roleAssignmentsProvider().model(for: $0) }
+        let fallbackReason: String?
+        if inferredRole != nil, desiredRoleModel == nil {
+            fallbackReason = "no model assigned for inferred role"
+        } else if let desiredRoleModel, desiredRoleModel != activeModel {
+            fallbackReason = "desired role model is not the active loaded model"
+        } else {
+            fallbackReason = nil
+        }
+        return ProviderRoutingDecision(
+            requestedModel: selectedModel,
+            selectedAlias: selectedAlias,
+            inferredRole: inferredRole,
+            clientCapability: clientCapability(from: payload["tools"]),
+            desiredRoleModel: desiredRoleModel,
+            upstreamModel: activeModel,
+            fallbackReason: fallbackReason
+        )
+    }
+
+    private func role(forAlias alias: String) -> ProviderModelRole? {
+        switch alias {
+        case "mlx-ask":
+            .ask
+        case "mlx-plan":
+            .plan
+        case "mlx-fast":
+            .coding
+        default:
+            nil
+        }
+    }
+
+    private func clientCapability(from toolsValue: Any?) -> ProviderClientCapability {
+        guard let tools = toolsValue as? [[String: Any]], !tools.isEmpty else {
+            return .unknown
+        }
+        let toolNames = tools.compactMap { tool -> String? in
+            guard let function = tool["function"] as? [String: Any] else { return nil }
+            return function["name"] as? String
+        }
+        if toolNames.contains(where: { ["write_file", "gradle_sync", "gradle_build"].contains($0) }) {
+            return .editBuild
+        }
+        return .readOnly
+    }
+
+    private func containsPlanningModePrompt(in messagesValue: Any?) -> Bool {
+        guard let messages = messagesValue as? [[String: Any]] else { return false }
+        return messages.contains { message in
+            guard let role = message["role"] as? String,
+                  role == "developer" || role == "system",
+                  let text = normalizedContent(message["content"] ?? "")
+            else { return false }
+            return text.contains("You are in PLANNING mode") || text.contains("Mode: PLANNING")
+        }
     }
 
     private func removeToolCallingFields(from payload: inout [String: Any]) -> Bool {
@@ -1118,6 +1311,64 @@ public struct ProviderRouter: Sendable {
 private struct ProviderDebugContext {
     var selectedModel: String?
     var aliasResolution: String?
+    var routingDecision: ProviderRoutingDecision?
+}
+
+private enum ProviderClientCapability: String {
+    case unknown
+    case readOnly = "read_only"
+    case editBuild = "edit_build"
+}
+
+private struct ProviderRoutingDecision {
+    var requestedModel: String?
+    var selectedAlias: String?
+    var inferredRole: ProviderModelRole?
+    var clientCapability: ProviderClientCapability
+    var desiredRoleModel: String?
+    var upstreamModel: String
+    var fallbackReason: String?
+
+    var shouldInjectMetadata: Bool {
+        selectedAlias != nil || inferredRole != nil
+    }
+
+    var metadataMessage: String {
+        let aliasText = selectedAlias ?? requestedModel ?? "none"
+        let roleText = inferredRole?.rawValue ?? "none"
+        let desiredText = desiredRoleModel ?? "none"
+        let fallbackText = fallbackReason ?? "none"
+        return [
+            "Provider selected model alias: \(aliasText).",
+            "Provider inferred role: \(roleText).",
+            "Desired role model: \(desiredText).",
+            "Actual upstream MLX model: \(upstreamModel).",
+            "Fallback reason: \(fallbackText)."
+        ].joined(separator: " ")
+    }
+
+    var debugPayload: [String: Any] {
+        var payload: [String: Any] = [
+            "client_capability": clientCapability.rawValue,
+            "upstream_model": upstreamModel
+        ]
+        if let requestedModel {
+            payload["requested_model"] = requestedModel
+        }
+        if let selectedAlias {
+            payload["selected_alias"] = selectedAlias
+        }
+        if let inferredRole {
+            payload["inferred_role"] = inferredRole.rawValue
+        }
+        if let desiredRoleModel {
+            payload["desired_role_model"] = desiredRoleModel
+        }
+        if let fallbackReason {
+            payload["fallback_reason"] = fallbackReason
+        }
+        return payload
+    }
 }
 
 private enum ResponsesCompatibilityError: Error {

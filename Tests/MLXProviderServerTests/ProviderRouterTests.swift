@@ -350,7 +350,7 @@ final class ProviderRouterTests: XCTestCase {
             $0 == "Provider rewrote POST /v1/chat/completions model to active model mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit"
         })
         XCTAssertTrue(logger.messages.contains {
-            $0 == "Provider proxied POST /v1/chat/completions to upstream with status 200"
+            $0 == "Provider streaming POST /v1/chat/completions from upstream with status 200"
         })
     }
 
@@ -375,6 +375,195 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertTrue(logger.messages.contains {
             $0 == "Provider resolved model alias mlx-fast to active model mlx-community/Tiny"
         })
+    }
+
+    func testProviderInjectsSelectedModelMetadataWhenDebugCaptureIsEnabled() async throws {
+        let root = try temporaryDirectory()
+        let debugFile = root.appending(path: "provider-debug.jsonl")
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Tiny" },
+            debugRecorder: ProviderDebugRecorder(fileURL: debugFile, isEnabled: { true })
+        )
+        let body = Data(#"{"model":"mlx-fast","messages":[{"role":"user","content":"hi"}],"stream":false}"#.utf8)
+
+        let chat = try await router.handle(
+            ProviderRequest(method: "POST", path: "/v1/chat/completions", headers: [:], body: body)
+        )
+
+        XCTAssertEqual(chat.status, 200)
+        let proxied = try XCTUnwrap(upstream.requests.last)
+        let json = try JSONSerialization.jsonObject(with: proxied.body) as? [String: Any]
+        let messages = try XCTUnwrap(json?["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.first?["role"] as? String, "system")
+        let systemText = try XCTUnwrap(messages.first?["content"] as? String)
+        XCTAssertTrue(systemText.contains("Provider selected model alias: mlx-fast."))
+        XCTAssertTrue(systemText.contains("Provider inferred role: coding."))
+        XCTAssertTrue(systemText.contains("Actual upstream MLX model: mlx-community/Tiny."))
+        XCTAssertEqual(messages.last?["role"] as? String, "user")
+        XCTAssertEqual(messages.last?["content"] as? String, "hi")
+    }
+
+    func testProviderDoesNotInjectSelectedModelMetadataWhenDebugCaptureIsDisabled() async throws {
+        let root = try temporaryDirectory()
+        let debugFile = root.appending(path: "provider-debug.jsonl")
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Tiny" },
+            debugRecorder: ProviderDebugRecorder(fileURL: debugFile, isEnabled: { false })
+        )
+        let body = Data(#"{"model":"mlx-fast","messages":[{"role":"user","content":"hi"}],"stream":false}"#.utf8)
+
+        let chat = try await router.handle(
+            ProviderRequest(method: "POST", path: "/v1/chat/completions", headers: [:], body: body)
+        )
+
+        XCTAssertEqual(chat.status, 200)
+        let proxied = try XCTUnwrap(upstream.requests.last)
+        let json = try JSONSerialization.jsonObject(with: proxied.body) as? [String: Any]
+        let messages = try XCTUnwrap(json?["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(messages.first?["role"] as? String, "user")
+        XCTAssertEqual(messages.first?["content"] as? String, "hi")
+    }
+
+    func testProviderRoutingDecisionMapsAliasesToRolesAndDesiredModels() async throws {
+        let root = try temporaryDirectory()
+        let debugFile = root.appending(path: "provider-debug.jsonl")
+        let router = ProviderRouter(
+            upstream: FakeUpstream(),
+            activeModelProvider: { "mlx-community/Ask" },
+            roleAssignmentsProvider: {
+                ProviderRoleAssignments(
+                    ask: "mlx-community/Ask",
+                    plan: "mlx-community/Plan",
+                    coding: "mlx-community/Coder"
+                )
+            },
+            debugRecorder: ProviderDebugRecorder(fileURL: debugFile, isEnabled: { true })
+        )
+
+        _ = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/v1/chat/completions",
+                headers: [:],
+                body: Data(#"{"model":"mlx-ask","messages":[{"role":"user","content":"hi"}],"stream":false,"tools":[{"type":"function","function":{"name":"read_file"}}]}"#.utf8)
+            )
+        )
+
+        let record = try lastDebugRecord(in: debugFile)
+        let decision = try XCTUnwrap(record["routing_decision"] as? [String: Any])
+        XCTAssertEqual(decision["requested_model"] as? String, "mlx-ask")
+        XCTAssertEqual(decision["selected_alias"] as? String, "mlx-ask")
+        XCTAssertEqual(decision["inferred_role"] as? String, "ask")
+        XCTAssertEqual(decision["client_capability"] as? String, "read_only")
+        XCTAssertEqual(decision["desired_role_model"] as? String, "mlx-community/Ask")
+        XCTAssertEqual(decision["upstream_model"] as? String, "mlx-community/Ask")
+        XCTAssertNil(decision["fallback_reason"])
+    }
+
+    func testProviderRoutingDecisionFallsBackWhenAssignedRoleModelIsNotLoaded() async throws {
+        let root = try temporaryDirectory()
+        let debugFile = root.appending(path: "provider-debug.jsonl")
+        let upstream = FakeUpstream()
+        let logger = CapturingProviderLogger()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Loaded" },
+            roleAssignmentsProvider: {
+                ProviderRoleAssignments(coding: "mlx-community/Coder")
+            },
+            eventLogger: logger.log,
+            debugRecorder: ProviderDebugRecorder(fileURL: debugFile, isEnabled: { true })
+        )
+
+        _ = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/v1/chat/completions",
+                headers: [:],
+                body: Data(#"{"model":"mlx-fast","messages":[{"role":"user","content":"hi"}],"stream":false,"tools":[{"type":"function","function":{"name":"write_file"}},{"type":"function","function":{"name":"gradle_build"}}]}"#.utf8)
+            )
+        )
+
+        let proxied = try XCTUnwrap(upstream.requests.last)
+        let proxiedJSON = try JSONSerialization.jsonObject(with: proxied.body) as? [String: Any]
+        XCTAssertEqual(proxiedJSON?["model"] as? String, "mlx-community/Loaded")
+        let record = try lastDebugRecord(in: debugFile)
+        let decision = try XCTUnwrap(record["routing_decision"] as? [String: Any])
+        XCTAssertEqual(decision["inferred_role"] as? String, "coding")
+        XCTAssertEqual(decision["client_capability"] as? String, "edit_build")
+        XCTAssertEqual(decision["desired_role_model"] as? String, "mlx-community/Coder")
+        XCTAssertEqual(decision["upstream_model"] as? String, "mlx-community/Loaded")
+        XCTAssertEqual(decision["fallback_reason"] as? String, "desired role model is not the active loaded model")
+        XCTAssertTrue(logger.messages.contains {
+            $0 == "Provider routing fallback for mlx-fast: desired role model mlx-community/Coder is not loaded; using active model mlx-community/Loaded"
+        })
+    }
+
+    func testProviderRoutingDecisionPlanningPromptOverridesFastAliasRole() async throws {
+        let root = try temporaryDirectory()
+        let debugFile = root.appending(path: "provider-debug.jsonl")
+        let router = ProviderRouter(
+            upstream: FakeUpstream(),
+            activeModelProvider: { "mlx-community/Loaded" },
+            roleAssignmentsProvider: {
+                ProviderRoleAssignments(plan: "mlx-community/Plan", coding: "mlx-community/Coder")
+            },
+            debugRecorder: ProviderDebugRecorder(fileURL: debugFile, isEnabled: { true })
+        )
+
+        _ = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/v1/chat/completions",
+                headers: [:],
+                body: Data(#"{"model":"mlx-fast","messages":[{"role":"developer","content":"You are in PLANNING mode. Think first."},{"role":"user","content":"hi"}],"stream":false,"tools":[{"type":"function","function":{"name":"write_file"}}]}"#.utf8)
+            )
+        )
+
+        let record = try lastDebugRecord(in: debugFile)
+        let decision = try XCTUnwrap(record["routing_decision"] as? [String: Any])
+        XCTAssertEqual(decision["selected_alias"] as? String, "mlx-fast")
+        XCTAssertEqual(decision["inferred_role"] as? String, "plan")
+        XCTAssertEqual(decision["desired_role_model"] as? String, "mlx-community/Plan")
+        XCTAssertEqual(decision["upstream_model"] as? String, "mlx-community/Loaded")
+    }
+
+    func testProviderDebugMetadataIncludesRoutingDecisionWhenCaptureIsEnabled() async throws {
+        let root = try temporaryDirectory()
+        let debugFile = root.appending(path: "provider-debug.jsonl")
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Loaded" },
+            roleAssignmentsProvider: {
+                ProviderRoleAssignments(coding: "mlx-community/Coder")
+            },
+            debugRecorder: ProviderDebugRecorder(fileURL: debugFile, isEnabled: { true })
+        )
+
+        _ = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/v1/chat/completions",
+                headers: [:],
+                body: Data(#"{"model":"mlx-fast","messages":[{"role":"user","content":"hi"}],"stream":false}"#.utf8)
+            )
+        )
+
+        let proxied = try XCTUnwrap(upstream.requests.last)
+        let proxiedJSON = try JSONSerialization.jsonObject(with: proxied.body) as? [String: Any]
+        let messages = try XCTUnwrap(proxiedJSON?["messages"] as? [[String: Any]])
+        let systemText = try XCTUnwrap(messages.first?["content"] as? String)
+        XCTAssertTrue(systemText.contains("Provider selected model alias: mlx-fast."))
+        XCTAssertTrue(systemText.contains("Provider inferred role: coding."))
+        XCTAssertTrue(systemText.contains("Desired role model: mlx-community/Coder."))
+        XCTAssertTrue(systemText.contains("Actual upstream MLX model: mlx-community/Loaded."))
+        XCTAssertTrue(systemText.contains("Fallback reason: desired role model is not the active loaded model."))
     }
 
     func testProviderDebugRecorderWritesFullLocalPayloadWithRedactedHeaders() async throws {
@@ -453,7 +642,7 @@ final class ProviderRouterTests: XCTestCase {
 
         XCTAssertEqual(response.status, 404)
         XCTAssertTrue(logger.messages.contains {
-            $0 == "Provider proxied POST /v1/completions to upstream with status 404"
+            $0 == "Provider streaming POST /v1/completions from upstream with status 404"
         })
         XCTAssertTrue(logger.messages.contains {
             $0 == #"Provider upstream error body for POST /v1/completions status 404: {"detail":"missing route"}"#
@@ -754,6 +943,38 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(try outputText(in: responsesData), "Hello from chat.")
     }
 
+    func testNIOProviderServerStreamsChatChunksAsTheyArrive() async throws {
+        let upstream = DelayedStreamingUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Tiny" }
+        )
+        let server = NIOProviderServer(host: "127.0.0.1", port: 0, router: router)
+        do {
+            try server.start()
+        } catch {
+            throw XCTSkip("Loopback listener unavailable in this sandbox: \(error)")
+        }
+        defer { try? server.stop() }
+        let port = try XCTUnwrap(server.boundPort)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = Data(#"{"messages":[{"role":"user","content":"hi"}],"stream":true}"#.utf8)
+
+        let start = Date()
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+
+        var iterator = bytes.lines.makeAsyncIterator()
+        let firstLine = try await iterator.next()
+        let elapsed = Date().timeIntervalSince(start)
+
+        XCTAssertEqual(firstLine, #"data: {"choices":[{"delta":{"content":"Hel"},"finish_reason":null}]}"#)
+        XCTAssertLessThan(elapsed, 0.8)
+    }
+
     private func modelIDs(in data: Data) throws -> [String] {
         let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let models = object?["data"] as? [[String: Any]]
@@ -770,6 +991,11 @@ final class ProviderRouterTests: XCTestCase {
         let message = output?.first
         let content = message?["content"] as? [[String: Any]]
         return content?.first?["text"] as? String
+    }
+
+    private func lastDebugRecord(in fileURL: URL) throws -> [String: Any] {
+        let line = try XCTUnwrap(String(contentsOf: fileURL, encoding: .utf8).split(separator: "\n").last)
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
     }
 
     private func temporaryDirectory() throws -> URL {
@@ -838,5 +1064,26 @@ private final class FakeUpstream: ProviderUpstreamClient, @unchecked Sendable {
         default:
             return ProviderResponse(status: 404, headers: [:], body: notFoundBody)
         }
+    }
+}
+
+private final class DelayedStreamingUpstream: ProviderUpstreamClient, @unchecked Sendable {
+    func proxy(_ request: ProviderRequest) async throws -> ProviderResponse {
+        ProviderResponse(status: 500, headers: [:], body: Data())
+    }
+
+    func proxyStream(_ request: ProviderRequest) async throws -> ProviderStreamedResponse {
+        let chunks = AsyncThrowingStream<Data, Error> { continuation in
+            Task {
+                continuation.yield(Data(#"data: {"choices":[{"delta":{"content":"Hel"},"finish_reason":null}]}"#.utf8))
+                continuation.yield(Data("\n\n".utf8))
+                try await Task.sleep(nanoseconds: 1_500_000_000)
+                continuation.yield(Data(#"data: {"choices":[{"delta":{"content":"lo"},"finish_reason":null}]}"#.utf8))
+                continuation.yield(Data("\n\n".utf8))
+                continuation.yield(Data("data: [DONE]\n\n".utf8))
+                continuation.finish()
+            }
+        }
+        return ProviderStreamedResponse(status: 200, headers: ["content-type": "text/event-stream"], chunks: chunks)
     }
 }

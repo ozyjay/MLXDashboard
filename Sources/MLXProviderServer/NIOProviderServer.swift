@@ -75,17 +75,16 @@ private final class ProviderHTTPHandler: ChannelInboundHandler, @unchecked Senda
             let router = router
             let writer = ProviderResponseWriter(handler: self, context: context)
             Task {
-                let response: ProviderResponse
                 do {
-                    response = try await router.handle(request)
+                    let result = try await router.route(request)
+                    writer.write(result)
                 } catch {
-                    response = ProviderResponse(
+                    writer.write(.buffered(ProviderResponse(
                         status: 502,
                         headers: ["content-type": "application/json"],
                         body: Data(#"{"error":"bad gateway"}"#.utf8)
-                    )
+                    )))
                 }
-                writer.write(response)
             }
         }
     }
@@ -114,15 +113,58 @@ private final class ProviderHTTPHandler: ChannelInboundHandler, @unchecked Senda
         context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
         context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
     }
+
+    fileprivate func writeHead(context: ChannelHandlerContext, response: ProviderStreamedResponse) {
+        var headers = HTTPHeaders()
+        for (name, value) in response.headers where name.lowercased() != "content-length" {
+            headers.add(name: name, value: value)
+        }
+        headers.replaceOrAdd(name: "transfer-encoding", value: "chunked")
+        let status = HTTPResponseStatus(statusCode: response.status)
+        context.writeAndFlush(
+            wrapOutboundOut(.head(HTTPResponseHead(version: .http1_1, status: status, headers: headers))),
+            promise: nil
+        )
+    }
+
+    fileprivate func writeChunk(context: ChannelHandlerContext, data: Data) {
+        guard !data.isEmpty else { return }
+        var buffer = context.channel.allocator.buffer(capacity: data.count)
+        buffer.writeBytes(data)
+        context.writeAndFlush(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+    }
+
+    fileprivate func writeEnd(context: ChannelHandlerContext) {
+        context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+    }
 }
 
 private struct ProviderResponseWriter: @unchecked Sendable {
     let handler: ProviderHTTPHandler
     let context: ChannelHandlerContext
 
-    func write(_ response: ProviderResponse) {
+    func write(_ result: ProviderRouteResult) {
         context.eventLoop.execute {
-            handler.write(context: context, response: response)
+            switch result {
+            case .buffered(let response):
+                handler.write(context: context, response: response)
+            case .streamed(let response):
+                handler.writeHead(context: context, response: response)
+                Task {
+                    do {
+                        for try await chunk in response.chunks {
+                            context.eventLoop.execute {
+                                handler.writeChunk(context: context, data: chunk)
+                            }
+                        }
+                    } catch {
+                        // The connection is already open; ending it is the least surprising failure mode.
+                    }
+                    context.eventLoop.execute {
+                        handler.writeEnd(context: context)
+                    }
+                }
+            }
         }
     }
 }
