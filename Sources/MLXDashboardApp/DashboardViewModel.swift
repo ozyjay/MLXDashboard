@@ -283,6 +283,7 @@ final class DashboardViewModel: ObservableObject {
 
     func saveSettings() {
         do {
+            activeModelSelection.update(settings.activeModel)
             providerDebugCaptureState.update(settings.providerDebugCaptureEnabled)
             providerRoleAssignmentState.update(settings.providerRoleAssignments)
             try settingsStore.save(settings)

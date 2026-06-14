@@ -468,6 +468,33 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(try Self.modelIDs(in: data), ["mlx-ask", "mlx-plan", "mlx-fast", "mlx-community/Tiny"])
     }
 
+    func testRunningProviderUsesActiveModelSavedAfterProviderStart() async throws {
+        let paths = try temporaryAppPaths()
+        let ports = try availableTestPorts()
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+        )
+        viewModel.settings.providerPort = ports.providerPort
+
+        do {
+            try viewModel.startProvider()
+        } catch {
+            throw XCTSkip("Loopback listener unavailable in this sandbox: \(error)")
+        }
+        defer { viewModel.stopProvider() }
+
+        viewModel.settings.activeModel = "mlx-community/Manual"
+        viewModel.saveSettings()
+
+        let url = URL(string: "http://127.0.0.1:\(ports.providerPort)/v1/models")!
+        let (data, response) = try await URLSession.shared.data(from: url)
+
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(try Self.modelIDs(in: data), ["mlx-ask", "mlx-plan", "mlx-fast", "mlx-community/Manual"])
+    }
+
     func testDirectRolePoolStartPublishesEndpointsToRunningProvider() async throws {
         let paths = try temporaryAppPaths()
         let ports = try availableTestPorts()
