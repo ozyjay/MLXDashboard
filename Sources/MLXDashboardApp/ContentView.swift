@@ -583,7 +583,10 @@ private struct InstalledModelsView: View {
                 .disabled(viewModel.selectedInstalledModelID == nil)
             }
             if let progress = viewModel.installedWorkspacePrimaryProgress {
-                InstallProgressBanner(progress: progress)
+                InstallProgressBanner(
+                    progress: progress,
+                    showsFullActivity: progress.modelID == viewModel.selectedInstalledModelID
+                )
             } else if let message = viewModel.modelInstallMessage {
                 Text(message)
                     .font(.caption)
@@ -675,6 +678,11 @@ private struct WindowCloseGuardView: NSViewRepresentable {
 
 private struct InstallProgressBanner: View {
     let progress: ModelInstallProgress
+    var showsFullActivity = false
+
+    private var displayedActivityRows: [ModelInstallProgress.ActivityRow] {
+        showsFullActivity ? progress.fullActivityRows : progress.activityRows
+    }
 
     private var tintColor: Color {
         switch progress.phase {
@@ -724,12 +732,13 @@ private struct InstallProgressBanner: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            if progress.isWaitingForDownloadData {
+            switch progress.progressDisplayMode {
+            case .determinate(let value), .phaseFallback(let value):
+                ProgressView(value: value)
+                    .tint(tintColor)
+            case .indeterminateDownload:
                 ProgressView()
                     .controlSize(.small)
-                    .tint(tintColor)
-            } else {
-                ProgressView(value: progress.fractionCompleted)
                     .tint(tintColor)
             }
             if let cacheStatusText = progress.cacheStatusText {
@@ -744,13 +753,13 @@ private struct InstallProgressBanner: View {
                     .foregroundStyle(.orange)
                     .textSelection(.enabled)
             }
-            if !progress.activityRows.isEmpty {
+            if !displayedActivityRows.isEmpty {
                 VStack(alignment: .leading, spacing: 3) {
-                    ForEach(progress.activityRows) { row in
+                    ForEach(displayedActivityRows) { row in
                         Text(row.message)
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                            .lineLimit(showsFullActivity ? 2 : 1)
                             .truncationMode(.middle)
                             .textSelection(.enabled)
                     }
