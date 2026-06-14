@@ -287,7 +287,7 @@ public struct HuggingFaceModelInstaller: Sendable {
     public func install(
         modelID: String,
         pythonExecutable: URL,
-        disableXet: Bool = false,
+        disableXet: Bool = true,
         progressHandler: (@Sendable (HuggingFaceDownloadProgress) -> Void)? = nil,
         activityHandler: (@Sendable (HuggingFaceDownloadActivity) -> Void)? = nil
     ) async throws -> HuggingFaceInstallResult {

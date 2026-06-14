@@ -294,6 +294,22 @@ final class PythonBridgeTests: XCTestCase {
         ])
     }
 
+    func testHuggingFaceInstallerDisablesXetByDefault() async throws {
+        let runner = RecordingCommandRunner(result: CommandResult(
+            exitCode: 0,
+            standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/abc"}"#,
+            standardError: ""
+        ))
+        let installer = HuggingFaceModelInstaller(runner: runner)
+
+        _ = try await installer.install(
+            modelID: "mlx-community/Tiny",
+            pythonExecutable: URL(filePath: "/tmp/python")
+        )
+
+        XCTAssertEqual(runner.commands.last?.environment["HF_HUB_DISABLE_XET"], "1")
+    }
+
     func testHuggingFaceInstallerDisablesXetWhenRequested() async throws {
         let runner = RecordingCommandRunner(result: CommandResult(
             exitCode: 0,

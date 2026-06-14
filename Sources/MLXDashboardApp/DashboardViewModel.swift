@@ -456,7 +456,7 @@ final class DashboardViewModel: ObservableObject {
     func installModel(
         _ model: HuggingFaceModelSummary,
         isContinuation: Bool = false,
-        disableXet: Bool = false
+        disableXet: Bool = true
     ) async {
         let installSessionID = beginInstallSession()
         isInstallingModel = true
@@ -508,7 +508,9 @@ final class DashboardViewModel: ObservableObject {
                 ? (disableXet
                     ? "Retrying \(model.id) with standard Hugging Face download. Existing cache files will be reused when available."
                     : "Continuing download for \(model.id). Existing Hugging Face cache files will be reused when available.")
-                : "Downloading \(model.id). Large models can take a while."
+                : (disableXet
+                    ? "Downloading \(model.id) with standard Hugging Face download. Large models can take a while."
+                    : "Downloading \(model.id). Large models can take a while.")
             updateInstallProgress(.downloading, modelID: model.id, detail: downloadDetail)
             startDownloadActivityMonitor(modelID: model.id, installSessionID: installSessionID)
             let result = try await modelInstaller.install(

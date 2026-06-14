@@ -869,6 +869,7 @@ final class DashboardViewModelTests: XCTestCase {
 
         let installCommands = runner.commands.filter { ($0.arguments.last ?? "").contains("snapshot_download") }
         XCTAssertEqual(installCommands.count, 1)
+        XCTAssertEqual(installCommands.last?.environment["HF_HUB_DISABLE_XET"], "1")
         XCTAssertEqual(registry.record(id: "mlx-community/Tiny")?.status, .installed)
         XCTAssertEqual(viewModel.modelInstallProgress?.phase, .installed)
         XCTAssertEqual(viewModel.modelInstallMessage, "Installed mlx-community/Tiny at /tmp/cache/models--mlx-community--Tiny/snapshots/resumed")
