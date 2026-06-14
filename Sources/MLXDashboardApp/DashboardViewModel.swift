@@ -255,6 +255,10 @@ final class DashboardViewModel: ObservableObject {
         return installProgressByModelID[selectedInstalledModelID]
     }
 
+    var installedWorkspacePrimaryProgress: ModelInstallProgress? {
+        selectedInstalledModelProgress ?? modelInstallProgress
+    }
+
     var canStartServer: Bool {
         ControllerButtonPolicy.canStartServer(state: serverPoolController.state)
     }

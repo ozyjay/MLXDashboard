@@ -582,7 +582,7 @@ private struct InstalledModelsView: View {
                 }
                 .disabled(viewModel.selectedInstalledModelID == nil)
             }
-            if let progress = viewModel.modelInstallProgress {
+            if let progress = viewModel.installedWorkspacePrimaryProgress {
                 InstallProgressBanner(progress: progress)
             } else if let message = viewModel.modelInstallMessage {
                 Text(message)

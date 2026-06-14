@@ -1248,6 +1248,39 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.selectedInstalledModelProgress, selected)
     }
 
+    func testInstalledProgressPrefersSelectedModelProgressOverActiveProgressForDetail() throws {
+        let paths = try temporaryAppPaths()
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+        )
+        let active = ModelInstallProgress(modelID: "mlx-community/Active", phase: .downloading, detail: "Active")
+        let selected = ModelInstallProgress(modelID: "mlx-community/Selected", phase: .failed, detail: "Selected failed")
+
+        viewModel.setInstallProgressForTesting(active)
+        viewModel.setInstallProgressForTesting(selected, makeActive: false)
+        viewModel.selectedInstalledModelID = "mlx-community/Selected"
+
+        XCTAssertEqual(viewModel.installedWorkspacePrimaryProgress, selected)
+        XCTAssertEqual(viewModel.modelInstallProgress, active)
+    }
+
+    func testInstalledProgressFallsBackToActiveProgressWhenSelectedHasNoHistory() throws {
+        let paths = try temporaryAppPaths()
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+        )
+        let active = ModelInstallProgress(modelID: "mlx-community/Active", phase: .downloading, detail: "Active")
+
+        viewModel.setInstallProgressForTesting(active)
+        viewModel.selectedInstalledModelID = "mlx-community/Other"
+
+        XCTAssertEqual(viewModel.installedWorkspacePrimaryProgress, active)
+    }
+
     func testInstallSelectedModelShowsDownloadActivityFromInstaller() async throws {
         let paths = try temporaryAppPaths()
         let python = paths.venvDirectory.appending(path: "bin/python")
