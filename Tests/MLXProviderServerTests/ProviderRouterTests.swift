@@ -358,6 +358,40 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(responseJSON?["model"] as? String, "mlx-community/Devstral")
     }
 
+    func testAndroidCompatibilityChatDebugCaptureUsesSelectedRoleEndpointDecision() async throws {
+        let root = try temporaryDirectory()
+        let debugFile = root.appending(path: "provider-debug.jsonl")
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Gemma" },
+            roleAssignmentsProvider: { ProviderRoleAssignments(plan: "mlx-community/Devstral") },
+            defaultEndpointProvider: {
+                ProviderUpstreamEndpoint(modelID: "mlx-community/Gemma", baseURL: URL(string: "http://127.0.0.1:8080")!, port: 8080)
+            },
+            roleEndpointProvider: { role in
+                role == .plan
+                ? ProviderUpstreamEndpoint(modelID: "mlx-community/Devstral", baseURL: URL(string: "http://127.0.0.1:8081")!, port: 8081)
+                : nil
+            },
+            debugRecorder: ProviderDebugRecorder(fileURL: debugFile, isEnabled: { true })
+        )
+        let body = Data(#"{"model":"mlx-plan","messages":[{"role":"user","content":"plan"}],"stream":false}"#.utf8)
+
+        let response = try await router.handle(
+            ProviderRequest(method: "POST", path: "/api/chat", headers: [:], body: body)
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let record = try lastDebugRecord(in: debugFile)
+        let decision = try XCTUnwrap(record["routing_decision"] as? [String: Any])
+        XCTAssertEqual(decision["selected_alias"] as? String, "mlx-plan")
+        XCTAssertEqual(decision["inferred_role"] as? String, "plan")
+        XCTAssertEqual(decision["upstream_model"] as? String, "mlx-community/Devstral")
+        XCTAssertEqual(decision["upstream_base_url"] as? String, "http://127.0.0.1:8081")
+        XCTAssertEqual(decision["upstream_port"] as? Int, 8081)
+    }
+
     func testAndroidCompatibilityGenerateRoutesToAssignedRoleEndpoint() async throws {
         let upstream = FakeUpstream()
         let router = ProviderRouter(
@@ -1117,6 +1151,40 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(proxiedJSON?["model"] as? String, "mlx-community/Devstral")
         let responseJSON = try JSONSerialization.jsonObject(with: response.body) as? [String: Any]
         XCTAssertEqual(responseJSON?["model"] as? String, "mlx-community/Devstral")
+    }
+
+    func testResponsesDebugCaptureUsesSelectedRoleEndpointDecision() async throws {
+        let root = try temporaryDirectory()
+        let debugFile = root.appending(path: "provider-debug.jsonl")
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Gemma" },
+            roleAssignmentsProvider: { ProviderRoleAssignments(plan: "mlx-community/Devstral") },
+            defaultEndpointProvider: {
+                ProviderUpstreamEndpoint(modelID: "mlx-community/Gemma", baseURL: URL(string: "http://127.0.0.1:8080")!, port: 8080)
+            },
+            roleEndpointProvider: { role in
+                role == .plan
+                ? ProviderUpstreamEndpoint(modelID: "mlx-community/Devstral", baseURL: URL(string: "http://127.0.0.1:8081")!, port: 8081)
+                : nil
+            },
+            debugRecorder: ProviderDebugRecorder(fileURL: debugFile, isEnabled: { true })
+        )
+        let body = Data(#"{"model":"mlx-plan","input":"plan","temperature":0.2,"max_output_tokens":32}"#.utf8)
+
+        let response = try await router.handle(
+            ProviderRequest(method: "POST", path: "/v1/responses", headers: [:], body: body)
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let record = try lastDebugRecord(in: debugFile)
+        let decision = try XCTUnwrap(record["routing_decision"] as? [String: Any])
+        XCTAssertEqual(decision["selected_alias"] as? String, "mlx-plan")
+        XCTAssertEqual(decision["inferred_role"] as? String, "plan")
+        XCTAssertEqual(decision["upstream_model"] as? String, "mlx-community/Devstral")
+        XCTAssertEqual(decision["upstream_base_url"] as? String, "http://127.0.0.1:8081")
+        XCTAssertEqual(decision["upstream_port"] as? Int, 8081)
     }
 
     func testProviderTranslatesResponsesInputMessagesToChatCompletion() async throws {

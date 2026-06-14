@@ -235,17 +235,20 @@ public struct ProviderRouter: Sendable {
 
         if request.method == "POST", request.path == "/api/chat" {
             eventLogger("Provider translated Android Studio compatibility POST /api/chat to chat completions")
-            return finish(try await androidStudioChatResponse(request))
+            let result = try await androidStudioChatResponse(request)
+            return finish(result.response, context: result.debugContext)
         }
 
         if request.method == "POST", request.path == "/api/generate" {
             eventLogger("Provider translated Android Studio compatibility POST /api/generate to chat completions")
-            return finish(try await androidStudioGenerateResponse(request))
+            let result = try await androidStudioGenerateResponse(request)
+            return finish(result.response, context: result.debugContext)
         }
 
         if request.method == "POST", request.path == "/v1/responses" {
             eventLogger("Provider translated POST /v1/responses to chat completions")
-            return finish(try await responseFromChatCompletion(request))
+            let result = try await responseFromChatCompletion(request)
+            return finish(result.response, context: result.debugContext)
         }
 
         let routed = requestWithSelectedUpstreamIfAvailable(request)
@@ -562,9 +565,12 @@ public struct ProviderRouter: Sendable {
         return ProviderResponse(status: 200, headers: ["content-type": "application/json"], body: data)
     }
 
-    private func androidStudioChatResponse(_ request: ProviderRequest) async throws -> ProviderResponse {
+    private func androidStudioChatResponse(_ request: ProviderRequest) async throws -> (
+        response: ProviderResponse,
+        debugContext: ProviderDebugContext
+    ) {
         guard let object = decodedObject(from: request.body) else {
-            return json(status: 400, #"{"error":"invalid chat request"}"#)
+            return (json(status: 400, #"{"error":"invalid chat request"}"#), debugContext(for: request))
         }
 
         let requestedModel = object["model"] as? String
@@ -574,11 +580,14 @@ public struct ProviderRouter: Sendable {
         let chatResult = try await proxyChatCompletion(model: model, messages: messages, stream: stream, headers: request.headers)
         let chatResponse = chatResult.response
         guard chatResponse.status >= 200, chatResponse.status < 300 else {
-            return chatResponse
+            return (chatResponse, chatResult.debugContext)
         }
 
         if stream {
-            return androidStudioStreamingChatResponse(model: chatResult.model, chatBody: chatResponse.body)
+            return (
+                androidStudioStreamingChatResponse(model: chatResult.model, chatBody: chatResponse.body),
+                chatResult.debugContext
+            )
         }
 
         let text = assistantText(fromChatCompletionBody: chatResponse.body)
@@ -597,12 +606,15 @@ public struct ProviderRouter: Sendable {
             "eval_count": usagePayload(fromChatCompletionBody: chatResponse.body)["output_tokens"] ?? 0,
             "eval_duration": 0
         ]
-        return jsonResponse(payload)
+        return (jsonResponse(payload), chatResult.debugContext)
     }
 
-    private func androidStudioGenerateResponse(_ request: ProviderRequest) async throws -> ProviderResponse {
+    private func androidStudioGenerateResponse(_ request: ProviderRequest) async throws -> (
+        response: ProviderResponse,
+        debugContext: ProviderDebugContext
+    ) {
         guard let object = decodedObject(from: request.body) else {
-            return json(status: 400, #"{"error":"invalid generate request"}"#)
+            return (json(status: 400, #"{"error":"invalid generate request"}"#), debugContext(for: request))
         }
 
         let requestedModel = object["model"] as? String
@@ -617,11 +629,14 @@ public struct ProviderRouter: Sendable {
         )
         let chatResponse = chatResult.response
         guard chatResponse.status >= 200, chatResponse.status < 300 else {
-            return chatResponse
+            return (chatResponse, chatResult.debugContext)
         }
 
         if stream {
-            return androidStudioStreamingGenerateResponse(model: chatResult.model, chatBody: chatResponse.body)
+            return (
+                androidStudioStreamingGenerateResponse(model: chatResult.model, chatBody: chatResponse.body),
+                chatResult.debugContext
+            )
         }
 
         let text = assistantText(fromChatCompletionBody: chatResponse.body)
@@ -638,7 +653,7 @@ public struct ProviderRouter: Sendable {
             "eval_count": usagePayload(fromChatCompletionBody: chatResponse.body)["output_tokens"] ?? 0,
             "eval_duration": 0
         ]
-        return jsonResponse(payload)
+        return (jsonResponse(payload), chatResult.debugContext)
     }
 
     private func proxyChatCompletion(
@@ -646,7 +661,7 @@ public struct ProviderRouter: Sendable {
         messages: [[String: Any]],
         stream: Bool,
         headers: [String: String]
-    ) async throws -> (response: ProviderResponse, model: String) {
+    ) async throws -> (response: ProviderResponse, model: String, debugContext: ProviderDebugContext) {
         let payload: [String: Any] = [
             "model": model,
             "messages": messages,
@@ -659,13 +674,13 @@ public struct ProviderRouter: Sendable {
         payload: [String: Any],
         headers: [String: String],
         fallbackModel: String
-    ) async throws -> (response: ProviderResponse, model: String) {
+    ) async throws -> (response: ProviderResponse, model: String, debugContext: ProviderDebugContext) {
         let chatBody = try JSONSerialization.data(withJSONObject: payload)
         let request = ProviderRequest(method: "POST", path: "/v1/chat/completions", headers: headers, body: chatBody)
         let routed = requestWithSelectedUpstreamIfAvailable(request)
         let selectedModel = selectedModel(from: routed.request.body) ?? fallbackModel
         let response = try await proxy(routed.request, to: routed.upstreamEndpoint ?? defaultUpstreamEndpoint())
-        return (response, selectedModel)
+        return (response, selectedModel, routed.debugContext)
     }
 
     private func androidStudioStreamingChatResponse(model: String, chatBody: Data) -> ProviderResponse {
@@ -1172,9 +1187,12 @@ public struct ProviderRouter: Sendable {
         }
     }
 
-    private func responseFromChatCompletion(_ request: ProviderRequest) async throws -> ProviderResponse {
+    private func responseFromChatCompletion(_ request: ProviderRequest) async throws -> (
+        response: ProviderResponse,
+        debugContext: ProviderDebugContext
+    ) {
         guard let responseRequest = try? decodeResponsesRequest(from: request.body) else {
-            return json(status: 400, #"{"error":"invalid responses request"}"#)
+            return (json(status: 400, #"{"error":"invalid responses request"}"#), debugContext(for: request))
         }
 
         let requestedModel = responseRequest.model
@@ -1188,17 +1206,23 @@ public struct ProviderRouter: Sendable {
         )
         let chatResponse = chatResult.response
         guard chatResponse.status >= 200, chatResponse.status < 300 else {
-            return chatResponse
+            return (chatResponse, chatResult.debugContext)
         }
 
         if responseRequest.stream {
-            return streamingResponsesResponse(model: chatResult.model, chatBody: chatResponse.body)
+            return (
+                streamingResponsesResponse(model: chatResult.model, chatBody: chatResponse.body),
+                chatResult.debugContext
+            )
         }
 
         let assistantText = assistantText(fromChatCompletionBody: chatResponse.body)
         let payload = responsesPayload(model: chatResult.model, outputText: assistantText, chatBody: chatResponse.body)
         let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data(#"{"object":"response","status":"completed","output":[]}"#.utf8)
-        return ProviderResponse(status: 200, headers: ["content-type": "application/json"], body: data)
+        return (
+            ProviderResponse(status: 200, headers: ["content-type": "application/json"], body: data),
+            chatResult.debugContext
+        )
     }
 
     private func decodeResponsesRequest(from body: Data) throws -> ResponsesCompatibilityRequest {
