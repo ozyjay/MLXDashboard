@@ -14,11 +14,11 @@ public enum RoleServerStatusKind: String, Equatable, Sendable {
 }
 
 public struct RoleServerEndpoint: Equatable, Sendable {
-    public var modelID: String
+    public var modelID: String?
     public var port: Int
     public var baseURL: URL
 
-    public init(modelID: String, port: Int, baseURL: URL) {
+    public init(modelID: String?, port: Int, baseURL: URL) {
         self.modelID = modelID
         self.port = port
         self.baseURL = baseURL
@@ -50,11 +50,11 @@ public struct RoleServerStatusRow: Identifiable, Equatable, Sendable {
 
 public struct RoleServerPlan: Equatable, Sendable {
     public struct Server: Equatable, Sendable {
-        public var modelID: String
+        public var modelID: String?
         public var port: Int
         public var endpoint: RoleServerEndpoint
 
-        public init(modelID: String, port: Int, endpoint: RoleServerEndpoint) {
+        public init(modelID: String?, port: Int, endpoint: RoleServerEndpoint) {
             self.modelID = modelID
             self.port = port
             self.endpoint = endpoint
@@ -132,18 +132,17 @@ public final class RoleServerPoolController: ObservableObject {
     }
 
     public static func makePlan(settings: DashboardSettings) -> RoleServerPlan {
-        let defaultModelID = normalizedModelID(settings.activeModel, fallback: "default")
+        let defaultModelID = settings.activeModel.flatMap { $0.isEmpty ? nil : $0 }
         let defaultPort = settings.mlxPort
         let defaultEndpoint = makeEndpoint(modelID: defaultModelID, port: defaultPort)
 
-        var modelPorts: [String: Int] = [defaultModelID: defaultPort]
+        var modelPorts: [String: Int] = [:]
         var servers: [RoleServerPlan.Server] = [
-            RoleServerPlan.Server(
-                modelID: defaultModelID,
-                port: defaultPort,
-                endpoint: defaultEndpoint
-            )
+            RoleServerPlan.Server(modelID: defaultModelID, port: defaultPort, endpoint: defaultEndpoint)
         ]
+        if let defaultModelID {
+            modelPorts[defaultModelID] = defaultPort
+        }
         var nextPort = defaultPort + 1
         var roleEndpoints: [ProviderModelRole: RoleServerEndpoint] = [:]
         var roleStatuses: [RoleServerStatusRow] = []
@@ -194,14 +193,7 @@ public final class RoleServerPoolController: ObservableObject {
         )
     }
 
-    private static func normalizedModelID(_ modelID: String?, fallback: String) -> String {
-        guard let modelID, !modelID.isEmpty else {
-            return fallback
-        }
-        return modelID
-    }
-
-    private static func makeEndpoint(modelID: String, port: Int) -> RoleServerEndpoint {
+    private static func makeEndpoint(modelID: String?, port: Int) -> RoleServerEndpoint {
         RoleServerEndpoint(
             modelID: modelID,
             port: port,

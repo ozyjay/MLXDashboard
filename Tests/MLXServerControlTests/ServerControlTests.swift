@@ -63,6 +63,23 @@ final class ServerControlTests: XCTestCase {
         XCTAssertEqual(plan.status(for: .coding).kind, .unassigned)
     }
 
+    func testRoleServerPlanPreservesMissingActiveModel() {
+        let settings = DashboardSettings(
+            activeModel: nil,
+            mlxPort: 8080,
+            providerRoleAssignments: ProviderRoleAssignments(plan: "mlx-community/devstral")
+        )
+
+        let plan = RoleServerPoolController.makePlan(settings: settings)
+
+        XCTAssertNil(plan.defaultEndpoint.modelID)
+        XCTAssertEqual(plan.defaultEndpoint.port, 8080)
+        XCTAssertEqual(plan.servers.map(\.modelID), [nil, "mlx-community/devstral"])
+        XCTAssertEqual(plan.servers.map(\.port), [8080, 8081])
+        XCTAssertEqual(plan.endpoint(for: .plan)?.modelID, "mlx-community/devstral")
+        XCTAssertEqual(plan.endpoint(for: .plan)?.port, 8081)
+    }
+
     func testProviderModelRolesHaveDeterministicRoutingOrder() {
         XCTAssertEqual(ProviderModelRole.orderedRoutingRoles, [.ask, .plan, .coding])
         XCTAssertEqual(ProviderModelRole.ask.displayName, "Ask")
