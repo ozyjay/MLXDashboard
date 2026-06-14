@@ -240,6 +240,11 @@ final class DashboardViewModel: ObservableObject {
         telemetry.appendLog(enabled ? "Enabled provider debug payload capture" : "Disabled provider debug payload capture")
     }
 
+    func updateDownloadSettings(_ downloadSettings: HuggingFaceDownloadSettings) {
+        settings.downloadSettings = downloadSettings.validated()
+        saveSettings()
+    }
+
     func refreshPythonStatus() async {
         do {
             let status = try await environmentManager.status()
@@ -456,10 +461,13 @@ final class DashboardViewModel: ObservableObject {
     func installModel(
         _ model: HuggingFaceModelSummary,
         isContinuation: Bool = false,
-        disableXet: Bool = true
+        forceStandardDownload: Bool = false
     ) async {
         let installSessionID = beginInstallSession()
         isInstallingModel = true
+        let downloadSettings = forceStandardDownload ? .standardDefault : settings.downloadSettings.validated()
+        let downloadEnvironment = downloadSettings.huggingFaceEnvironment
+        let isStandardDownload = downloadSettings.mode == .standard
         defer {
             stopDownloadActivityMonitor(installSessionID: installSessionID)
             finishInstallSession(installSessionID)
@@ -467,7 +475,7 @@ final class DashboardViewModel: ObservableObject {
         }
 
         do {
-            if disableXet {
+            if forceStandardDownload {
                 updateInstallProgress(.preparing, modelID: model.id, detail: "Preparing to retry \(model.id) without Xet.")
             } else if isContinuation {
                 updateInstallProgress(.preparing, modelID: model.id, detail: "Preparing to continue downloading \(model.id).")
@@ -505,10 +513,10 @@ final class DashboardViewModel: ObservableObject {
             installedModels = Self.visibleInstalledModels(from: registry.records)
 
             let downloadDetail = isContinuation
-                ? (disableXet
+                ? (isStandardDownload
                     ? "Retrying \(model.id) with standard Hugging Face download. Existing cache files will be reused when available."
                     : "Continuing download for \(model.id). Existing Hugging Face cache files will be reused when available.")
-                : (disableXet
+                : (isStandardDownload
                     ? "Downloading \(model.id) with standard Hugging Face download. Large models can take a while."
                     : "Downloading \(model.id). Large models can take a while.")
             updateInstallProgress(.downloading, modelID: model.id, detail: downloadDetail)
@@ -516,7 +524,7 @@ final class DashboardViewModel: ObservableObject {
             let result = try await modelInstaller.install(
                 modelID: model.id,
                 pythonExecutable: status.pythonExecutable,
-                disableXet: disableXet,
+                downloadEnvironment: downloadEnvironment,
                 progressHandler: { [weak self] progress in
                     Task { @MainActor [weak self] in
                         guard self?.canApplyDownloadCallback(modelID: model.id, installSessionID: installSessionID) == true else { return }
@@ -595,7 +603,7 @@ final class DashboardViewModel: ObservableObject {
             modelInstallMessage = "No failed or paused model download is available to retry without Xet."
             return
         }
-        await installModel(HuggingFaceModelSummary(id: modelID), isContinuation: true, disableXet: true)
+        await installModel(HuggingFaceModelSummary(id: modelID), isContinuation: true, forceStandardDownload: true)
     }
 
     func startRetryLastModelInstallWithoutXet() {
@@ -629,7 +637,7 @@ final class DashboardViewModel: ObservableObject {
             modelInstallMessage = "Select a failed or incomplete model before retrying without Xet."
             return
         }
-        await installModel(HuggingFaceModelSummary(id: modelID), isContinuation: true, disableXet: true)
+        await installModel(HuggingFaceModelSummary(id: modelID), isContinuation: true, forceStandardDownload: true)
     }
 
     func startRetrySelectedInstalledModelInstallWithoutXet() {

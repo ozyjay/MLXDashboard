@@ -540,6 +540,82 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertNil(registry.record(id: "mlx-community/Other"))
     }
 
+    func testInstallSelectedModelUsesStandardDownloadEnvironmentByDefault() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(
+            at: python.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = FakeCommandRunner(results: [
+            "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "whoami": CommandResult(exitCode: 0, standardOutput: #"{"name":"octocat"}"#, standardError: ""),
+            "install": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/abc"}"#,
+                standardError: ""
+            )
+        ])
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelInstaller: HuggingFaceModelInstaller(runner: runner),
+            authChecker: HuggingFaceAuthChecker(runner: runner)
+        )
+        viewModel.searchResults = [HuggingFaceModelSummary(id: "mlx-community/Tiny")]
+        viewModel.selectedSearchModelID = "mlx-community/Tiny"
+
+        await viewModel.installSelectedModel()
+
+        let installCommands = runner.commands.filter { ($0.arguments.last ?? "").contains("snapshot_download") }
+        XCTAssertEqual(installCommands.last?.environment["HF_HUB_DISABLE_XET"], "1")
+        XCTAssertNil(installCommands.last?.environment["HF_XET_NUM_CONCURRENT_RANGE_GETS"])
+    }
+
+    func testInstallSelectedModelUsesConservativeXetEnvironmentWhenConfigured() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(
+            at: python.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let settingsStore = SettingsStore(fileURL: paths.settingsFile)
+        try settingsStore.save(DashboardSettings(downloadSettings: .conservativeDefault))
+        let runner = FakeCommandRunner(results: [
+            "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "whoami": CommandResult(exitCode: 0, standardOutput: #"{"name":"octocat"}"#, standardError: ""),
+            "install": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/abc"}"#,
+                standardError: ""
+            )
+        ])
+        let viewModel = DashboardViewModel(
+            settingsStore: settingsStore,
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelInstaller: HuggingFaceModelInstaller(runner: runner),
+            authChecker: HuggingFaceAuthChecker(runner: runner)
+        )
+        viewModel.searchResults = [HuggingFaceModelSummary(id: "mlx-community/Tiny")]
+        viewModel.selectedSearchModelID = "mlx-community/Tiny"
+
+        await viewModel.installSelectedModel()
+
+        let installCommands = runner.commands.filter { ($0.arguments.last ?? "").contains("snapshot_download") }
+        XCTAssertNil(installCommands.last?.environment["HF_HUB_DISABLE_XET"])
+        XCTAssertEqual(installCommands.last?.environment["HF_XET_NUM_CONCURRENT_RANGE_GETS"], "4")
+        XCTAssertEqual(installCommands.last?.environment["HF_HUB_DOWNLOAD_TIMEOUT"], "60")
+        XCTAssertEqual(installCommands.last?.environment["HF_HUB_ETAG_TIMEOUT"], "30")
+    }
+
     func testInstallSelectedModelFinishesWithCompletedProgress() async throws {
         let paths = try temporaryAppPaths()
         let python = paths.venvDirectory.appending(path: "bin/python")
@@ -870,6 +946,7 @@ final class DashboardViewModelTests: XCTestCase {
         let installCommands = runner.commands.filter { ($0.arguments.last ?? "").contains("snapshot_download") }
         XCTAssertEqual(installCommands.count, 1)
         XCTAssertEqual(installCommands.last?.environment["HF_HUB_DISABLE_XET"], "1")
+        XCTAssertNil(installCommands.last?.environment["HF_XET_NUM_CONCURRENT_RANGE_GETS"])
         XCTAssertEqual(registry.record(id: "mlx-community/Tiny")?.status, .installed)
         XCTAssertEqual(viewModel.modelInstallProgress?.phase, .installed)
         XCTAssertEqual(viewModel.modelInstallMessage, "Installed mlx-community/Tiny at /tmp/cache/models--mlx-community--Tiny/snapshots/resumed")
@@ -931,8 +1008,10 @@ final class DashboardViewModelTests: XCTestCase {
                 standardError: ""
             )
         ])
+        let settingsStore = SettingsStore(fileURL: paths.settingsFile)
+        try settingsStore.save(DashboardSettings(downloadSettings: .conservativeDefault))
         let viewModel = DashboardViewModel(
-            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            settingsStore: settingsStore,
             registry: ModelRegistry(fileURL: paths.modelRegistryFile),
             environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
             modelInstaller: HuggingFaceModelInstaller(runner: runner),
@@ -948,6 +1027,7 @@ final class DashboardViewModelTests: XCTestCase {
 
         let installCommands = runner.commands.filter { ($0.arguments.last ?? "").contains("snapshot_download") }
         XCTAssertEqual(installCommands.last?.environment["HF_HUB_DISABLE_XET"], "1")
+        XCTAssertNil(installCommands.last?.environment["HF_XET_NUM_CONCURRENT_RANGE_GETS"])
         XCTAssertEqual(viewModel.modelInstallProgress?.phase, .installed)
     }
 
