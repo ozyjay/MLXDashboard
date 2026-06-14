@@ -261,6 +261,23 @@ func testRoleServerPlanMarksUnassignedRoles() {
     XCTAssertEqual(plan.status(for: .plan).kind, .planned)
     XCTAssertEqual(plan.status(for: .coding).kind, .unassigned)
 }
+
+func testRoleServerPlanPreservesMissingActiveModel() {
+    let settings = DashboardSettings(
+        activeModel: nil,
+        mlxPort: 8080,
+        providerRoleAssignments: ProviderRoleAssignments(plan: "mlx-community/devstral")
+    )
+
+    let plan = RoleServerPoolController.makePlan(settings: settings)
+
+    XCTAssertNil(plan.defaultEndpoint.modelID)
+    XCTAssertEqual(plan.defaultEndpoint.port, 8080)
+    XCTAssertEqual(plan.servers.map(\.modelID), [nil, "mlx-community/devstral"])
+    XCTAssertEqual(plan.servers.map(\.port), [8080, 8081])
+    XCTAssertEqual(plan.endpoint(for: .plan)?.modelID, "mlx-community/devstral")
+    XCTAssertEqual(plan.endpoint(for: .plan)?.port, 8081)
+}
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -271,6 +288,7 @@ Run:
 swift test --filter ServerControlTests/testRoleServerPlanSharesDuplicateAssignedModels
 swift test --filter ServerControlTests/testRoleServerPlanAssignsDistinctRolePortsAfterDefaultPort
 swift test --filter ServerControlTests/testRoleServerPlanMarksUnassignedRoles
+swift test --filter ServerControlTests/testRoleServerPlanPreservesMissingActiveModel
 ```
 
 Expected: compile failure for missing `RoleServerPoolController` and related types.
@@ -296,11 +314,11 @@ public enum RoleServerStatusKind: String, Equatable, Sendable {
 }
 
 public struct RoleServerEndpoint: Equatable, Sendable {
-    public var modelID: String
+    public var modelID: String?
     public var port: Int
     public var baseURL: URL
 
-    public init(modelID: String, port: Int, baseURL: URL) {
+    public init(modelID: String?, port: Int, baseURL: URL) {
         self.modelID = modelID
         self.port = port
         self.baseURL = baseURL
@@ -332,7 +350,7 @@ public struct RoleServerStatusRow: Identifiable, Equatable, Sendable {
 
 public struct RoleServerPlan: Equatable, Sendable {
     public struct Server: Equatable, Sendable {
-        public var modelID: String
+        public var modelID: String?
         public var port: Int
         public var endpoint: RoleServerEndpoint
     }
@@ -370,7 +388,7 @@ public final class RoleServerPoolController: ObservableObject {
     private let processLauncher: ProcessLaunching
     private let portChecker: ServerPortChecking
     private let argumentBuilder = ServerProcessController()
-    private var processesByModelID: [String: ManagedProcess] = [:]
+    private var processesByPort: [Int: ManagedProcess] = [:]
     private var plan: RoleServerPlan?
 
     public init(
@@ -382,11 +400,14 @@ public final class RoleServerPoolController: ObservableObject {
     }
 
     public static func makePlan(settings: DashboardSettings) -> RoleServerPlan {
-        let activeModel = settings.activeModel?.isEmpty == false ? settings.activeModel! : "default"
-        var modelPorts: [String: Int] = [activeModel: settings.mlxPort]
+        let activeModel = settings.activeModel?.isEmpty == false ? settings.activeModel : nil
+        var modelPorts: [String: Int] = [:]
+        if let activeModel {
+            modelPorts[activeModel] = settings.mlxPort
+        }
         var servers: [RoleServerPlan.Server] = []
 
-        func endpoint(modelID: String, port: Int) -> RoleServerEndpoint {
+        func endpoint(modelID: String?, port: Int) -> RoleServerEndpoint {
             RoleServerEndpoint(
                 modelID: modelID,
                 port: port,
@@ -630,8 +651,8 @@ public func start(settings: DashboardSettings, pythonExecutable: URL) throws {
         throw error
     }
 
-    var nextProcesses: [String: ManagedProcess] = [:]
-    var runningEndpointsByModel: [String: RoleServerEndpoint] = [:]
+    var nextProcesses: [Int: ManagedProcess] = [:]
+    var runningEndpointsByPort: [Int: RoleServerEndpoint] = [:]
 
     for server in nextPlan.servers {
         if server.port != nextPlan.defaultEndpoint.port,
@@ -647,29 +668,29 @@ public func start(settings: DashboardSettings, pythonExecutable: URL) throws {
         )
         process.environment = ProcessInfo.processInfo.environment
         try process.launch()
-        nextProcesses[server.modelID] = process
-        runningEndpointsByModel[server.modelID] = server.endpoint
+        nextProcesses[server.port] = process
+        runningEndpointsByPort[server.port] = server.endpoint
     }
 
-    processesByModelID = nextProcesses
+    processesByPort = nextProcesses
     plan = nextPlan
-    defaultEndpoint = runningEndpointsByModel[nextPlan.defaultEndpoint.modelID]
+    defaultEndpoint = runningEndpointsByPort[nextPlan.defaultEndpoint.port]
     roleEndpoints = Dictionary(uniqueKeysWithValues: ProviderModelRole.orderedRoutingRoles.compactMap { role in
         guard let plannedEndpoint = nextPlan.endpoint(for: role),
-              runningEndpointsByModel[plannedEndpoint.modelID] != nil
+              runningEndpointsByPort[plannedEndpoint.port] != nil
         else { return nil }
         return (role, plannedEndpoint)
     })
-    roleStatuses = statuses(from: nextPlan, runningEndpointsByModel: runningEndpointsByModel)
+    roleStatuses = statuses(from: nextPlan, runningEndpointsByPort: runningEndpointsByPort)
     state = .running
 }
 
 public func stopAll() {
     state = .stopping
-    for process in processesByModelID.values where process.isRunning {
+    for process in processesByPort.values where process.isRunning {
         process.terminate()
     }
-    processesByModelID = [:]
+    processesByPort = [:]
     plan = nil
     defaultEndpoint = nil
     roleEndpoints = [:]
@@ -681,12 +702,13 @@ public func stopAll() {
 
 private func statuses(
     from plan: RoleServerPlan,
-    runningEndpointsByModel: [String: RoleServerEndpoint]
+    runningEndpointsByPort: [Int: RoleServerEndpoint]
 ) -> [RoleServerStatusRow] {
     var firstRoleForModel: [String: ProviderModelRole] = [:]
     for role in ProviderModelRole.orderedRoutingRoles {
-        guard let endpoint = plan.endpoint(for: role) else { continue }
-        firstRoleForModel[endpoint.modelID] = firstRoleForModel[endpoint.modelID] ?? role
+        let status = plan.status(for: role)
+        guard let assignedModel = status.assignedModel else { continue }
+        firstRoleForModel[assignedModel] = firstRoleForModel[assignedModel] ?? role
     }
 
     return ProviderModelRole.orderedRoutingRoles.map { role in
@@ -694,7 +716,7 @@ private func statuses(
         guard let assignedModel = planned.assignedModel, let endpoint = planned.endpoint else {
             return planned
         }
-        guard runningEndpointsByModel[endpoint.modelID] != nil else {
+        guard runningEndpointsByPort[endpoint.port] != nil else {
             return RoleServerStatusRow(
                 role: role,
                 assignedModel: assignedModel,
@@ -703,7 +725,7 @@ private func statuses(
                 detail: "Port \(endpoint.port) unavailable; using active model"
             )
         }
-        if endpoint.modelID == plan.defaultEndpoint.modelID || firstRoleForModel[endpoint.modelID] != role {
+        if endpoint.port == plan.defaultEndpoint.port || firstRoleForModel[assignedModel] != role {
             return RoleServerStatusRow(
                 role: role,
                 assignedModel: assignedModel,
@@ -1309,13 +1331,13 @@ Add this method to `RoleServerPoolController`:
 ```swift
 public func stop(role: ProviderModelRole) {
     guard let endpoint = roleEndpoints[role] else { return }
-    let sharingRoles = roleEndpoints.filter { $0.value.modelID == endpoint.modelID }.map(\.key)
-    if endpoint.modelID != defaultEndpoint?.modelID, sharingRoles.count == 1, sharingRoles.first == role,
-       let process = processesByModelID[endpoint.modelID] {
+    let sharingRoles = roleEndpoints.filter { $0.value.port == endpoint.port }.map(\.key)
+    if endpoint.port != defaultEndpoint?.port, sharingRoles.count == 1, sharingRoles.first == role,
+       let process = processesByPort[endpoint.port] {
         if process.isRunning {
             process.terminate()
         }
-        processesByModelID.removeValue(forKey: endpoint.modelID)
+        processesByPort.removeValue(forKey: endpoint.port)
     }
     roleEndpoints.removeValue(forKey: role)
     roleStatuses = roleStatuses.map { row in
@@ -1344,7 +1366,7 @@ public func restart(role: ProviderModelRole, settings: DashboardSettings, python
         roleEndpoints.removeValue(forKey: role)
         return
     }
-    if endpoint.modelID == defaultEndpoint?.modelID {
+    if endpoint.port == defaultEndpoint?.port {
         roleEndpoints[role] = endpoint
         roleStatuses = roleStatuses.map { row in
             guard row.role == role else { return row }
@@ -1383,7 +1405,7 @@ public func restart(role: ProviderModelRole, settings: DashboardSettings, python
     )
     process.environment = ProcessInfo.processInfo.environment
     try process.launch()
-    processesByModelID[endpoint.modelID] = process
+    processesByPort[endpoint.port] = process
     roleEndpoints[role] = endpoint
     roleStatuses = roleStatuses.map { row in
         guard row.role == role else { return row }
