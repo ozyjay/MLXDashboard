@@ -160,6 +160,7 @@ final class DashboardViewModel: ObservableObject {
     private var activeInstallSessionID: Int?
     private let modelSearchPageSize = 50
     private var modelSearchLimit = 50
+    private var rawModelSearchResultCount = 0
 
     init(
         settingsStore: SettingsStore = SettingsStore(),
@@ -257,8 +258,8 @@ final class DashboardViewModel: ObservableObject {
 
     var canLoadMoreSearchResults: Bool {
         !isLoadingMoreSearchResults
-            && !searchResults.isEmpty
-            && searchResults.count == modelSearchLimit
+            && rawModelSearchResultCount > 0
+            && rawModelSearchResultCount == modelSearchLimit
     }
 
     var canInstallSelectedSearchModel: Bool {
@@ -542,6 +543,7 @@ final class DashboardViewModel: ObservableObject {
             guard status.isReady else {
                 let missingPackages = status.packageReport.missingInstallNames.joined(separator: ", ")
                 searchResults = []
+                rawModelSearchResultCount = 0
                 shouldOfferPythonPackageInstall = true
                 if defaultSearch {
                     modelSearchMessage = "Install Python packages to search default MLX models: \(missingPackages)."
@@ -554,12 +556,17 @@ final class DashboardViewModel: ObservableObject {
             }
 
             shouldOfferPythonPackageInstall = false
-            searchResults = try await modelSearcher.search(query: modelQuery, pythonExecutable: status.pythonExecutable, limit: limit)
+            let rawResults = try await modelSearcher.search(query: modelQuery, pythonExecutable: status.pythonExecutable, limit: limit)
+            let filteredResults = runnableSearchResults(from: rawResults)
+            searchResults = filteredResults
+            rawModelSearchResultCount = rawResults.count
             modelSearchLimit = limit
-            modelSearchMessage = searchResultStatusText(count: searchResults.count)
+            let unsupportedCount = rawResults.count - filteredResults.count
+            modelSearchMessage = searchResultStatusText(count: searchResults.count, unsupportedCount: unsupportedCount)
             let logPrefix = defaultSearch ? "Loaded default" : "Found"
             telemetry.appendLog("\(logPrefix) \(searchResults.count) mlx-community models for \(modelQuery)")
         } catch is CancellationError {
+            rawModelSearchResultCount = 0
             if defaultSearch {
                 modelSearchMessage = "Default model search cancelled."
                 telemetry.appendLog("Default model search cancelled.")
@@ -568,6 +575,7 @@ final class DashboardViewModel: ObservableObject {
                 telemetry.appendLog("Model search cancelled.")
             }
         } catch {
+            rawModelSearchResultCount = 0
             if defaultSearch {
                 modelSearchMessage = "Default model search failed: \(error)"
                 telemetry.appendLog("Default model search failed: \(error)")
@@ -588,6 +596,7 @@ final class DashboardViewModel: ObservableObject {
                 if !status.isReady {
                     let missingPackages = status.packageReport.missingInstallNames.joined(separator: ", ")
                     searchResults = []
+                    rawModelSearchResultCount = 0
                     shouldOfferPythonPackageInstall = true
                     modelSearchMessage = "Install Python packages to search default MLX models: \(missingPackages)."
                     telemetry.appendLog("Default model search needs Python packages: \(missingPackages)")
@@ -607,8 +616,22 @@ final class DashboardViewModel: ObservableObject {
     }
 
     private func searchResultStatusText(count: Int) -> String {
+        searchResultStatusText(count: count, unsupportedCount: 0)
+    }
+
+    private func searchResultStatusText(count: Int, unsupportedCount: Int) -> String {
         let noun = count == 1 ? "result" : "results"
-        return "Showing \(count) mlx-community \(noun) sorted by downloads."
+        let base = "Showing \(count) mlx-community \(noun) sorted by downloads"
+        guard unsupportedCount > 0 else {
+            return "\(base)."
+        }
+        return "\(base); filtered \(unsupportedCount) unsupported by current mlx-lm."
+    }
+
+    private func runnableSearchResults(from results: [HuggingFaceModelSummary]) -> [HuggingFaceModelSummary] {
+        results.filter { model in
+            runtimeCompatibilityChecker.compatibility(modelType: model.modelType).isRunnable
+        }
     }
 
     func installModel(

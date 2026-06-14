@@ -26,6 +26,17 @@ public struct MLXModelRuntimeCompatibilityChecker: Sendable {
 
     public init() {}
 
+    public func compatibility(modelType: String?) -> MLXModelRuntimeCompatibility {
+        guard let modelType, !modelType.isEmpty else {
+            return .runnable(modelType: nil)
+        }
+
+        if Self.unsupportedModelTypes.contains(modelType) {
+            return .unsupported(modelType: modelType, reason: "Unsupported by installed mlx-lm: \(modelType)")
+        }
+        return .runnable(modelType: modelType)
+    }
+
     public func compatibility(localPath: String?) -> MLXModelRuntimeCompatibility {
         guard let localPath else {
             return .runnable(modelType: nil)
@@ -40,9 +51,6 @@ public struct MLXModelRuntimeCompatibilityChecker: Sendable {
             return .runnable(modelType: nil)
         }
 
-        if Self.unsupportedModelTypes.contains(modelType) {
-            return .unsupported(modelType: modelType, reason: "Unsupported by installed mlx-lm: \(modelType)")
-        }
-        return .runnable(modelType: modelType)
+        return compatibility(modelType: modelType)
     }
 }

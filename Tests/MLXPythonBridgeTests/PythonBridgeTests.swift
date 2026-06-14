@@ -67,6 +67,15 @@ final class PythonBridgeTests: XCTestCase {
         XCTAssertEqual(compatibility, .runnable(modelType: "mistral"))
     }
 
+    func testRuntimeCompatibilityRejectsUnsupportedModelTypeWithoutLocalSnapshot() throws {
+        let compatibility = MLXModelRuntimeCompatibilityChecker().compatibility(modelType: "gemma4_unified")
+
+        XCTAssertEqual(
+            compatibility,
+            .unsupported(modelType: "gemma4_unified", reason: "Unsupported by installed mlx-lm: gemma4_unified")
+        )
+    }
+
     func testCacheManagerDeletesWholeRepoCacheFolderForModel() throws {
         let root = try temporaryDirectory()
         let snapshot = root.appending(path: "models--mlx-community--Tiny/snapshots/abc123", directoryHint: .isDirectory)
@@ -125,7 +134,7 @@ final class PythonBridgeTests: XCTestCase {
         let runner = FakeCommandRunner(results: [
             "search": CommandResult(
                 exitCode: 0,
-                standardOutput: #"[{"id":"mlx-community/Tiny","downloads":42,"likes":7}]"#,
+                standardOutput: #"[{"id":"mlx-community/Tiny","downloads":42,"likes":7,"model_type":"mistral"}]"#,
                 standardError: ""
             )
         ])
@@ -133,7 +142,7 @@ final class PythonBridgeTests: XCTestCase {
 
         let results = try await searcher.search(query: "tiny", pythonExecutable: URL(filePath: "/tmp/python"), limit: 5)
 
-        XCTAssertEqual(results, [HuggingFaceModelSummary(id: "mlx-community/Tiny", downloads: 42, likes: 7)])
+        XCTAssertEqual(results, [HuggingFaceModelSummary(id: "mlx-community/Tiny", downloads: 42, likes: 7, modelType: "mistral")])
     }
 
     func testHuggingFaceSearcherScopesToMLXCommunityAndSortsByDownloads() async throws {
@@ -154,6 +163,8 @@ final class PythonBridgeTests: XCTestCase {
         XCTAssertTrue(script.contains("sort=sort"))
         XCTAssertFalse(script.contains("direction="))
         XCTAssertTrue(script.contains("limit=limit"))
+        XCTAssertTrue(script.contains("hf_hub_download"))
+        XCTAssertTrue(script.contains("model_type"))
     }
 
     func testHuggingFaceSearcherPassesDynamicValuesAsArguments() async throws {

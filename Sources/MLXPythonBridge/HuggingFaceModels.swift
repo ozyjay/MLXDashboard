@@ -4,11 +4,20 @@ public struct HuggingFaceModelSummary: Sendable, Equatable, Identifiable, Codabl
     public var id: String
     public var downloads: Int?
     public var likes: Int?
+    public var modelType: String?
 
-    public init(id: String, downloads: Int? = nil, likes: Int? = nil) {
+    public init(id: String, downloads: Int? = nil, likes: Int? = nil, modelType: String? = nil) {
         self.id = id
         self.downloads = downloads
         self.likes = likes
+        self.modelType = modelType
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case downloads
+        case likes
+        case modelType = "model_type"
     }
 }
 
@@ -81,10 +90,25 @@ public struct HuggingFaceModelSearcher: Sendable {
         let script = """
         import json
         import sys
-        from huggingface_hub import list_models
+        from huggingface_hub import hf_hub_download, list_models
         query, author, sort, limit = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
         models = list_models(search=query, author=author, filter='mlx', sort=sort, limit=limit)
-        print(json.dumps([{'id': m.modelId, 'downloads': m.downloads, 'likes': m.likes} for m in models]))
+        results = []
+        for model in models:
+            model_type = None
+            try:
+                config_path = hf_hub_download(repo_id=model.modelId, filename='config.json')
+                with open(config_path, encoding='utf-8') as config_file:
+                    model_type = json.load(config_file).get('model_type')
+            except Exception:
+                model_type = None
+            results.append({
+                'id': model.modelId,
+                'downloads': model.downloads,
+                'likes': model.likes,
+                'model_type': model_type,
+            })
+        print(json.dumps(results))
         """
         let result = try await runner.run(Command(
             executableURL: pythonExecutable,

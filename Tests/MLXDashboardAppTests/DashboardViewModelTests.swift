@@ -684,6 +684,90 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.modelSearchMessage, "Showing 50 mlx-community results sorted by downloads.")
     }
 
+    func testSearchModelsFiltersKnownUnsupportedRuntimeModelTypes() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = FakeCommandRunner(results: [
+            "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "search-limit-50": CommandResult(
+                exitCode: 0,
+                standardOutput: """
+                [
+                  {"id":"mlx-community/Runnable","downloads":100,"likes":7,"model_type":"mistral"},
+                  {"id":"mlx-community/Gemma4","downloads":99,"likes":8,"model_type":"gemma4_unified"},
+                  {"id":"mlx-community/Unknown","downloads":98,"likes":9}
+                ]
+                """,
+                standardError: ""
+            )
+        ])
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelSearcher: HuggingFaceModelSearcher(runner: runner)
+        )
+
+        await viewModel.searchModels()
+
+        XCTAssertEqual(viewModel.searchResults.map(\.id), ["mlx-community/Runnable", "mlx-community/Unknown"])
+        XCTAssertEqual(viewModel.modelSearchMessage, "Showing 2 mlx-community results sorted by downloads; filtered 1 unsupported by current mlx-lm.")
+    }
+
+    func testSearchModelsCanLoadMoreWhenRawPageIsFullAfterFiltering() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = FakeCommandRunner(results: [
+            "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "search-limit-50": CommandResult(exitCode: 0, standardOutput: Self.modelListJSON(count: 50, unsupportedIndices: [50]), standardError: "")
+        ])
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelSearcher: HuggingFaceModelSearcher(runner: runner)
+        )
+
+        await viewModel.searchModels()
+
+        XCTAssertEqual(viewModel.searchResults.count, 49)
+        XCTAssertTrue(viewModel.canLoadMoreSearchResults)
+        XCTAssertEqual(viewModel.modelSearchMessage, "Showing 49 mlx-community results sorted by downloads; filtered 1 unsupported by current mlx-lm.")
+    }
+
+    func testSearchModelsCanLoadMoreWhenFullRawPageIsEntirelyFiltered() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = FakeCommandRunner(results: [
+            "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "search-limit-50": CommandResult(exitCode: 0, standardOutput: Self.modelListJSON(count: 50, unsupportedIndices: Set(1...50)), standardError: "")
+        ])
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelSearcher: HuggingFaceModelSearcher(runner: runner)
+        )
+
+        await viewModel.searchModels()
+
+        XCTAssertEqual(viewModel.searchResults.count, 0)
+        XCTAssertTrue(viewModel.canLoadMoreSearchResults)
+        XCTAssertEqual(viewModel.modelSearchMessage, "Showing 0 mlx-community results sorted by downloads; filtered 50 unsupported by current mlx-lm.")
+    }
+
     func testLoadMoreSearchResultsRefetchesWithNextLimit() async throws {
         let paths = try temporaryAppPaths()
         let python = paths.venvDirectory.appending(path: "bin/python")
@@ -1942,9 +2026,10 @@ final class DashboardViewModelTests: XCTestCase {
         return (data, (response as? HTTPURLResponse)?.statusCode ?? -1)
     }
 
-    private static func modelListJSON(count: Int) -> String {
+    private static func modelListJSON(count: Int, unsupportedIndices: Set<Int> = []) -> String {
         let models = (1...count).map { index in
-            #"{"id":"mlx-community/Model-\#(index)","downloads":\#(1000 - index),"likes":\#(index)}"#
+            let modelType = unsupportedIndices.contains(index) ? "gemma4_unified" : "mistral"
+            return #"{"id":"mlx-community/Model-\#(index)","downloads":\#(1000 - index),"likes":\#(index),"model_type":"\#(modelType)"}"#
         }
         return "[\(models.joined(separator: ","))]"
     }
