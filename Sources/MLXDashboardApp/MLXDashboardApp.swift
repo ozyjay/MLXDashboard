@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import MLXCore
 import MLXPythonBridge
@@ -30,6 +31,13 @@ struct MLXDashboardApp: App {
                 }
         }
         .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings...") {
+                    NSApp.activate(ignoringOtherApps: true)
+                    viewModel.requestModelDownloadSettingsNavigation()
+                }
+                .keyboardShortcut(",", modifiers: [.command])
+            }
             CommandGroup(after: .appInfo) {
                 Button("Start MLX Server") {
                     Task { await viewModel.startServer() }

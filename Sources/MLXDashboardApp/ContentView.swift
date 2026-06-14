@@ -49,6 +49,9 @@ struct ContentView: View {
         }
         .frame(minWidth: 980, minHeight: 680)
         .background(WindowCloseGuardView())
+        .onChange(of: viewModel.modelDownloadSettingsNavigationRequestID) { _, _ in
+            selectedSection = .controller
+        }
     }
 
     @ViewBuilder

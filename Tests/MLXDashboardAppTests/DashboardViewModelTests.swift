@@ -1308,6 +1308,20 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertNil(persisted.coding)
     }
 
+    func testRequestModelDownloadSettingsNavigationIncrementsRequestID() throws {
+        let paths = try temporaryAppPaths()
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+        )
+        let initialRequestID = viewModel.modelDownloadSettingsNavigationRequestID
+
+        viewModel.requestModelDownloadSettingsNavigation()
+
+        XCTAssertEqual(viewModel.modelDownloadSettingsNavigationRequestID, initialRequestID + 1)
+    }
+
     private func temporaryAppPaths() throws -> AppPaths {
         let root = FileManager.default.temporaryDirectory
             .appending(path: "MLXDashboardAppTests-\(UUID().uuidString)", directoryHint: .isDirectory)

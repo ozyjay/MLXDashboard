@@ -93,6 +93,7 @@ final class DashboardViewModel: ObservableObject {
     @Published var isInstallingModel = false
     @Published var isLoadingMoreSearchResults = false
     @Published var modelInstallProgress: ModelInstallProgress?
+    @Published var modelDownloadSettingsNavigationRequestID = 0
 
     let telemetry: TelemetryStore
     let serverController: ServerProcessController
@@ -243,6 +244,10 @@ final class DashboardViewModel: ObservableObject {
     func updateDownloadSettings(_ downloadSettings: HuggingFaceDownloadSettings) {
         settings.downloadSettings = downloadSettings.validated()
         saveSettings()
+    }
+
+    func requestModelDownloadSettingsNavigation() {
+        modelDownloadSettingsNavigationRequestID += 1
     }
 
     func refreshPythonStatus() async {
