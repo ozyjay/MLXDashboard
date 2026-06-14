@@ -143,6 +143,7 @@ final class DashboardViewModel: ObservableObject {
     private let registry: ModelRegistry
     private let environmentManager: PythonEnvironmentManager
     private let cacheManager: MLXModelCacheManager
+    private let runtimeCompatibilityChecker: MLXModelRuntimeCompatibilityChecker
     private let modelSearcher: HuggingFaceModelSearcher
     private let modelInstaller: HuggingFaceModelInstaller
     private let authChecker: HuggingFaceAuthChecker
@@ -165,6 +166,7 @@ final class DashboardViewModel: ObservableObject {
         registry: ModelRegistry = ModelRegistry(),
         environmentManager: PythonEnvironmentManager = PythonEnvironmentManager(),
         cacheManager: MLXModelCacheManager = MLXModelCacheManager(),
+        runtimeCompatibilityChecker: MLXModelRuntimeCompatibilityChecker = MLXModelRuntimeCompatibilityChecker(),
         modelSearcher: HuggingFaceModelSearcher = HuggingFaceModelSearcher(),
         modelInstaller: HuggingFaceModelInstaller = HuggingFaceModelInstaller(),
         authChecker: HuggingFaceAuthChecker = HuggingFaceAuthChecker(),
@@ -176,6 +178,7 @@ final class DashboardViewModel: ObservableObject {
         self.registry = registry
         self.environmentManager = environmentManager
         self.cacheManager = cacheManager
+        self.runtimeCompatibilityChecker = runtimeCompatibilityChecker
         self.modelSearcher = modelSearcher
         self.modelInstaller = modelInstaller
         self.authChecker = authChecker
@@ -192,7 +195,15 @@ final class DashboardViewModel: ObservableObject {
         self.providerUpstreamEndpointState = ProviderUpstreamEndpointState()
         self.roleServerStatuses = serverPoolController.roleStatuses
         try? registry.load()
+        let compatibilityChanged = refreshRuntimeCompatibilityForInstalledRecords()
         self.installedModels = Self.visibleInstalledModels(from: registry.records)
+        let settingsChanged = syncRuntimeSelectionsWithRunnableModels()
+        if compatibilityChanged {
+            try? registry.save()
+        }
+        if settingsChanged {
+            try? settingsStore.save(settings)
+        }
         self.providerUpstreamEndpointState.update(
             defaultEndpoint: serverPoolController.defaultEndpoint,
             roleEndpoints: serverPoolController.roleEndpoints
@@ -342,6 +353,9 @@ final class DashboardViewModel: ObservableObject {
 
     func startServer() async {
         do {
+            if syncRuntimeSelectionsWithRunnableModels() {
+                try? settingsStore.save(settings)
+            }
             let python = try await environmentManager.ensureVenv()
             try serverPoolController.start(settings: settings, pythonExecutable: python)
             roleServerStatuses = serverPoolController.roleStatuses
@@ -373,6 +387,9 @@ final class DashboardViewModel: ObservableObject {
 
     func restartServer() async {
         do {
+            if syncRuntimeSelectionsWithRunnableModels() {
+                try? settingsStore.save(settings)
+            }
             let python = try await environmentManager.ensureVenv()
             serverPoolController.stopAll()
             roleServerStatuses = serverPoolController.roleStatuses
@@ -411,6 +428,9 @@ final class DashboardViewModel: ObservableObject {
 
     func startProvider() throws {
         guard providerServer == nil else { return }
+        if syncRuntimeSelectionsWithRunnableModels() {
+            try? settingsStore.save(settings)
+        }
         let upstream = URLSessionProviderUpstreamProxyClient()
         let router = ProviderRouter(
             upstream: upstream,
@@ -475,10 +495,13 @@ final class DashboardViewModel: ObservableObject {
         do {
             let cached = try cacheManager.scan(cacheRoot: huggingFaceCacheRoot)
             for model in cached {
-                registry.upsert(ModelRecord(id: model.id, status: .installed, localPath: model.localPath))
+                registry.upsert(runtimeCheckedRecord(id: model.id, localPath: model.localPath))
             }
             try registry.save()
             installedModels = Self.visibleInstalledModels(from: registry.records)
+            if syncRuntimeSelectionsWithRunnableModels() {
+                try? settingsStore.save(settings)
+            }
             telemetry.appendLog("Scanned Hugging Face cache")
         } catch {
             telemetry.appendLog("Cache scan failed: \(error)")
@@ -677,12 +700,19 @@ final class DashboardViewModel: ObservableObject {
             await Task.yield()
             try Task.checkCancellation()
             updateInstallProgress(.finalizing, modelID: model.id, detail: "Finalizing cache record for \(model.id).")
-            registry.upsert(ModelRecord(id: model.id, status: .installed, localPath: result.localPath, message: "Installed"))
+            let record = runtimeCheckedRecord(id: model.id, localPath: result.localPath)
+            registry.upsert(record)
             try registry.save()
             installedModels = Self.visibleInstalledModels(from: registry.records)
             scanModelCache()
-            updateInstallProgress(.installed, modelID: model.id, detail: "Installed \(model.id) at \(result.localPath)")
-            telemetry.appendLog("Installed \(model.id)")
+            if record.status == .installed {
+                updateInstallProgress(.installed, modelID: model.id, detail: "Installed \(model.id) at \(result.localPath)")
+                telemetry.appendLog("Installed \(model.id)")
+            } else {
+                updateInstallProgress(.failed, modelID: model.id, detail: "Installed cache for \(model.id), but it is not runnable: \(record.message ?? "unsupported by installed mlx-lm")")
+                modelInstallMessage = record.message
+                telemetry.appendLog("Installed cache for \(model.id), but it is not runnable: \(record.message ?? "unsupported by installed mlx-lm")")
+            }
         } catch is CancellationError {
             markModelDownloadPaused(modelID: model.id)
         } catch {
@@ -1048,6 +1078,67 @@ final class DashboardViewModel: ObservableObject {
 
     private static func visibleInstalledModels(from records: [ModelRecord]) -> [ModelRecord] {
         records.filter { $0.status != .removed }
+    }
+
+    @discardableResult
+    private func refreshRuntimeCompatibilityForInstalledRecords() -> Bool {
+        var changed = false
+        for record in registry.records where record.status == .installed {
+            let checked = runtimeCheckedRecord(id: record.id, localPath: record.localPath)
+            if checked.status != record.status || checked.message != record.message {
+                registry.upsert(checked)
+                changed = true
+            }
+        }
+        return changed
+    }
+
+    private func runtimeCheckedRecord(id: String, localPath: String?) -> ModelRecord {
+        switch runtimeCompatibilityChecker.compatibility(localPath: localPath) {
+        case .runnable:
+            return ModelRecord(id: id, status: .installed, localPath: localPath, message: "Installed")
+        case .unsupported(_, let reason):
+            return ModelRecord(id: id, status: .failed, localPath: localPath, message: reason)
+        }
+    }
+
+    @discardableResult
+    private func syncRuntimeSelectionsWithRunnableModels() -> Bool {
+        var changed = false
+
+        if let activeModel = settings.activeModel,
+           modelIsKnownNonRunnable(activeModel) {
+            settings.activeModel = nil
+            activeModelSelection.update(nil)
+            changed = true
+        } else {
+            activeModelSelection.update(settings.activeModel)
+        }
+
+        var assignments = settings.providerRoleAssignments
+        for role in ProviderModelRole.orderedRoutingRoles {
+            guard let model = assignments.model(for: role),
+                  modelIsKnownNonRunnable(model)
+            else { continue }
+            assignments.setModel(nil, for: role)
+            changed = true
+        }
+
+        if assignments != settings.providerRoleAssignments {
+            settings.providerRoleAssignments = assignments
+            providerRoleAssignmentState.update(assignments)
+        } else {
+            providerRoleAssignmentState.update(settings.providerRoleAssignments)
+        }
+
+        return changed
+    }
+
+    private func modelIsKnownNonRunnable(_ modelID: String) -> Bool {
+        guard let record = registry.record(id: modelID) else {
+            return false
+        }
+        return record.status != .installed
     }
 
     private var selectedInstalledModelIsInstalled: Bool {

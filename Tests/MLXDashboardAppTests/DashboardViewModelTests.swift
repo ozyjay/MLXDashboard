@@ -1780,6 +1780,82 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertNil(persisted.coding)
     }
 
+    func testCacheScanMarksUnsupportedModelTypesFailedAndClearsRuntimeSelections() throws {
+        let paths = try temporaryAppPaths()
+        try SettingsStore(fileURL: paths.settingsFile).save(
+            DashboardSettings(
+                activeModel: "mlx-community/Gemma4",
+                providerRoleAssignments: ProviderRoleAssignments(
+                    ask: "mlx-community/Gemma4",
+                    plan: "mlx-community/Devstral",
+                    coding: "mlx-community/Gemma4"
+                )
+            )
+        )
+        let cacheRoot = try temporaryDirectory()
+        let unsupported = cacheRoot.appending(path: "models--mlx-community--Gemma4/snapshots/abc", directoryHint: .isDirectory)
+        let runnable = cacheRoot.appending(path: "models--mlx-community--Devstral/snapshots/def", directoryHint: .isDirectory)
+        try createCachedModelSnapshot(at: unsupported, config: #"{"model_type":"gemma4_unified"}"#)
+        try createCachedModelSnapshot(at: runnable, config: #"{"model_type":"mistral"}"#)
+
+        let registry = ModelRegistry(fileURL: paths.modelRegistryFile)
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: registry,
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:])),
+            huggingFaceCacheRoot: cacheRoot
+        )
+
+        viewModel.scanModelCache()
+
+        let unsupportedRecord = try XCTUnwrap(registry.record(id: "mlx-community/Gemma4"))
+        XCTAssertEqual(unsupportedRecord.status, .failed)
+        XCTAssertEqual(unsupportedRecord.localPath, unsupported.path)
+        XCTAssertEqual(unsupportedRecord.message, "Unsupported by installed mlx-lm: gemma4_unified")
+        XCTAssertEqual(registry.record(id: "mlx-community/Devstral")?.status, .installed)
+        XCTAssertNil(viewModel.settings.activeModel)
+        XCTAssertNil(viewModel.settings.providerRoleAssignments.ask)
+        XCTAssertEqual(viewModel.settings.providerRoleAssignments.plan, "mlx-community/Devstral")
+        XCTAssertNil(viewModel.settings.providerRoleAssignments.coding)
+
+        let persisted = try SettingsStore(fileURL: paths.settingsFile).load()
+        XCTAssertNil(persisted.activeModel)
+        XCTAssertNil(persisted.providerRoleAssignments.ask)
+        XCTAssertEqual(persisted.providerRoleAssignments.plan, "mlx-community/Devstral")
+        XCTAssertNil(persisted.providerRoleAssignments.coding)
+    }
+
+    func testInitializationMigratesUnsupportedInstalledRecordAndClearsActiveModel() throws {
+        let paths = try temporaryAppPaths()
+        let cacheRoot = try temporaryDirectory()
+        let unsupported = cacheRoot.appending(path: "models--mlx-community--Gemma4/snapshots/abc", directoryHint: .isDirectory)
+        try createCachedModelSnapshot(at: unsupported, config: #"{"model_type":"gemma4_unified"}"#)
+        try SettingsStore(fileURL: paths.settingsFile).save(
+            DashboardSettings(
+                activeModel: "mlx-community/Gemma4",
+                providerRoleAssignments: ProviderRoleAssignments(ask: "mlx-community/Gemma4")
+            )
+        )
+        let registry = ModelRegistry(fileURL: paths.modelRegistryFile)
+        registry.upsert(ModelRecord(id: "mlx-community/Gemma4", status: .installed, localPath: unsupported.path))
+        try registry.save()
+
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: registry,
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:])),
+            huggingFaceCacheRoot: cacheRoot
+        )
+
+        XCTAssertEqual(registry.record(id: "mlx-community/Gemma4")?.status, .failed)
+        XCTAssertEqual(registry.record(id: "mlx-community/Gemma4")?.message, "Unsupported by installed mlx-lm: gemma4_unified")
+        XCTAssertNil(viewModel.settings.activeModel)
+        XCTAssertNil(viewModel.settings.providerRoleAssignments.ask)
+        let persisted = try SettingsStore(fileURL: paths.settingsFile).load()
+        XCTAssertNil(persisted.activeModel)
+        XCTAssertNil(persisted.providerRoleAssignments.ask)
+    }
+
     func testRequestModelDownloadSettingsNavigationIncrementsRequestID() throws {
         let paths = try temporaryAppPaths()
         let viewModel = DashboardViewModel(
@@ -1806,6 +1882,13 @@ final class DashboardViewModelTests: XCTestCase {
             .appending(path: "MLXDashboardAppTests-\(UUID().uuidString)", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+
+    private func createCachedModelSnapshot(at snapshot: URL, config: String) throws {
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try config.write(to: snapshot.appending(path: "config.json"), atomically: true, encoding: .utf8)
+        FileManager.default.createFile(atPath: snapshot.appending(path: "model.safetensors.index.json").path, contents: Data())
+        FileManager.default.createFile(atPath: snapshot.appending(path: "tokenizer_config.json").path, contents: Data())
     }
 
     private func availableTestPorts() throws -> (mlxPort: Int, planPort: Int, providerPort: Int) {

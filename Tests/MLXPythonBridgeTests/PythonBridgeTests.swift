@@ -40,6 +40,33 @@ final class PythonBridgeTests: XCTestCase {
         XCTAssertEqual(models.first?.localPath, good.path)
     }
 
+    func testRuntimeCompatibilityRejectsUnsupportedGemma4UnifiedModelType() throws {
+        let root = try temporaryDirectory()
+        let snapshot = root.appending(path: "models--mlx-community--Gemma4/snapshots/abc123", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try #"{"model_type":"gemma4_unified"}"#
+            .write(to: snapshot.appending(path: "config.json"), atomically: true, encoding: .utf8)
+
+        let compatibility = MLXModelRuntimeCompatibilityChecker().compatibility(localPath: snapshot.path)
+
+        XCTAssertEqual(
+            compatibility,
+            .unsupported(modelType: "gemma4_unified", reason: "Unsupported by installed mlx-lm: gemma4_unified")
+        )
+    }
+
+    func testRuntimeCompatibilityAllowsKnownModelTypes() throws {
+        let root = try temporaryDirectory()
+        let snapshot = root.appending(path: "models--mlx-community--Devstral/snapshots/abc123", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try #"{"model_type":"mistral"}"#
+            .write(to: snapshot.appending(path: "config.json"), atomically: true, encoding: .utf8)
+
+        let compatibility = MLXModelRuntimeCompatibilityChecker().compatibility(localPath: snapshot.path)
+
+        XCTAssertEqual(compatibility, .runnable(modelType: "mistral"))
+    }
+
     func testCacheManagerDeletesWholeRepoCacheFolderForModel() throws {
         let root = try temporaryDirectory()
         let snapshot = root.appending(path: "models--mlx-community--Tiny/snapshots/abc123", directoryHint: .isDirectory)
