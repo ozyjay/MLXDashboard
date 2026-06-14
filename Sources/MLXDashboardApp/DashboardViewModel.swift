@@ -197,11 +197,14 @@ final class DashboardViewModel: ObservableObject {
             defaultEndpoint: serverPoolController.defaultEndpoint,
             roleEndpoints: serverPoolController.roleEndpoints
         )
-        self.serverPoolControllerCancellable = Publishers.CombineLatest(
+        self.serverPoolControllerCancellable = Publishers.CombineLatest4(
             serverPoolController.$state,
-            serverPoolController.$roleStatuses
-        ).sink { [weak self] _, roleStatuses in
+            serverPoolController.$roleStatuses,
+            serverPoolController.$defaultEndpoint,
+            serverPoolController.$roleEndpoints
+        ).sink { [weak self] _, roleStatuses, _, _ in
             self?.roleServerStatuses = roleStatuses
+            self?.updateProviderEndpointState()
         }
     }
 

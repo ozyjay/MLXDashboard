@@ -2,6 +2,7 @@ import XCTest
 import Combine
 import MLXCore
 import MLXPythonBridge
+import MLXProviderServer
 import MLXServerControl
 @testable import MLXDashboardApp
 
@@ -270,6 +271,100 @@ final class DashboardViewModelTests: XCTestCase {
 
         XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
         XCTAssertEqual(try Self.modelIDs(in: data), ["mlx-ask", "mlx-plan", "mlx-fast", "mlx-community/Tiny"])
+    }
+
+    func testDirectRolePoolStartPublishesEndpointsToRunningProvider() async throws {
+        let paths = try temporaryAppPaths()
+        let ports = try availableTestPorts()
+        let defaultModel = "mlx-community/Gemma"
+        let planModel = "mlx-community/Devstral"
+
+        let defaultUpstream = try makeUpstreamServer(modelID: defaultModel, port: ports.mlxPort)
+        let planUpstream = try makeUpstreamServer(modelID: planModel, port: ports.planPort)
+        defer {
+            try? defaultUpstream.stop()
+            try? planUpstream.stop()
+        }
+
+        let serverPoolController = RoleServerPoolController(
+            processLauncher: FakeProcessLauncher(processes: [FakeManagedProcess(), FakeManagedProcess()]),
+            portChecker: FakePortChecker(isAvailable: true)
+        )
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:])),
+            serverPoolController: serverPoolController
+        )
+        viewModel.settings.mlxPort = ports.mlxPort
+        viewModel.settings.providerPort = ports.providerPort
+        viewModel.settings.activeModel = defaultModel
+        viewModel.settings.providerRoleAssignments = ProviderRoleAssignments(plan: planModel)
+        viewModel.saveSettings()
+
+        do {
+            try viewModel.startProvider()
+        } catch {
+            throw XCTSkip("Loopback listener unavailable in this sandbox: \(error)")
+        }
+        defer { viewModel.stopProvider() }
+
+        let unavailableStatus = try await providerStatusCode(port: ports.providerPort, model: "mlx-plan")
+        XCTAssertEqual(unavailableStatus, 503)
+
+        try serverPoolController.start(settings: viewModel.settings, pythonExecutable: URL(filePath: "/venv/bin/python"))
+        await Task.yield()
+
+        let routedModel = try await providerResponseModel(port: ports.providerPort, model: "mlx-plan")
+        XCTAssertEqual(routedModel, planModel)
+    }
+
+    func testDirectRolePoolStopClearsEndpointsFromRunningProvider() async throws {
+        let paths = try temporaryAppPaths()
+        let ports = try availableTestPorts()
+        let defaultModel = "mlx-community/Gemma"
+        let planModel = "mlx-community/Devstral"
+
+        let defaultUpstream = try makeUpstreamServer(modelID: defaultModel, port: ports.mlxPort)
+        let planUpstream = try makeUpstreamServer(modelID: planModel, port: ports.planPort)
+        defer {
+            try? defaultUpstream.stop()
+            try? planUpstream.stop()
+        }
+
+        let serverPoolController = RoleServerPoolController(
+            processLauncher: FakeProcessLauncher(processes: [FakeManagedProcess(), FakeManagedProcess()]),
+            portChecker: FakePortChecker(isAvailable: true)
+        )
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:])),
+            serverPoolController: serverPoolController
+        )
+        viewModel.settings.mlxPort = ports.mlxPort
+        viewModel.settings.providerPort = ports.providerPort
+        viewModel.settings.activeModel = defaultModel
+        viewModel.settings.providerRoleAssignments = ProviderRoleAssignments(plan: planModel)
+        viewModel.saveSettings()
+
+        do {
+            try viewModel.startProvider()
+        } catch {
+            throw XCTSkip("Loopback listener unavailable in this sandbox: \(error)")
+        }
+        defer { viewModel.stopProvider() }
+
+        try serverPoolController.start(settings: viewModel.settings, pythonExecutable: URL(filePath: "/venv/bin/python"))
+        await Task.yield()
+        let routedModel = try await providerResponseModel(port: ports.providerPort, model: "mlx-plan")
+        XCTAssertEqual(routedModel, planModel)
+
+        serverPoolController.stopAll()
+        await Task.yield()
+
+        let unavailableStatus = try await providerStatusCode(port: ports.providerPort, model: "mlx-plan")
+        XCTAssertEqual(unavailableStatus, 503)
     }
 
     func testDefaultsModelQueryToDevstralSmall() throws {
@@ -1466,6 +1561,57 @@ final class DashboardViewModelTests: XCTestCase {
         return url
     }
 
+    private func availableTestPorts() throws -> (mlxPort: Int, planPort: Int, providerPort: Int) {
+        let checker = TCPServerPortChecker()
+        for basePort in stride(from: 23000, through: 43000, by: 17) {
+            let planPort = basePort + 1
+            let providerPort = basePort + 2
+            guard checker.isPortAvailable(host: DashboardSettings.localMLXHost, port: basePort),
+                  checker.isPortAvailable(host: DashboardSettings.localMLXHost, port: planPort),
+                  checker.isPortAvailable(host: DashboardSettings.localMLXHost, port: providerPort)
+            else { continue }
+            return (basePort, planPort, providerPort)
+        }
+        throw XCTSkip("No free loopback ports available for provider endpoint sync test.")
+    }
+
+    private func makeUpstreamServer(modelID: String, port: Int) throws -> NIOProviderServer {
+        let server = NIOProviderServer(
+            host: DashboardSettings.localMLXHost,
+            port: port,
+            router: ProviderRouter(
+                upstream: FixedModelUpstream(modelID: modelID),
+                activeModelProvider: { modelID }
+            )
+        )
+        do {
+            try server.start()
+            return server
+        } catch {
+            throw XCTSkip("Loopback upstream listener unavailable in this sandbox: \(error)")
+        }
+    }
+
+    private func providerStatusCode(port: Int, model: String) async throws -> Int {
+        let response = try await providerChatResponse(port: port, model: model)
+        return response.statusCode
+    }
+
+    private func providerResponseModel(port: Int, model: String) async throws -> String? {
+        let response = try await providerChatResponse(port: port, model: model)
+        let json = try JSONSerialization.jsonObject(with: response.data) as? [String: Any]
+        return json?["model"] as? String
+    }
+
+    private func providerChatResponse(port: Int, model: String) async throws -> (data: Data, statusCode: Int) {
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/api/chat")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = Data(#"{"model":"\#(model)","messages":[{"role":"user","content":"plan"}],"stream":false}"#.utf8)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        return (data, (response as? HTTPURLResponse)?.statusCode ?? -1)
+    }
+
     private static func modelListJSON(count: Int) -> String {
         let models = (1...count).map { index in
             #"{"id":"mlx-community/Model-\#(index)","downloads":\#(1000 - index),"likes":\#(index)}"#
@@ -1683,5 +1829,45 @@ private struct FakePortChecker: ServerPortChecking {
 
     func isPortAvailable(host: String, port: Int) -> Bool {
         isAvailable && !unavailablePorts.contains(port)
+    }
+}
+
+private struct FixedModelUpstream: ProviderUpstreamClient {
+    let modelID: String
+
+    func proxy(_ request: ProviderRequest) async throws -> ProviderResponse {
+        switch request.path {
+        case "/v1/chat/completions":
+            return ProviderResponse(
+                status: 200,
+                headers: ["content-type": "application/json"],
+                body: Data(
+                    #"{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"\#(modelID)","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"Hello from \#(modelID)."}}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}"#.utf8
+                )
+            )
+        case "/v1/models":
+            return ProviderResponse(
+                status: 200,
+                headers: ["content-type": "application/json"],
+                body: Data(#"{"object":"list","data":[]}"#.utf8)
+            )
+        default:
+            return ProviderResponse(
+                status: 404,
+                headers: ["content-type": "application/json"],
+                body: Data(#"{"error":"not found"}"#.utf8)
+            )
+        }
+    }
+
+    func proxyStream(_ request: ProviderRequest) async throws -> ProviderStreamedResponse {
+        let response = try await proxy(request)
+        let chunks = AsyncThrowingStream<Data, Error> { continuation in
+            if !response.body.isEmpty {
+                continuation.yield(response.body)
+            }
+            continuation.finish()
+        }
+        return ProviderStreamedResponse(status: response.status, headers: response.headers, chunks: chunks)
     }
 }
