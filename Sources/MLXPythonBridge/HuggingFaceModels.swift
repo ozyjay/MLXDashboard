@@ -78,16 +78,18 @@ public struct HuggingFaceModelSearcher: Sendable {
         sort: String = "downloads",
         limit: Int = 50
     ) async throws -> [HuggingFaceModelSummary] {
-        let escapedQuery = query.replacingOccurrences(of: "'", with: "\\'")
-        let escapedAuthor = author.replacingOccurrences(of: "'", with: "\\'")
-        let escapedSort = sort.replacingOccurrences(of: "'", with: "\\'")
         let script = """
         import json
+        import sys
         from huggingface_hub import list_models
-        models = list_models(search='\(escapedQuery)', author='\(escapedAuthor)', filter='mlx', sort='\(escapedSort)', limit=\(limit))
+        query, author, sort, limit = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+        models = list_models(search=query, author=author, filter='mlx', sort=sort, limit=limit)
         print(json.dumps([{'id': m.modelId, 'downloads': m.downloads, 'likes': m.likes} for m in models]))
         """
-        let result = try await runner.run(Command(executableURL: pythonExecutable, arguments: ["-c", script]))
+        let result = try await runner.run(Command(
+            executableURL: pythonExecutable,
+            arguments: ["-c", script, query, author, sort, String(limit)]
+        ))
         guard result.exitCode == 0 else {
             throw HuggingFaceError.searchFailed(result.standardError)
         }
@@ -312,21 +314,20 @@ public struct HuggingFaceModelInstaller: Sendable {
     ) async throws -> HuggingFaceInstallResult {
         let activityBuffer = HuggingFaceDownloadActivityBuffer()
         let isXetDisabled = downloadEnvironment["HF_HUB_DISABLE_XET"] == "1"
-        let startMessage = isXetDisabled
-            ? "Started Hugging Face snapshot download for \(modelID.replacingOccurrences(of: "'", with: "\\'")) with Xet disabled"
-            : "Started Hugging Face snapshot download for \(modelID.replacingOccurrences(of: "'", with: "\\'"))"
         let script = """
         import json
         import sys
         from huggingface_hub import snapshot_download
-        print('MLXDashboard: \(startMessage)', file=sys.stderr, flush=True)
-        path = snapshot_download(repo_id='\(modelID.replacingOccurrences(of: "'", with: "\\'"))')
+        model_id = sys.argv[1]
+        suffix = ' with Xet disabled' if '\(isXetDisabled ? "1" : "0")' == '1' else ''
+        print(f'MLXDashboard: Started Hugging Face snapshot download for {model_id}{suffix}', file=sys.stderr, flush=True)
+        path = snapshot_download(repo_id=model_id)
         print(json.dumps({'local_path': path}))
         """
         let environment = downloadEnvironment
         let result = try await runner.run(Command(
             executableURL: pythonExecutable,
-            arguments: ["-c", script],
+            arguments: ["-c", script, modelID],
             environment: environment,
             environmentRemovals: downloadEnvironmentRemovals
         )) { output in

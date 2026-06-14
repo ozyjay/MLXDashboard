@@ -255,7 +255,7 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.searchResults.count, 50)
         XCTAssertTrue(viewModel.canLoadMoreSearchResults)
         XCTAssertFalse(viewModel.isLoadingMoreSearchResults)
-        XCTAssertTrue(runner.commands.contains { ($0.arguments.last ?? "").contains("limit=50") })
+        XCTAssertTrue(runner.commands.contains { $0.pythonScript?.contains("list_models") == true && $0.arguments.last == "50" })
         XCTAssertEqual(viewModel.modelSearchMessage, "Showing 50 mlx-community results sorted by downloads.")
     }
 
@@ -283,7 +283,7 @@ final class DashboardViewModelTests: XCTestCase {
 
         XCTAssertEqual(viewModel.searchResults.count, 100)
         XCTAssertTrue(viewModel.canLoadMoreSearchResults)
-        XCTAssertTrue(runner.commands.contains { ($0.arguments.last ?? "").contains("limit=100") })
+        XCTAssertTrue(runner.commands.contains { $0.pythonScript?.contains("list_models") == true && $0.arguments.last == "100" })
         XCTAssertEqual(viewModel.modelSearchMessage, "Showing 100 mlx-community results sorted by downloads.")
     }
 
@@ -338,10 +338,9 @@ final class DashboardViewModelTests: XCTestCase {
         viewModel.modelQuery = "Qwen"
         await viewModel.searchModels()
 
-        let searchScripts = runner.commands
-            .compactMap { $0.arguments.last }
-            .filter { $0.contains("list_models") }
-        XCTAssertTrue(searchScripts.suffix(1).allSatisfy { $0.contains("limit=50") })
+        let searchCommands = runner.commands
+            .filter { $0.pythonScript?.contains("list_models") == true }
+        XCTAssertTrue(searchCommands.suffix(1).allSatisfy { $0.arguments.last == "50" })
         XCTAssertEqual(viewModel.searchResults.count, 50)
     }
 
@@ -375,7 +374,7 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.searchResults, [])
         XCTAssertEqual(viewModel.modelSearchMessage, "Install Python packages to search default MLX models: mlx-lm, huggingface_hub.")
         XCTAssertTrue(viewModel.shouldOfferPythonPackageInstall)
-        XCTAssertFalse(runner.commands.contains { ($0.arguments.last ?? "").contains("list_models") })
+        XCTAssertFalse(runner.commands.contains { $0.pythonScript?.contains("list_models") == true })
     }
 
     func testSearchDefaultModelsIfReadyShowsFriendlyCancellationMessage() async throws {
@@ -571,7 +570,7 @@ final class DashboardViewModelTests: XCTestCase {
 
         await viewModel.installSelectedModel()
 
-        let installCommands = runner.commands.filter { ($0.arguments.last ?? "").contains("snapshot_download") }
+        let installCommands = runner.commands.filter { $0.pythonScript?.contains("snapshot_download") == true }
         XCTAssertEqual(installCommands.last?.environment["HF_HUB_DISABLE_XET"], "1")
         XCTAssertNil(installCommands.last?.environment["HF_XET_NUM_CONCURRENT_RANGE_GETS"])
     }
@@ -609,7 +608,7 @@ final class DashboardViewModelTests: XCTestCase {
 
         await viewModel.installSelectedModel()
 
-        let installCommands = runner.commands.filter { ($0.arguments.last ?? "").contains("snapshot_download") }
+        let installCommands = runner.commands.filter { $0.pythonScript?.contains("snapshot_download") == true }
         XCTAssertNil(installCommands.last?.environment["HF_HUB_DISABLE_XET"])
         XCTAssertEqual(installCommands.last?.environment["HF_XET_NUM_CONCURRENT_RANGE_GETS"], "4")
         XCTAssertEqual(installCommands.last?.environment["HF_HUB_DOWNLOAD_TIMEOUT"], "60")
@@ -656,7 +655,7 @@ final class DashboardViewModelTests: XCTestCase {
 
         await viewModel.installSelectedModel()
 
-        let installCommands = runner.commands.filter { ($0.arguments.last ?? "").contains("snapshot_download") }
+        let installCommands = runner.commands.filter { $0.pythonScript?.contains("snapshot_download") == true }
         XCTAssertNil(installCommands.last?.environment["HF_HUB_DISABLE_XET"])
         XCTAssertEqual(installCommands.last?.environment["HF_XET_NUM_CONCURRENT_RANGE_GETS"], "4")
         XCTAssertEqual(installCommands.last?.environment["HF_HUB_DOWNLOAD_TIMEOUT"], "60")
@@ -991,7 +990,7 @@ final class DashboardViewModelTests: XCTestCase {
 
         await viewModel.continueLastModelInstall()
 
-        let installCommands = runner.commands.filter { ($0.arguments.last ?? "").contains("snapshot_download") }
+        let installCommands = runner.commands.filter { $0.pythonScript?.contains("snapshot_download") == true }
         XCTAssertEqual(installCommands.count, 1)
         XCTAssertEqual(installCommands.last?.environment["HF_HUB_DISABLE_XET"], "1")
         XCTAssertNil(installCommands.last?.environment["HF_XET_NUM_CONCURRENT_RANGE_GETS"])
@@ -1073,7 +1072,7 @@ final class DashboardViewModelTests: XCTestCase {
 
         await viewModel.retryLastModelInstallWithoutXet()
 
-        let installCommands = runner.commands.filter { ($0.arguments.last ?? "").contains("snapshot_download") }
+        let installCommands = runner.commands.filter { $0.pythonScript?.contains("snapshot_download") == true }
         XCTAssertEqual(installCommands.last?.environment["HF_HUB_DISABLE_XET"], "1")
         XCTAssertNil(installCommands.last?.environment["HF_XET_NUM_CONCURRENT_RANGE_GETS"])
         XCTAssertEqual(viewModel.modelInstallProgress?.phase, .installed)
@@ -1410,16 +1409,16 @@ private final class FakeCommandRunner: CommandRunning, @unchecked Sendable {
 
     func run(_ command: Command) async throws -> CommandResult {
         commands.append(command)
-        let script = command.arguments.last ?? ""
+        let script = command.pythonScript ?? command.arguments.last ?? ""
         let key: String
         if script.contains("snapshot_download") {
             key = "install"
         } else if script.contains("whoami") {
             key = "whoami"
         } else if script.contains("list_models") {
-            if script.contains("limit=50"), results["search-limit-50"] != nil {
+            if command.arguments.last == "50", results["search-limit-50"] != nil {
                 key = "search-limit-50"
-            } else if script.contains("limit=100"), results["search-limit-100"] != nil {
+            } else if command.arguments.last == "100", results["search-limit-100"] != nil {
                 key = "search-limit-100"
             } else {
                 key = "search"
@@ -1434,6 +1433,15 @@ private final class FakeCommandRunner: CommandRunning, @unchecked Sendable {
     }
 }
 
+private extension Command {
+    var pythonScript: String? {
+        guard let commandIndex = arguments.firstIndex(of: "-c"),
+              arguments.indices.contains(commandIndex + 1)
+        else { return nil }
+        return arguments[commandIndex + 1]
+    }
+}
+
 private final class LateOutputCommandRunner: CommandRunning, @unchecked Sendable {
     private let lateOutput: String
     private let lock = NSLock()
@@ -1445,7 +1453,7 @@ private final class LateOutputCommandRunner: CommandRunning, @unchecked Sendable
     }
 
     func run(_ command: Command) async throws -> CommandResult {
-        let script = command.arguments.last ?? ""
+        let script = command.pythonScript ?? ""
         if script.contains("whoami") {
             return CommandResult(exitCode: 0, standardOutput: #"{"name":"octocat"}"#, standardError: "")
         }
@@ -1456,7 +1464,7 @@ private final class LateOutputCommandRunner: CommandRunning, @unchecked Sendable
     }
 
     func run(_ command: Command, outputHandler: CommandOutputHandler?) async throws -> CommandResult {
-        let script = command.arguments.last ?? ""
+        let script = command.pythonScript ?? ""
         guard script.contains("snapshot_download") else {
             return try await run(command)
         }
@@ -1511,7 +1519,7 @@ private final class PausingCommandRunner: CommandRunning, @unchecked Sendable {
     }
 
     func run(_ command: Command) async throws -> CommandResult {
-        let script = command.arguments.last ?? ""
+        let script = command.pythonScript ?? ""
         if script.contains("snapshot_download") {
             lock.withLock {
                 installStarted = true

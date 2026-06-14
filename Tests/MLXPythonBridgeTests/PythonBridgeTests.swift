@@ -119,12 +119,39 @@ final class PythonBridgeTests: XCTestCase {
 
         _ = try await searcher.search(query: "Devstral", pythonExecutable: URL(filePath: "/tmp/python"), limit: 50)
 
-        let script = try XCTUnwrap(runner.commands.last?.arguments.last)
-        XCTAssertTrue(script.contains("author='mlx-community'"))
+        let command = try XCTUnwrap(runner.commands.last)
+        let script = try XCTUnwrap(command.pythonScript)
+        XCTAssertEqual(command.arguments.suffix(4), ["Devstral", "mlx-community", "downloads", "50"])
+        XCTAssertTrue(script.contains("author=author"))
         XCTAssertTrue(script.contains("filter='mlx'"))
-        XCTAssertTrue(script.contains("sort='downloads'"))
+        XCTAssertTrue(script.contains("sort=sort"))
         XCTAssertFalse(script.contains("direction="))
-        XCTAssertTrue(script.contains("limit=50"))
+        XCTAssertTrue(script.contains("limit=limit"))
+    }
+
+    func testHuggingFaceSearcherPassesDynamicValuesAsArguments() async throws {
+        let runner = RecordingCommandRunner(result: CommandResult(
+            exitCode: 0,
+            standardOutput: #"[]"#,
+            standardError: ""
+        ))
+        let searcher = HuggingFaceModelSearcher(runner: runner)
+        let query = #"""
+        tiny\model
+        'quoted'
+        """#
+
+        _ = try await searcher.search(
+            query: query,
+            pythonExecutable: URL(filePath: "/tmp/python"),
+            author: "mlx-community",
+            sort: "downloads",
+            limit: 7
+        )
+
+        let command = try XCTUnwrap(runner.commands.last)
+        XCTAssertEqual(command.arguments.suffix(4), [query, "mlx-community", "downloads", "7"])
+        XCTAssertFalse(command.arguments[1].contains(query))
     }
 
     func testHuggingFaceAuthCheckerReportsLoggedInAndLoggedOutStates() async throws {
@@ -335,6 +362,28 @@ final class PythonBridgeTests: XCTestCase {
         XCTAssertEqual(runner.commands.last?.environmentRemovals, ["HF_HUB_DISABLE_XET"])
     }
 
+    func testHuggingFaceInstallerPassesModelIDAsArgument() async throws {
+        let runner = RecordingCommandRunner(result: CommandResult(
+            exitCode: 0,
+            standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/abc"}"#,
+            standardError: ""
+        ))
+        let installer = HuggingFaceModelInstaller(runner: runner)
+        let modelID = #"""
+        mlx-community/Tiny\Odd
+        'quoted'
+        """#
+
+        _ = try await installer.install(
+            modelID: modelID,
+            pythonExecutable: URL(filePath: "/tmp/python")
+        )
+
+        let command = try XCTUnwrap(runner.commands.last)
+        XCTAssertEqual(command.arguments.last, modelID)
+        XCTAssertFalse(command.arguments[1].contains(modelID))
+    }
+
     func testCommandResolvedEnvironmentRemovesInheritedValues() {
         let command = Command(
             executableURL: URL(filePath: "/tmp/python"),
@@ -465,7 +514,7 @@ private struct FakeCommandRunner: CommandRunning {
     let results: [String: CommandResult]
 
     func run(_ command: Command) async throws -> CommandResult {
-        let script = command.arguments.last ?? ""
+        let script = command.pythonScript ?? ""
         let key: String
         if script.contains("list_models") {
             key = "search"
@@ -477,6 +526,15 @@ private struct FakeCommandRunner: CommandRunning {
             key = script
         }
         return results[key] ?? CommandResult(exitCode: 127, standardOutput: "", standardError: "unexpected command \(key)")
+    }
+}
+
+private extension Command {
+    var pythonScript: String? {
+        guard let commandIndex = arguments.firstIndex(of: "-c"),
+              arguments.indices.contains(commandIndex + 1)
+        else { return nil }
+        return arguments[commandIndex + 1]
     }
 }
 
