@@ -3,6 +3,66 @@ import MLXCore
 @testable import MLXServerControl
 
 final class ServerControlTests: XCTestCase {
+    func testRoleServerPlanSharesDuplicateAssignedModels() {
+        let settings = DashboardSettings(
+            activeModel: "mlx-community/gemma4",
+            mlxPort: 8080,
+            providerRoleAssignments: ProviderRoleAssignments(
+                ask: "mlx-community/gemma4",
+                plan: "mlx-community/devstral",
+                coding: "mlx-community/gemma4"
+            )
+        )
+
+        let plan = RoleServerPoolController.makePlan(settings: settings)
+
+        XCTAssertEqual(plan.servers.map(\.modelID), ["mlx-community/gemma4", "mlx-community/devstral"])
+        XCTAssertEqual(plan.servers.map(\.port), [8080, 8081])
+        XCTAssertEqual(plan.defaultEndpoint.modelID, "mlx-community/gemma4")
+        XCTAssertEqual(plan.defaultEndpoint.port, 8080)
+        XCTAssertEqual(plan.endpoint(for: .ask)?.port, 8080)
+        XCTAssertEqual(plan.endpoint(for: .plan)?.port, 8081)
+        XCTAssertEqual(plan.endpoint(for: .coding)?.port, 8080)
+    }
+
+    func testRoleServerPlanAssignsDistinctRolePortsAfterDefaultPort() {
+        let settings = DashboardSettings(
+            activeModel: "mlx-community/base",
+            mlxPort: 9000,
+            providerRoleAssignments: ProviderRoleAssignments(
+                ask: "mlx-community/ask",
+                plan: "mlx-community/plan",
+                coding: "mlx-community/coding"
+            )
+        )
+
+        let plan = RoleServerPoolController.makePlan(settings: settings)
+
+        XCTAssertEqual(plan.servers.map(\.modelID), [
+            "mlx-community/base",
+            "mlx-community/ask",
+            "mlx-community/plan",
+            "mlx-community/coding"
+        ])
+        XCTAssertEqual(plan.servers.map(\.port), [9000, 9001, 9002, 9003])
+        XCTAssertEqual(plan.endpoint(for: .ask)?.port, 9001)
+        XCTAssertEqual(plan.endpoint(for: .plan)?.port, 9002)
+        XCTAssertEqual(plan.endpoint(for: .coding)?.port, 9003)
+    }
+
+    func testRoleServerPlanMarksUnassignedRoles() {
+        let settings = DashboardSettings(
+            activeModel: "mlx-community/base",
+            providerRoleAssignments: ProviderRoleAssignments(plan: "mlx-community/plan")
+        )
+
+        let plan = RoleServerPoolController.makePlan(settings: settings)
+
+        XCTAssertEqual(plan.status(for: .ask).kind, .unassigned)
+        XCTAssertEqual(plan.status(for: .plan).kind, .planned)
+        XCTAssertEqual(plan.status(for: .coding).kind, .unassigned)
+    }
+
     func testProviderModelRolesHaveDeterministicRoutingOrder() {
         XCTAssertEqual(ProviderModelRole.orderedRoutingRoles, [.ask, .plan, .coding])
         XCTAssertEqual(ProviderModelRole.ask.displayName, "Ask")
