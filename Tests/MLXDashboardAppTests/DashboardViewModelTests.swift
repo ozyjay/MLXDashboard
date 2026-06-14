@@ -1812,6 +1812,7 @@ final class DashboardViewModelTests: XCTestCase {
 
         viewModel.setSelectedInstalledModelActive()
 
+        XCTAssertEqual(viewModel.settings.activeModel, "mlx-community/Tiny")
         XCTAssertEqual(viewModel.installProgressByModelID["mlx-community/Tiny"], progress)
         XCTAssertEqual(viewModel.selectedInstalledModelProgress, progress)
     }
@@ -1879,6 +1880,7 @@ final class DashboardViewModelTests: XCTestCase {
 
         viewModel.assignSelectedInstalledModel(to: .ask)
 
+        XCTAssertEqual(viewModel.settings.providerRoleAssignments.ask, "mlx-community/Tiny")
         XCTAssertEqual(viewModel.installProgressByModelID["mlx-community/Tiny"], progress)
         XCTAssertEqual(viewModel.selectedInstalledModelProgress, progress)
     }
@@ -1960,6 +1962,8 @@ final class DashboardViewModelTests: XCTestCase {
 
         viewModel.deleteSelectedInstalledModelFromCache()
 
+        XCTAssertFalse(FileManager.default.fileExists(atPath: cacheRoot.appending(path: "models--mlx-community--Tiny").path))
+        XCTAssertEqual(registry.record(id: "mlx-community/Tiny")?.status, .removed)
         XCTAssertNil(viewModel.installProgressByModelID["mlx-community/Tiny"])
         XCTAssertNotNil(viewModel.installProgressByModelID["mlx-community/Other"])
     }
