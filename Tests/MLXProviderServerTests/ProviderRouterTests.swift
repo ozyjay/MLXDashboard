@@ -682,6 +682,34 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertNil(decision["upstream_port"])
     }
 
+    func testLegacyRouterDoesNotReportSyntheticEndpointMetadata() async throws {
+        let root = try temporaryDirectory()
+        let debugFile = root.appending(path: "provider-debug.jsonl")
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Loaded" },
+            roleAssignmentsProvider: { ProviderRoleAssignments(plan: "mlx-community/Plan") },
+            debugRecorder: ProviderDebugRecorder(fileURL: debugFile, isEnabled: { true })
+        )
+
+        _ = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/v1/chat/completions",
+                headers: [:],
+                body: Data(#"{"model":"mlx-plan","messages":[{"role":"user","content":"plan"}],"stream":false}"#.utf8)
+            )
+        )
+
+        XCTAssertEqual(upstream.requests.count, 1)
+        let record = try lastDebugRecord(in: debugFile)
+        let decision = try XCTUnwrap(record["routing_decision"] as? [String: Any])
+        XCTAssertEqual(decision["upstream_model"] as? String, "mlx-community/Loaded")
+        XCTAssertNil(decision["upstream_base_url"])
+        XCTAssertNil(decision["upstream_port"])
+    }
+
     func testRoutingDebugPayloadIncludesUpstreamEndpointFields() async throws {
         let root = try temporaryDirectory()
         let debugFile = root.appending(path: "provider-debug.jsonl")

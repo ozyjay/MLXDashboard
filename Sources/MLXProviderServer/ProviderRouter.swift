@@ -3,7 +3,6 @@ import MLXCore
 
 public struct ProviderRouter: Sendable {
     private static let modeAliases = ["mlx-ask", "mlx-plan", "mlx-fast"]
-    private static let compatibilityBaseURL = URL(string: "http://127.0.0.1:8080")!
 
     private let upstream: any ProviderUpstreamProxyClient
     private let legacyUpstream: (any ProviderUpstreamClient)?
@@ -339,17 +338,8 @@ public struct ProviderRouter: Sendable {
         activeModelProvider().flatMap { $0.isEmpty ? nil : $0 }
     }
 
-    private func compatibilityEndpoint(for modelID: String) -> ProviderUpstreamEndpoint {
-        ProviderUpstreamEndpoint(modelID: modelID, baseURL: Self.compatibilityBaseURL, port: nil)
-    }
-
     private func defaultUpstreamEndpoint() -> ProviderUpstreamEndpoint? {
-        if let endpoint = defaultEndpointProvider() {
-            return endpoint
-        }
-        guard legacyUpstream != nil else { return nil }
-        guard let activeModel = activeModel() else { return nil }
-        return compatibilityEndpoint(for: activeModel)
+        defaultEndpointProvider()
     }
 
     private func proxy(_ request: ProviderRequest, to endpoint: ProviderUpstreamEndpoint?) async throws -> ProviderResponse {
@@ -797,18 +787,20 @@ public struct ProviderRouter: Sendable {
         else { return (request, debugContext, nil) }
 
         var payload = object
+        let activeModel = activeModel()
         let routingDecision = routingDecision(
             selectedModel: selectedModel,
             payload: object,
-            defaultEndpoint: defaultUpstreamEndpoint()
+            activeModel: activeModel,
+            defaultEndpoint: defaultUpstreamEndpoint(),
+            canProxyWithoutEndpoint: legacyUpstream != nil
         )
         let upstreamEndpoint = routingDecision.upstreamEndpoint
         debugContext.routingDecision = routingDecision
         if let selectedModel,
-           let upstreamEndpoint,
            Self.modeAliases.contains(selectedModel) {
             debugContext.aliasResolution = "\(selectedModel) -> \(routingDecision.upstreamModel)"
-            if upstreamEndpoint.modelID == activeModel() {
+            if routingDecision.upstreamModel == activeModel {
                 eventLogger("Provider resolved model alias \(selectedModel) to active model \(routingDecision.upstreamModel)")
             } else {
                 eventLogger("Provider resolved model alias \(selectedModel) to upstream model \(routingDecision.upstreamModel)")
@@ -824,10 +816,9 @@ public struct ProviderRouter: Sendable {
                 "Provider routing decision for \(selectedAlias): role=\(routingDecision.inferredRole?.rawValue ?? "none"), capability=\(routingDecision.clientCapability.rawValue), upstream=\(routingDecision.upstreamModel)\(portText)\(fallbackText)"
             )
         }
-        guard let upstreamEndpoint else {
-            return (request, debugContext, nil)
+        if let rewrittenModel = routingDecision.rewrittenModel {
+            payload["model"] = rewrittenModel
         }
-        payload["model"] = upstreamEndpoint.modelID
         if routingDecision.shouldInjectMetadata,
            debugRecorder?.isEnabledNow == true {
             prependSystemMessage(
@@ -850,11 +841,15 @@ public struct ProviderRouter: Sendable {
         guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
             return (request, debugContext, upstreamEndpoint)
         }
-        if upstreamEndpoint.modelID == activeModel() {
-            eventLogger("Provider rewrote \(request.method) \(request.path) model to active model \(upstreamEndpoint.modelID)")
-        } else {
-            let portText = upstreamEndpoint.port.map { " on port \($0)" } ?? ""
-            eventLogger("Provider rewrote \(request.method) \(request.path) model to upstream model \(upstreamEndpoint.modelID)\(portText)")
+        if let upstreamEndpoint {
+            if upstreamEndpoint.modelID == activeModel {
+                eventLogger("Provider rewrote \(request.method) \(request.path) model to active model \(upstreamEndpoint.modelID)")
+            } else {
+                let portText = upstreamEndpoint.port.map { " on port \($0)" } ?? ""
+                eventLogger("Provider rewrote \(request.method) \(request.path) model to upstream model \(upstreamEndpoint.modelID)\(portText)")
+            }
+        } else if let rewrittenModel = routingDecision.rewrittenModel, rewrittenModel == activeModel {
+            eventLogger("Provider rewrote \(request.method) \(request.path) model to active model \(rewrittenModel)")
         }
 
         return (
@@ -867,7 +862,9 @@ public struct ProviderRouter: Sendable {
     private func routingDecision(
         selectedModel: String?,
         payload: [String: Any],
-        defaultEndpoint: ProviderUpstreamEndpoint?
+        activeModel: String?,
+        defaultEndpoint: ProviderUpstreamEndpoint?,
+        canProxyWithoutEndpoint: Bool
     ) -> ProviderRoutingDecision {
         let selectedAlias = selectedModel.flatMap { Self.modeAliases.contains($0) ? $0 : nil }
         let aliasRole = selectedAlias.flatMap(role(forAlias:))
@@ -879,6 +876,8 @@ public struct ProviderRouter: Sendable {
         }
         let desiredRoleModel = inferredRole.flatMap { roleAssignmentsProvider().model(for: $0) }
         let selectedEndpoint: ProviderUpstreamEndpoint?
+        let upstreamModel: String
+        let rewrittenModel: String?
         let fallbackReason: String?
         if let inferredRole, let desiredRoleModel {
             let roleEndpoint = roleEndpointProvider(inferredRole).flatMap { endpoint in
@@ -886,20 +885,64 @@ public struct ProviderRouter: Sendable {
             }
             if let roleEndpoint {
                 selectedEndpoint = roleEndpoint
+                upstreamModel = roleEndpoint.modelID
+                rewrittenModel = roleEndpoint.modelID
                 fallbackReason = nil
             } else if let defaultEndpoint, defaultEndpoint.modelID == desiredRoleModel {
                 selectedEndpoint = defaultEndpoint
+                upstreamModel = defaultEndpoint.modelID
+                rewrittenModel = defaultEndpoint.modelID
                 fallbackReason = nil
+            } else if canProxyWithoutEndpoint, activeModel == desiredRoleModel, let activeModel {
+                selectedEndpoint = nil
+                upstreamModel = activeModel
+                rewrittenModel = activeModel
+                fallbackReason = nil
+            } else if canProxyWithoutEndpoint, let activeModel {
+                selectedEndpoint = nil
+                upstreamModel = activeModel
+                rewrittenModel = activeModel
+                fallbackReason = "role server unavailable; using active model"
             } else {
                 selectedEndpoint = defaultEndpoint
+                upstreamModel = defaultEndpoint?.modelID ?? activeModel ?? desiredRoleModel
+                rewrittenModel = defaultEndpoint?.modelID
                 fallbackReason = defaultEndpoint == nil ? "no upstream endpoint available" : "role server unavailable; using active model"
             }
         } else if inferredRole != nil, desiredRoleModel == nil {
-            selectedEndpoint = defaultEndpoint
-            fallbackReason = defaultEndpoint == nil ? "no upstream endpoint available" : "no model assigned for inferred role"
+            if let defaultEndpoint {
+                selectedEndpoint = defaultEndpoint
+                upstreamModel = defaultEndpoint.modelID
+                rewrittenModel = defaultEndpoint.modelID
+                fallbackReason = "no model assigned for inferred role"
+            } else if canProxyWithoutEndpoint, let activeModel {
+                selectedEndpoint = nil
+                upstreamModel = activeModel
+                rewrittenModel = activeModel
+                fallbackReason = "no model assigned for inferred role"
+            } else {
+                selectedEndpoint = nil
+                upstreamModel = activeModel ?? selectedModel ?? "local"
+                rewrittenModel = nil
+                fallbackReason = "no upstream endpoint available"
+            }
         } else {
-            selectedEndpoint = defaultEndpoint
-            fallbackReason = defaultEndpoint == nil ? "no upstream endpoint available" : nil
+            if let defaultEndpoint {
+                selectedEndpoint = defaultEndpoint
+                upstreamModel = defaultEndpoint.modelID
+                rewrittenModel = defaultEndpoint.modelID
+                fallbackReason = nil
+            } else if canProxyWithoutEndpoint, let activeModel {
+                selectedEndpoint = nil
+                upstreamModel = activeModel
+                rewrittenModel = activeModel
+                fallbackReason = nil
+            } else {
+                selectedEndpoint = nil
+                upstreamModel = activeModel ?? selectedModel ?? "local"
+                rewrittenModel = nil
+                fallbackReason = "no upstream endpoint available"
+            }
         }
         return ProviderRoutingDecision(
             requestedModel: selectedModel,
@@ -907,6 +950,8 @@ public struct ProviderRouter: Sendable {
             inferredRole: inferredRole,
             clientCapability: clientCapability(from: payload["tools"]),
             desiredRoleModel: desiredRoleModel,
+            upstreamModel: upstreamModel,
+            rewrittenModel: rewrittenModel,
             upstreamEndpoint: selectedEndpoint,
             fallbackReason: fallbackReason
         )
@@ -1451,12 +1496,10 @@ private struct ProviderRoutingDecision {
     var inferredRole: ProviderModelRole?
     var clientCapability: ProviderClientCapability
     var desiredRoleModel: String?
+    var upstreamModel: String
+    var rewrittenModel: String?
     var upstreamEndpoint: ProviderUpstreamEndpoint?
     var fallbackReason: String?
-
-    var upstreamModel: String {
-        upstreamEndpoint?.modelID ?? desiredRoleModel ?? requestedModel ?? "local"
-    }
 
     var shouldInjectMetadata: Bool {
         selectedAlias != nil || inferredRole != nil
