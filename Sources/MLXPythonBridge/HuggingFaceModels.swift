@@ -287,12 +287,30 @@ public struct HuggingFaceModelInstaller: Sendable {
     public func install(
         modelID: String,
         pythonExecutable: URL,
-        disableXet: Bool = true,
+        disableXet: Bool,
+        progressHandler: (@Sendable (HuggingFaceDownloadProgress) -> Void)? = nil,
+        activityHandler: (@Sendable (HuggingFaceDownloadActivity) -> Void)? = nil
+    ) async throws -> HuggingFaceInstallResult {
+        let downloadEnvironment = disableXet ? ["HF_HUB_DISABLE_XET": "1"] : [:]
+        return try await install(
+            modelID: modelID,
+            pythonExecutable: pythonExecutable,
+            downloadEnvironment: downloadEnvironment,
+            progressHandler: progressHandler,
+            activityHandler: activityHandler
+        )
+    }
+
+    public func install(
+        modelID: String,
+        pythonExecutable: URL,
+        downloadEnvironment: [String: String] = [:],
         progressHandler: (@Sendable (HuggingFaceDownloadProgress) -> Void)? = nil,
         activityHandler: (@Sendable (HuggingFaceDownloadActivity) -> Void)? = nil
     ) async throws -> HuggingFaceInstallResult {
         let activityBuffer = HuggingFaceDownloadActivityBuffer()
-        let startMessage = disableXet
+        let isXetDisabled = downloadEnvironment["HF_HUB_DISABLE_XET"] == "1"
+        let startMessage = isXetDisabled
             ? "Started Hugging Face snapshot download for \(modelID.replacingOccurrences(of: "'", with: "\\'")) with Xet disabled"
             : "Started Hugging Face snapshot download for \(modelID.replacingOccurrences(of: "'", with: "\\'"))"
         let script = """
@@ -303,7 +321,7 @@ public struct HuggingFaceModelInstaller: Sendable {
         path = snapshot_download(repo_id='\(modelID.replacingOccurrences(of: "'", with: "\\'"))')
         print(json.dumps({'local_path': path}))
         """
-        let environment = disableXet ? ["HF_HUB_DISABLE_XET": "1"] : [:]
+        let environment = downloadEnvironment
         let result = try await runner.run(Command(
             executableURL: pythonExecutable,
             arguments: ["-c", script],

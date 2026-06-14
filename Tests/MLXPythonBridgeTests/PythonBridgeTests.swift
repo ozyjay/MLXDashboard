@@ -294,7 +294,7 @@ final class PythonBridgeTests: XCTestCase {
         ])
     }
 
-    func testHuggingFaceInstallerDisablesXetByDefault() async throws {
+    func testHuggingFaceInstallerAppliesProvidedDownloadEnvironment() async throws {
         let runner = RecordingCommandRunner(result: CommandResult(
             exitCode: 0,
             standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/abc"}"#,
@@ -304,10 +304,16 @@ final class PythonBridgeTests: XCTestCase {
 
         _ = try await installer.install(
             modelID: "mlx-community/Tiny",
-            pythonExecutable: URL(filePath: "/tmp/python")
+            pythonExecutable: URL(filePath: "/tmp/python"),
+            downloadEnvironment: [
+                "HF_XET_NUM_CONCURRENT_RANGE_GETS": "2",
+                "HF_HUB_DOWNLOAD_TIMEOUT": "90"
+            ]
         )
 
-        XCTAssertEqual(runner.commands.last?.environment["HF_HUB_DISABLE_XET"], "1")
+        XCTAssertEqual(runner.commands.last?.environment["HF_XET_NUM_CONCURRENT_RANGE_GETS"], "2")
+        XCTAssertEqual(runner.commands.last?.environment["HF_HUB_DOWNLOAD_TIMEOUT"], "90")
+        XCTAssertNil(runner.commands.last?.environment["HF_HUB_DISABLE_XET"])
     }
 
     func testHuggingFaceInstallerDisablesXetWhenRequested() async throws {
@@ -321,7 +327,7 @@ final class PythonBridgeTests: XCTestCase {
         _ = try await installer.install(
             modelID: "mlx-community/Tiny",
             pythonExecutable: URL(filePath: "/tmp/python"),
-            disableXet: true
+            downloadEnvironment: ["HF_HUB_DISABLE_XET": "1"]
         )
 
         XCTAssertEqual(runner.commands.last?.environment["HF_HUB_DISABLE_XET"], "1")
