@@ -123,12 +123,14 @@ final class DashboardViewModel: ObservableObject {
     @Published var providerStatus = "Stopped"
     @Published var installedModels: [ModelRecord] = []
     @Published var searchResults: [HuggingFaceModelSummary] = []
+    @Published var searchResultFamilies: [ModelFamilySearchResult] = []
     @Published var modelQuery = "Devstral-Small"
     @Published var modelSearchMessage: String?
     @Published var modelInstallMessage: String?
     @Published var huggingFaceAuthMessage = "Hugging Face: Not checked"
     @Published var shouldOfferPythonPackageInstall = false
     @Published var selectedSearchModelID: String?
+    @Published var selectedSearchFamilyID: String?
     @Published var selectedInstalledModelID: String?
     @Published var isInstallingModel = false
     @Published var isLoadingMoreSearchResults = false
@@ -515,6 +517,7 @@ final class DashboardViewModel: ObservableObject {
             }
             try registry.save()
             installedModels = Self.visibleInstalledModels(from: registry.records)
+            rebuildSearchResultFamilies()
             if syncRuntimeSelectionsWithRunnableModels() {
                 try? settingsStore.save(settings)
             }
@@ -558,6 +561,7 @@ final class DashboardViewModel: ObservableObject {
             guard status.isReady else {
                 let missingPackages = status.packageReport.missingInstallNames.joined(separator: ", ")
                 searchResults = []
+                searchResultFamilies = []
                 rawModelSearchResultCount = 0
                 shouldOfferPythonPackageInstall = true
                 if defaultSearch {
@@ -574,14 +578,16 @@ final class DashboardViewModel: ObservableObject {
             let rawResults = try await modelSearcher.search(query: modelQuery, pythonExecutable: status.pythonExecutable, limit: limit)
             let filteredResults = runnableSearchResults(from: rawResults)
             searchResults = filteredResults
+            rebuildSearchResultFamilies()
             rawModelSearchResultCount = rawResults.count
             modelSearchLimit = limit
             let unsupportedCount = rawResults.count - filteredResults.count
-            modelSearchMessage = searchResultStatusText(count: searchResults.count, unsupportedCount: unsupportedCount)
+            modelSearchMessage = searchResultStatusText(count: searchResultFamilies.count, unsupportedCount: unsupportedCount)
             let logPrefix = defaultSearch ? "Loaded default" : "Found"
-            telemetry.appendLog("\(logPrefix) \(searchResults.count) mlx-community models for \(modelQuery)")
+            telemetry.appendLog("\(logPrefix) \(searchResultFamilies.count) mlx-community model families for \(modelQuery)")
         } catch is CancellationError {
             rawModelSearchResultCount = 0
+            searchResultFamilies = []
             if defaultSearch {
                 modelSearchMessage = "Default model search cancelled."
                 telemetry.appendLog("Default model search cancelled.")
@@ -591,6 +597,7 @@ final class DashboardViewModel: ObservableObject {
             }
         } catch {
             rawModelSearchResultCount = 0
+            searchResultFamilies = []
             if defaultSearch {
                 modelSearchMessage = "Default model search failed: \(error)"
                 telemetry.appendLog("Default model search failed: \(error)")
@@ -611,6 +618,7 @@ final class DashboardViewModel: ObservableObject {
                 if !status.isReady {
                     let missingPackages = status.packageReport.missingInstallNames.joined(separator: ", ")
                     searchResults = []
+                    searchResultFamilies = []
                     rawModelSearchResultCount = 0
                     shouldOfferPythonPackageInstall = true
                     modelSearchMessage = "Install Python packages to search default MLX models: \(missingPackages)."
@@ -647,6 +655,27 @@ final class DashboardViewModel: ObservableObject {
         results.filter { model in
             runtimeCompatibilityChecker.compatibility(modelType: model.modelType).isRunnable
         }
+    }
+
+    private func rebuildSearchResultFamilies() {
+        let selectedVariants = Dictionary(uniqueKeysWithValues: searchResultFamilies.map { ($0.id, $0.selectedVariantID) })
+        searchResultFamilies = ModelSearchGrouping.group(
+            searchResults,
+            installedModels: installedModels,
+            selectedVariants: selectedVariants,
+            installingModelID: modelInstallProgress?.modelID
+        )
+        guard !searchResultFamilies.isEmpty else {
+            selectedSearchFamilyID = nil
+            selectedSearchModelID = nil
+            return
+        }
+
+        let selectedFamily = selectedSearchFamilyID.flatMap { familyID in
+            searchResultFamilies.first { $0.id == familyID }
+        } ?? searchResultFamilies[0]
+        selectedSearchFamilyID = selectedFamily.id
+        selectedSearchModelID = selectedFamily.selectedVariantID
     }
 
     func installModel(
@@ -703,6 +732,7 @@ final class DashboardViewModel: ObservableObject {
             registry.upsert(ModelRecord(id: model.id, status: .installing, message: "Installing from Hugging Face"))
             try registry.save()
             installedModels = Self.visibleInstalledModels(from: registry.records)
+            rebuildSearchResultFamilies()
 
             let downloadDetail = isContinuation
                 ? (isStandardDownload
@@ -742,6 +772,7 @@ final class DashboardViewModel: ObservableObject {
             registry.upsert(record)
             try registry.save()
             installedModels = Self.visibleInstalledModels(from: registry.records)
+            rebuildSearchResultFamilies()
             scanModelCache()
             if record.status == .installed {
                 updateInstallProgress(.installed, modelID: model.id, detail: "Installed \(model.id) at \(result.localPath)")
@@ -759,6 +790,7 @@ final class DashboardViewModel: ObservableObject {
             registry.upsert(ModelRecord(id: model.id, status: .failed, message: message))
             try? registry.save()
             installedModels = Self.visibleInstalledModels(from: registry.records)
+            rebuildSearchResultFamilies()
             telemetry.appendLog("Install failed for \(model.id): \(error)")
         }
     }
@@ -771,6 +803,16 @@ final class DashboardViewModel: ObservableObject {
             return
         }
         await installModel(model)
+    }
+
+    func selectSearchVariant(familyID: String, variantID: String) {
+        guard let familyIndex = searchResultFamilies.firstIndex(where: { $0.id == familyID }),
+              searchResultFamilies[familyIndex].variants.contains(where: { $0.id == variantID })
+        else { return }
+
+        searchResultFamilies[familyIndex].selectedVariantID = variantID
+        selectedSearchFamilyID = familyID
+        selectedSearchModelID = variantID
     }
 
     func startSelectedModelInstall() {
@@ -907,6 +949,7 @@ final class DashboardViewModel: ObservableObject {
             registry.markRemoved(id: record.id)
             try registry.save()
             installedModels = Self.visibleInstalledModels(from: registry.records)
+            rebuildSearchResultFamilies()
             self.selectedInstalledModelID = nil
             if settings.activeModel == record.id {
                 settings.activeModel = nil
@@ -1125,6 +1168,7 @@ final class DashboardViewModel: ObservableObject {
         registry.upsert(ModelRecord(id: modelID, status: .paused, message: "Paused; continue downloading to resume"))
         try? registry.save()
         installedModels = Self.visibleInstalledModels(from: registry.records)
+        rebuildSearchResultFamilies()
         telemetry.appendLog("Paused download for \(modelID)")
     }
 

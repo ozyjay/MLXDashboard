@@ -718,6 +718,51 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.modelSearchMessage, "Showing 2 mlx-community results sorted by downloads; filtered 1 unsupported by current mlx-lm.")
     }
 
+    func testSearchModelsGroupsVariantsAndInstallsSelectedVariant() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = FakeCommandRunner(results: [
+            "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "search-limit-50": CommandResult(
+                exitCode: 0,
+                standardOutput: """
+                [
+                  {"id":"mlx-community/Foo-6bit","downloads":900,"likes":6,"model_type":"mistral"},
+                  {"id":"mlx-community/Foo-4bit","downloads":100,"likes":4,"model_type":"mistral"},
+                  {"id":"mlx-community/Foo-8bit","downloads":800,"likes":8,"model_type":"mistral"}
+                ]
+                """,
+                standardError: ""
+            ),
+            "install": CommandResult(exitCode: 0, standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Foo-6bit/snapshots/abc"}"#, standardError: ""),
+            "whoami": CommandResult(exitCode: 0, standardOutput: #"{"name":"tester"}"#, standardError: "")
+        ])
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelSearcher: HuggingFaceModelSearcher(runner: runner),
+            modelInstaller: HuggingFaceModelInstaller(runner: runner),
+            authChecker: HuggingFaceAuthChecker(runner: runner)
+        )
+
+        await viewModel.searchModels()
+        viewModel.selectSearchVariant(familyID: "mlx-community/Foo", variantID: "mlx-community/Foo-6bit")
+        await viewModel.installSelectedModel()
+
+        XCTAssertEqual(viewModel.searchResultFamilies.count, 1)
+        XCTAssertEqual(viewModel.searchResultFamilies[0].variants.map(\.label), ["4bit", "6bit", "8bit"])
+        XCTAssertEqual(viewModel.searchResultFamilies[0].selectedVariantID, "mlx-community/Foo-6bit")
+        XCTAssertTrue(runner.commands.contains { command in
+            command.pythonScript?.contains("snapshot_download") == true
+                && command.arguments.contains("mlx-community/Foo-6bit")
+        }, runner.commands.map { $0.arguments.joined(separator: " ") }.joined(separator: "\n"))
+    }
+
     func testSearchModelsCanLoadMoreWhenRawPageIsFullAfterFiltering() async throws {
         let paths = try temporaryAppPaths()
         let python = paths.venvDirectory.appending(path: "bin/python")

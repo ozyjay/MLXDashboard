@@ -21,6 +21,7 @@ public enum MLXModelRuntimeCompatibility: Equatable, Sendable {
 
 public struct MLXModelRuntimeCompatibilityChecker: Sendable {
     private static let unsupportedModelTypes: Set<String> = [
+        "diffusion_gemma",
         "gemma4_unified"
     ]
 

@@ -90,26 +90,28 @@ public struct HuggingFaceModelSearcher: Sendable {
         let script = """
         import json
         import sys
+        from tempfile import TemporaryDirectory
         from concurrent.futures import ThreadPoolExecutor
         from huggingface_hub import hf_hub_download, list_models
         query, author, sort, limit = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
         models = list(list_models(search=query, author=author, filter='mlx', sort=sort, limit=limit))
-        def summarize(model):
-            model_type = None
-            try:
-                config_path = hf_hub_download(repo_id=model.modelId, filename='config.json')
-                with open(config_path, encoding='utf-8') as config_file:
-                    model_type = json.load(config_file).get('model_type')
-            except Exception:
+        with TemporaryDirectory(prefix='mlxdashboard-hf-config-') as config_cache:
+            def summarize(model):
                 model_type = None
-            return {
-                'id': model.modelId,
-                'downloads': model.downloads,
-                'likes': model.likes,
-                'model_type': model_type,
-            }
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            results = list(executor.map(summarize, models))
+                try:
+                    config_path = hf_hub_download(repo_id=model.modelId, filename='config.json', cache_dir=config_cache)
+                    with open(config_path, encoding='utf-8') as config_file:
+                        model_type = json.load(config_file).get('model_type')
+                except Exception:
+                    model_type = None
+                return {
+                    'id': model.modelId,
+                    'downloads': model.downloads,
+                    'likes': model.likes,
+                    'model_type': model_type,
+                }
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                results = list(executor.map(summarize, models))
         print(json.dumps(results))
         """
         let result = try await runner.run(Command(

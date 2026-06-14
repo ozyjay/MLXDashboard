@@ -499,26 +499,52 @@ private struct DiscoverModelsView: View {
                 Spacer()
             }
 
-            Table(viewModel.searchResults, selection: $viewModel.selectedSearchModelID) {
-                TableColumn("Model") { model in
-                    Text(model.id)
-                        .lineLimit(nil)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
+            Table(viewModel.searchResultFamilies, selection: $viewModel.selectedSearchFamilyID) {
+                TableColumn("Model") { family in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(family.displayName)
+                            .font(.body.weight(.medium))
+                            .lineLimit(1)
+                            .textSelection(.enabled)
+                        if let variant = family.selectedVariant {
+                            Text(variant.summary.id)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .textSelection(.enabled)
+                        }
+                        HStack(spacing: 6) {
+                            ForEach(family.variants) { variant in
+                                Button {
+                                    viewModel.selectSearchVariant(familyID: family.id, variantID: variant.id)
+                                } label: {
+                                    VariantChipLabel(
+                                        variant: variant,
+                                        isSelected: variant.id == family.selectedVariantID
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                                .help(variant.id)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 3)
                 }
                 .width(min: 560, ideal: 900)
-                TableColumn("Downloads") { model in
-                    Text(model.downloads.map(String.init) ?? "")
+                TableColumn("Downloads") { family in
+                    Text(family.selectedVariant?.summary.downloads.map(String.init) ?? "")
                         .monospacedDigit()
                 }
                 .width(min: 72, ideal: 86, max: 104)
-                TableColumn("Likes") { model in
-                    Text(model.likes.map(String.init) ?? "")
+                TableColumn("Likes") { family in
+                    Text(family.selectedVariant?.summary.likes.map(String.init) ?? "")
                         .monospacedDigit()
                 }
                 .width(min: 42, ideal: 52, max: 64)
-                TableColumn("Action") { model in
-                    switch viewModel.searchResultAction(for: model.id) {
+                TableColumn("Action") { family in
+                    let selectedModelID = family.selectedVariantID
+                    switch viewModel.searchResultAction(for: selectedModelID) {
                     case .alreadyInstalled:
                         Text("Already installed")
                             .foregroundStyle(.secondary)
@@ -530,7 +556,7 @@ private struct DiscoverModelsView: View {
                         }
                     case .install:
                         Button("Install") {
-                            viewModel.selectedSearchModelID = model.id
+                            viewModel.selectSearchVariant(familyID: family.id, variantID: selectedModelID)
                             viewModel.startSelectedModelInstall()
                         }
                         .disabled(viewModel.isInstallingModel)
@@ -542,6 +568,42 @@ private struct DiscoverModelsView: View {
         }
         .task {
             await viewModel.searchDefaultModelsIfReady()
+        }
+    }
+}
+
+private struct VariantChipLabel: View {
+    var variant: ModelSearchVariant
+    var isSelected: Bool
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(variant.label)
+                .font(.caption.weight(isSelected ? .semibold : .regular))
+            switch variant.installState {
+            case .installed:
+                Image(systemName: "checkmark.circle.fill")
+                    .imageScale(.small)
+            case .failed:
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .imageScale(.small)
+            case .paused:
+                Image(systemName: "pause.circle.fill")
+                    .imageScale(.small)
+            case .installing:
+                ProgressView()
+                    .controlSize(.mini)
+            case .notInstalled:
+                EmptyView()
+            }
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(isSelected ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.12))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay {
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(isSelected ? Color.accentColor.opacity(0.65) : Color.clear, lineWidth: 1)
         }
     }
 }

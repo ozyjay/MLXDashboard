@@ -81,6 +81,14 @@ public struct MLXModelCacheManager: Sendable {
         if FileManager.default.fileExists(atPath: cacheDirectory.path) {
             try FileManager.default.removeItem(at: cacheDirectory)
         }
+        let lockDirectory = cacheDirectory
+            .deletingLastPathComponent()
+            .appending(path: ".locks", directoryHint: .isDirectory)
+            .appending(path: cacheDirectory.lastPathComponent, directoryHint: .isDirectory)
+            .standardizedFileURL
+        if FileManager.default.fileExists(atPath: lockDirectory.path) {
+            try FileManager.default.removeItem(at: lockDirectory)
+        }
         return cacheDirectory
     }
 

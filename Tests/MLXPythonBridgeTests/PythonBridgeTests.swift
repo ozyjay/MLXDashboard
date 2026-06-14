@@ -76,14 +76,26 @@ final class PythonBridgeTests: XCTestCase {
         )
     }
 
+    func testRuntimeCompatibilityRejectsDiffusionGemmaModelType() throws {
+        let compatibility = MLXModelRuntimeCompatibilityChecker().compatibility(modelType: "diffusion_gemma")
+
+        XCTAssertEqual(
+            compatibility,
+            .unsupported(modelType: "diffusion_gemma", reason: "Unsupported by installed mlx-lm: diffusion_gemma")
+        )
+    }
+
     func testCacheManagerDeletesWholeRepoCacheFolderForModel() throws {
         let root = try temporaryDirectory()
         let snapshot = root.appending(path: "models--mlx-community--Tiny/snapshots/abc123", directoryHint: .isDirectory)
         let siblingSnapshot = root.appending(path: "models--mlx-community--Tiny/snapshots/def456", directoryHint: .isDirectory)
+        let lockDirectory = root.appending(path: ".locks/models--mlx-community--Tiny", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: siblingSnapshot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: lockDirectory, withIntermediateDirectories: true)
         FileManager.default.createFile(atPath: snapshot.appending(path: "config.json").path, contents: Data())
         FileManager.default.createFile(atPath: siblingSnapshot.appending(path: "config.json").path, contents: Data())
+        FileManager.default.createFile(atPath: lockDirectory.appending(path: "download.lock").path, contents: Data())
 
         let manager = MLXModelCacheManager()
         let deleted = try manager.deleteModelCache(
@@ -94,6 +106,7 @@ final class PythonBridgeTests: XCTestCase {
 
         XCTAssertEqual(deleted.lastPathComponent, "models--mlx-community--Tiny")
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appending(path: "models--mlx-community--Tiny").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: lockDirectory.path))
     }
 
     func testCacheManagerDeletesRepoCacheFolderFromRecordedSnapshotPathOutsideDefaultRoot() throws {
@@ -164,6 +177,8 @@ final class PythonBridgeTests: XCTestCase {
         XCTAssertFalse(script.contains("direction="))
         XCTAssertTrue(script.contains("limit=limit"))
         XCTAssertTrue(script.contains("hf_hub_download"))
+        XCTAssertTrue(script.contains("TemporaryDirectory"))
+        XCTAssertTrue(script.contains("cache_dir=config_cache"))
         XCTAssertTrue(script.contains("model_type"))
         XCTAssertTrue(script.contains("ThreadPoolExecutor(max_workers=8)"))
         XCTAssertTrue(script.contains("executor.map"))
