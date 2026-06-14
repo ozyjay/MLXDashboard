@@ -165,6 +165,8 @@ final class PythonBridgeTests: XCTestCase {
         XCTAssertTrue(script.contains("limit=limit"))
         XCTAssertTrue(script.contains("hf_hub_download"))
         XCTAssertTrue(script.contains("model_type"))
+        XCTAssertTrue(script.contains("ThreadPoolExecutor(max_workers=8)"))
+        XCTAssertTrue(script.contains("executor.map"))
     }
 
     func testHuggingFaceSearcherPassesDynamicValuesAsArguments() async throws {
