@@ -249,6 +249,104 @@ final class ServerControlTests: XCTestCase {
         XCTAssertEqual(controller.status(for: .plan).detail, "Port 8081 unavailable; no active model fallback")
     }
 
+    func testStoppingOneRoleFallsBackOnlyThatRoleWhenProcessIsUnique() throws {
+        let base = FakeManagedProcess()
+        let ask = FakeManagedProcess()
+        let controller = RoleServerPoolController(
+            processLauncher: FakeProcessLauncher(processes: [base, ask]),
+            portChecker: FakePortChecker(isAvailable: true)
+        )
+        let settings = DashboardSettings(
+            activeModel: "base",
+            providerRoleAssignments: ProviderRoleAssignments(
+                ask: "ask",
+                coding: "base"
+            )
+        )
+
+        try controller.start(settings: settings, pythonExecutable: URL(filePath: "/usr/bin/python3"))
+
+        controller.stop(role: .ask)
+
+        XCTAssertFalse(base.wasTerminated)
+        XCTAssertTrue(ask.wasTerminated)
+        XCTAssertNil(controller.endpoint(for: .ask))
+        XCTAssertEqual(controller.status(for: .ask).kind, .fallback)
+        XCTAssertNil(controller.status(for: .ask).endpoint)
+        XCTAssertEqual(controller.status(for: .ask).detail, "Stopped; using active model")
+        XCTAssertEqual(controller.endpoint(for: .coding)?.port, 8080)
+        XCTAssertEqual(controller.status(for: .coding).kind, .shared)
+        XCTAssertEqual(Set(controller.processesByPort.keys), [8080])
+    }
+
+    func testStoppingOneSharedRoleKeepsSharedProcessForOtherRole() throws {
+        let base = FakeManagedProcess()
+        let shared = FakeManagedProcess()
+        let controller = RoleServerPoolController(
+            processLauncher: FakeProcessLauncher(processes: [base, shared]),
+            portChecker: FakePortChecker(isAvailable: true)
+        )
+        let settings = DashboardSettings(
+            activeModel: "base",
+            providerRoleAssignments: ProviderRoleAssignments(
+                ask: "shared",
+                coding: "shared"
+            )
+        )
+
+        try controller.start(settings: settings, pythonExecutable: URL(filePath: "/usr/bin/python3"))
+
+        controller.stop(role: .ask)
+
+        XCTAssertFalse(shared.wasTerminated)
+        XCTAssertNil(controller.endpoint(for: .ask))
+        XCTAssertEqual(controller.status(for: .ask).kind, .fallback)
+        XCTAssertEqual(controller.status(for: .ask).detail, "Stopped; using active model")
+        XCTAssertEqual(controller.endpoint(for: .coding)?.port, 8081)
+        XCTAssertEqual(controller.status(for: .coding).kind, .running)
+        XCTAssertEqual(controller.status(for: .coding).detail, "Running on port 8081")
+        XCTAssertEqual(Set(controller.processesByPort.keys), [8080, 8081])
+    }
+
+    func testRestartingStoppedRoleLaunchesOnlyThatRoleProcess() throws {
+        let base = FakeManagedProcess()
+        let originalAsk = FakeManagedProcess()
+        let restartedAsk = FakeManagedProcess()
+        let controller = RoleServerPoolController(
+            processLauncher: FakeProcessLauncher(processes: [base, originalAsk, restartedAsk]),
+            portChecker: FakePortChecker(isAvailable: true)
+        )
+        let settings = DashboardSettings(
+            activeModel: "base",
+            providerRoleAssignments: ProviderRoleAssignments(
+                ask: "ask",
+                coding: "base"
+            )
+        )
+
+        try controller.start(settings: settings, pythonExecutable: URL(filePath: "/usr/bin/python3"))
+        controller.stop(role: .ask)
+
+        try controller.restart(
+            role: .ask,
+            settings: settings,
+            pythonExecutable: URL(filePath: "/usr/bin/python3")
+        )
+
+        XCTAssertTrue(originalAsk.wasTerminated)
+        XCTAssertTrue(restartedAsk.wasLaunched)
+        XCTAssertFalse(base.wasTerminated)
+        XCTAssertEqual(restartedAsk.arguments, [
+            "-m", "mlx_lm", "server", "--host", "127.0.0.1", "--port", "8081", "--model", "ask"
+        ])
+        XCTAssertEqual(controller.endpoint(for: .ask)?.port, 8081)
+        XCTAssertEqual(controller.status(for: .ask).kind, .running)
+        XCTAssertEqual(controller.status(for: .ask).detail, "Running on port 8081")
+        XCTAssertEqual(controller.endpoint(for: .coding)?.port, 8080)
+        XCTAssertEqual(controller.status(for: .coding).kind, .shared)
+        XCTAssertEqual(Set(controller.processesByPort.keys), [8080, 8081])
+    }
+
     func testProviderModelRolesHaveDeterministicRoutingOrder() {
         XCTAssertEqual(ProviderModelRole.orderedRoutingRoles, [.ask, .plan, .coding])
         XCTAssertEqual(ProviderModelRole.ask.displayName, "Ask")

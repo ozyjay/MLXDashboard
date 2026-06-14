@@ -1,5 +1,6 @@
 import SwiftUI
 import MLXCore
+import MLXServerControl
 
 enum DashboardSection: String, CaseIterable, Identifiable {
     case discover = "Discover"
@@ -167,6 +168,7 @@ private struct ControllerTab: View {
             }
             Text("Python: \(viewModel.pythonStatus)")
                 .foregroundStyle(.secondary)
+            RoleServerStatusTable()
             HStack {
                 Button("Check Python") { Task { await viewModel.refreshPythonStatus() } }
                 Button("Install Packages") { Task { await viewModel.installPythonPackages() } }
@@ -175,6 +177,128 @@ private struct ControllerTab: View {
             Divider()
             ModelDownloadsSettingsView()
             Spacer()
+        }
+    }
+}
+
+private struct RoleServerStatusTable: View {
+    @EnvironmentObject private var viewModel: DashboardViewModel
+
+    private var plannedEndpoints: [ProviderModelRole: RoleServerEndpoint] {
+        RoleServerPoolController.makePlan(settings: viewModel.settings).roleEndpoints
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Role Servers")
+                .font(.headline)
+
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
+                GridRow {
+                    headerText("Role")
+                        .frame(width: 70, alignment: .leading)
+                    headerText("Assigned model")
+                        .frame(minWidth: 200, maxWidth: 280, alignment: .leading)
+                    headerText("Port")
+                        .frame(width: 50, alignment: .leading)
+                    headerText("Status")
+                        .frame(width: 90, alignment: .leading)
+                    headerText("Detail")
+                        .frame(minWidth: 220, maxWidth: .infinity, alignment: .leading)
+                    headerText("Actions")
+                        .frame(width: 120, alignment: .leading)
+                }
+
+                Divider()
+                    .gridCellColumns(6)
+
+                ForEach(viewModel.roleServerStatuses) { row in
+                    GridRow {
+                        Text(row.role.displayName)
+                            .frame(width: 70, alignment: .leading)
+                        Text(row.assignedModel ?? "—")
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(minWidth: 200, maxWidth: 280, alignment: .leading)
+                        Text(portText(for: row))
+                            .frame(width: 50, alignment: .leading)
+                        Text(statusText(for: row.kind))
+                            .foregroundStyle(statusColor(for: row.kind))
+                            .frame(width: 90, alignment: .leading)
+                        Text(row.detail)
+                            .lineLimit(2)
+                            .truncationMode(.tail)
+                            .frame(minWidth: 220, maxWidth: .infinity, alignment: .leading)
+                        HStack(spacing: 8) {
+                            Button("Restart") {
+                                Task { await viewModel.restartRoleServer(row.role) }
+                            }
+                            .disabled(viewModel.serverState != .running || row.assignedModel == nil)
+
+                            Button("Stop") {
+                                viewModel.stopRoleServer(row.role)
+                            }
+                            .disabled(viewModel.serverState != .running || row.endpoint == nil)
+                        }
+                        .buttonStyle(.borderless)
+                        .frame(width: 120, alignment: .leading)
+                    }
+                }
+            }
+            .font(.caption)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func headerText(_ text: String) -> some View {
+        Text(text)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+    }
+
+    private func portText(for row: RoleServerStatusRow) -> String {
+        if let port = row.endpoint?.port {
+            return "\(port)"
+        }
+
+        if let port = plannedEndpoints[row.role]?.port {
+            return "\(port)"
+        }
+
+        return "—"
+    }
+
+    private func statusText(for kind: RoleServerStatusKind) -> String {
+        switch kind {
+        case .unassigned:
+            return "Unassigned"
+        case .planned:
+            return "Planned"
+        case .starting:
+            return "Starting"
+        case .running:
+            return "Running"
+        case .shared:
+            return "Shared"
+        case .fallback:
+            return "Fallback"
+        case .failed:
+            return "Failed"
+        case .stopped:
+            return "Stopped"
+        }
+    }
+
+    private func statusColor(for kind: RoleServerStatusKind) -> Color {
+        switch kind {
+        case .running, .shared:
+            return .green
+        case .fallback:
+            return .orange
+        case .failed:
+            return .red
+        default:
+            return .secondary
         }
     }
 }

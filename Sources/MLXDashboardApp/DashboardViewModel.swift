@@ -355,6 +355,13 @@ final class DashboardViewModel: ObservableObject {
         telemetry.appendLog("Stopped mlx-lm")
     }
 
+    func stopRoleServer(_ role: ProviderModelRole) {
+        serverPoolController.stop(role: role)
+        roleServerStatuses = serverPoolController.roleStatuses
+        updateProviderEndpointState()
+        telemetry.appendLog("Stopped \(role.displayName.lowercased()) role server")
+    }
+
     func restartServer() async {
         do {
             let python = try await environmentManager.ensureVenv()
@@ -371,6 +378,20 @@ final class DashboardViewModel: ObservableObject {
                 clearProviderEndpointState()
             }
             telemetry.appendLog("Failed to restart server: \(error.localizedDescription)")
+        }
+    }
+
+    func restartRoleServer(_ role: ProviderModelRole) async {
+        do {
+            let python = try await environmentManager.ensureVenv()
+            try serverPoolController.restart(role: role, settings: settings, pythonExecutable: python)
+            roleServerStatuses = serverPoolController.roleStatuses
+            updateProviderEndpointState()
+            telemetry.appendLog("Restarted \(role.displayName.lowercased()) role server")
+        } catch {
+            roleServerStatuses = serverPoolController.roleStatuses
+            updateProviderEndpointState()
+            telemetry.appendLog("Failed to restart \(role.displayName.lowercased()) role server: \(error.localizedDescription)")
         }
     }
 

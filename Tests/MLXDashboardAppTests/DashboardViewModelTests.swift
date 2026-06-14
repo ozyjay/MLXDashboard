@@ -225,6 +225,76 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.roleServerStatuses.map(\.kind), expectedKinds)
     }
 
+    func testStopRoleServerStopsOnlySelectedRoleProcess() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let base = FakeManagedProcess()
+        let ask = FakeManagedProcess()
+        let serverPoolController = RoleServerPoolController(
+            processLauncher: FakeProcessLauncher(processes: [base, ask]),
+            portChecker: FakePortChecker(isAvailable: true)
+        )
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [
+                "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+                "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: "")
+            ])),
+            serverPoolController: serverPoolController
+        )
+        viewModel.settings.activeModel = "base"
+        viewModel.settings.providerRoleAssignments = ProviderRoleAssignments(ask: "ask")
+
+        await viewModel.startServer()
+        viewModel.stopRoleServer(.ask)
+
+        XCTAssertTrue(ask.wasTerminated)
+        XCTAssertFalse(base.wasTerminated)
+        XCTAssertNil(serverPoolController.endpoint(for: .ask))
+        XCTAssertEqual(viewModel.roleServerStatuses, serverPoolController.roleStatuses)
+        XCTAssertEqual(viewModel.roleServerStatuses.first(where: { $0.role == .ask })?.kind, .fallback)
+    }
+
+    func testRestartRoleServerRestartsStoppedRoleProcess() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let base = FakeManagedProcess()
+        let originalAsk = FakeManagedProcess()
+        let restartedAsk = FakeManagedProcess()
+        let serverPoolController = RoleServerPoolController(
+            processLauncher: FakeProcessLauncher(processes: [base, originalAsk, restartedAsk]),
+            portChecker: FakePortChecker(isAvailable: true)
+        )
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [
+                "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+                "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: "")
+            ])),
+            serverPoolController: serverPoolController
+        )
+        viewModel.settings.activeModel = "base"
+        viewModel.settings.providerRoleAssignments = ProviderRoleAssignments(ask: "ask")
+
+        await viewModel.startServer()
+        viewModel.stopRoleServer(.ask)
+        await viewModel.restartRoleServer(.ask)
+
+        XCTAssertTrue(originalAsk.wasTerminated)
+        XCTAssertTrue(restartedAsk.wasLaunched)
+        XCTAssertEqual(viewModel.roleServerStatuses, serverPoolController.roleStatuses)
+        XCTAssertEqual(viewModel.roleServerStatuses.first(where: { $0.role == .ask })?.kind, .running)
+        XCTAssertEqual(serverPoolController.endpoint(for: .ask)?.port, 8081)
+    }
+
     func testProviderStartStopAvailabilityFollowsProviderState() throws {
         let paths = try temporaryAppPaths()
         let viewModel = DashboardViewModel(
