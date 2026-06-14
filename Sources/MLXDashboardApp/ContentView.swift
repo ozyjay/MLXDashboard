@@ -122,7 +122,7 @@ private struct DashboardTab: View {
     var body: some View {
         VStack(alignment: .leading, spacing: DashboardLayoutPolicy.spacing) {
             HStack(alignment: .top, spacing: DashboardLayoutPolicy.spacing) {
-                MetricTile(title: "mlx-lm", value: viewModel.serverController.state.rawValue.capitalized)
+                MetricTile(title: "mlx-lm", value: viewModel.serverState.rawValue.capitalized)
                 MetricTile(title: "Provider", value: viewModel.providerStatus)
                 MetricTile(title: "Requests", value: "\(viewModel.telemetry.requestCount)")
             }

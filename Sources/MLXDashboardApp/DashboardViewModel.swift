@@ -76,6 +76,46 @@ private final class ProviderRoleAssignmentState: @unchecked Sendable {
     }
 }
 
+private final class ProviderUpstreamEndpointState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var defaultEndpointValue: ProviderUpstreamEndpoint?
+    private var roleEndpointsValue: [ProviderModelRole: ProviderUpstreamEndpoint] = [:]
+
+    var defaultEndpoint: ProviderUpstreamEndpoint? {
+        lock.withLock { defaultEndpointValue }
+    }
+
+    func endpoint(for role: ProviderModelRole) -> ProviderUpstreamEndpoint? {
+        lock.withLock { roleEndpointsValue[role] }
+    }
+
+    func update(defaultEndpoint: RoleServerEndpoint?, roleEndpoints: [ProviderModelRole: RoleServerEndpoint]) {
+        lock.withLock {
+            defaultEndpointValue = defaultEndpoint.flatMap(Self.providerEndpoint(from:))
+            roleEndpointsValue = Dictionary(uniqueKeysWithValues: roleEndpoints.compactMap { role, endpoint in
+                guard let providerEndpoint = Self.providerEndpoint(from: endpoint) else {
+                    return nil
+                }
+                return (role, providerEndpoint)
+            })
+        }
+    }
+
+    func clear() {
+        lock.withLock {
+            defaultEndpointValue = nil
+            roleEndpointsValue = [:]
+        }
+    }
+
+    private static func providerEndpoint(from endpoint: RoleServerEndpoint) -> ProviderUpstreamEndpoint? {
+        guard let modelID = endpoint.modelID else {
+            return nil
+        }
+        return ProviderUpstreamEndpoint(modelID: modelID, baseURL: endpoint.baseURL, port: endpoint.port)
+    }
+}
+
 @MainActor
 final class DashboardViewModel: ObservableObject {
     @Published var settings: DashboardSettings
@@ -94,9 +134,10 @@ final class DashboardViewModel: ObservableObject {
     @Published var isLoadingMoreSearchResults = false
     @Published var modelInstallProgress: ModelInstallProgress?
     @Published var modelDownloadSettingsNavigationRequestID = 0
+    @Published private(set) var roleServerStatuses: [RoleServerStatusRow]
 
     let telemetry: TelemetryStore
-    let serverController: ServerProcessController
+    let serverPoolController: RoleServerPoolController
 
     private let settingsStore: SettingsStore
     private let registry: ModelRegistry
@@ -109,7 +150,8 @@ final class DashboardViewModel: ObservableObject {
     private let activeModelSelection: ActiveModelSelection
     private let providerDebugCaptureState: ProviderDebugCaptureState
     private let providerRoleAssignmentState: ProviderRoleAssignmentState
-    private var serverControllerCancellable: AnyCancellable?
+    private let providerUpstreamEndpointState: ProviderUpstreamEndpointState
+    private var serverPoolControllerCancellable: AnyCancellable?
     private var providerServer: NIOProviderServer?
     private var activeInstallTask: Task<Void, Never>?
     private var downloadActivityMonitorTask: Task<Void, Never>?
@@ -127,7 +169,7 @@ final class DashboardViewModel: ObservableObject {
         modelInstaller: HuggingFaceModelInstaller = HuggingFaceModelInstaller(),
         authChecker: HuggingFaceAuthChecker = HuggingFaceAuthChecker(),
         huggingFaceCacheRoot: URL? = nil,
-        serverController: ServerProcessController = ServerProcessController(),
+        serverPoolController: RoleServerPoolController = RoleServerPoolController(),
         telemetry: TelemetryStore? = nil
     ) {
         self.settingsStore = settingsStore
@@ -138,7 +180,7 @@ final class DashboardViewModel: ObservableObject {
         self.modelInstaller = modelInstaller
         self.authChecker = authChecker
         self.configuredHuggingFaceCacheRoot = huggingFaceCacheRoot
-        self.serverController = serverController
+        self.serverPoolController = serverPoolController
         self.telemetry = telemetry ?? TelemetryStore(
             logFileURL: environmentManager.paths.logsDirectory.appending(path: "mlxdashboard.log")
         )
@@ -147,10 +189,19 @@ final class DashboardViewModel: ObservableObject {
         self.activeModelSelection = ActiveModelSelection(model: loadedSettings.activeModel)
         self.providerDebugCaptureState = ProviderDebugCaptureState(enabled: loadedSettings.providerDebugCaptureEnabled)
         self.providerRoleAssignmentState = ProviderRoleAssignmentState(assignments: loadedSettings.providerRoleAssignments)
+        self.providerUpstreamEndpointState = ProviderUpstreamEndpointState()
+        self.roleServerStatuses = serverPoolController.roleStatuses
         try? registry.load()
         self.installedModels = Self.visibleInstalledModels(from: registry.records)
-        self.serverControllerCancellable = serverController.objectWillChange.sink { [weak self] _ in
-            self?.objectWillChange.send()
+        self.providerUpstreamEndpointState.update(
+            defaultEndpoint: serverPoolController.defaultEndpoint,
+            roleEndpoints: serverPoolController.roleEndpoints
+        )
+        self.serverPoolControllerCancellable = Publishers.CombineLatest(
+            serverPoolController.$state,
+            serverPoolController.$roleStatuses
+        ).sink { [weak self] _, roleStatuses in
+            self?.roleServerStatuses = roleStatuses
         }
     }
 
@@ -166,6 +217,10 @@ final class DashboardViewModel: ObservableObject {
         providerServer == nil
     }
 
+    var serverState: ServerState {
+        serverPoolController.state
+    }
+
     var canStopProvider: Bool {
         providerServer != nil
     }
@@ -175,15 +230,15 @@ final class DashboardViewModel: ObservableObject {
     }
 
     var canStartServer: Bool {
-        ControllerButtonPolicy.canStartServer(state: serverController.state)
+        ControllerButtonPolicy.canStartServer(state: serverPoolController.state)
     }
 
     var canStopServer: Bool {
-        ControllerButtonPolicy.canStopServer(state: serverController.state)
+        ControllerButtonPolicy.canStopServer(state: serverPoolController.state)
     }
 
     var canRestartServer: Bool {
-        ControllerButtonPolicy.canRestartServer(state: serverController.state)
+        ControllerButtonPolicy.canRestartServer(state: serverPoolController.state)
     }
 
     var canLoadMoreSearchResults: Bool {
@@ -276,38 +331,59 @@ final class DashboardViewModel: ObservableObject {
     func startServer() async {
         do {
             let python = try await environmentManager.ensureVenv()
-            try serverController.start(settings: settings, pythonExecutable: python)
+            try serverPoolController.start(settings: settings, pythonExecutable: python)
+            roleServerStatuses = serverPoolController.roleStatuses
+            updateProviderEndpointState()
             telemetry.appendLog("Started mlx-lm on \(DashboardSettings.localMLXHost):\(settings.mlxPort)")
             try startProvider()
         } catch {
+            roleServerStatuses = serverPoolController.roleStatuses
+            if serverPoolController.state != .running {
+                clearProviderEndpointState()
+            }
             telemetry.appendLog("Failed to start server: \(error.localizedDescription)")
         }
     }
 
     func stopServer() {
-        serverController.stop()
+        serverPoolController.stopAll()
+        roleServerStatuses = serverPoolController.roleStatuses
+        clearProviderEndpointState()
         telemetry.appendLog("Stopped mlx-lm")
     }
 
     func restartServer() async {
         do {
             let python = try await environmentManager.ensureVenv()
-            try serverController.restart(settings: settings, pythonExecutable: python)
+            serverPoolController.stopAll()
+            roleServerStatuses = serverPoolController.roleStatuses
+            clearProviderEndpointState()
+            try serverPoolController.start(settings: settings, pythonExecutable: python)
+            roleServerStatuses = serverPoolController.roleStatuses
+            updateProviderEndpointState()
             telemetry.appendLog("Restarted mlx-lm on \(DashboardSettings.localMLXHost):\(settings.mlxPort)")
         } catch {
+            roleServerStatuses = serverPoolController.roleStatuses
+            if serverPoolController.state != .running {
+                clearProviderEndpointState()
+            }
             telemetry.appendLog("Failed to restart server: \(error.localizedDescription)")
         }
     }
 
     func startProvider() throws {
         guard providerServer == nil else { return }
-        let upstream = URLSessionProviderUpstreamClient { [settings] in
-            settings.mlxBaseURL
-        }
+        let upstream = URLSessionProviderUpstreamProxyClient()
         let router = ProviderRouter(
             upstream: upstream,
             activeModelProvider: { [activeModelSelection] in activeModelSelection.model },
             roleAssignmentsProvider: { [providerRoleAssignmentState] in providerRoleAssignmentState.assignments },
+            defaultEndpointProvider: { [providerUpstreamEndpointState] in
+                providerUpstreamEndpointState.defaultEndpoint
+            },
+            roleEndpointProvider: { [providerUpstreamEndpointState] role in
+                providerUpstreamEndpointState.endpoint(for: role)
+            },
             eventLogger: { [weak self] message in
                 Task { @MainActor [weak self] in
                     self?.telemetry.recordRequest(latency: 0)
@@ -344,6 +420,17 @@ final class DashboardViewModel: ObservableObject {
         if canStopServer {
             stopServer()
         }
+    }
+
+    private func updateProviderEndpointState() {
+        providerUpstreamEndpointState.update(
+            defaultEndpoint: serverPoolController.defaultEndpoint,
+            roleEndpoints: serverPoolController.roleEndpoints
+        )
+    }
+
+    private func clearProviderEndpointState() {
+        providerUpstreamEndpointState.clear()
     }
 
     func scanModelCache() {

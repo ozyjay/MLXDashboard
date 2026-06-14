@@ -41,7 +41,7 @@ final class DashboardViewModelTests: XCTestCase {
     func testControllerAvailabilityRefreshesWhenServerStateChanges() throws {
         let paths = try temporaryAppPaths()
         let process = FakeManagedProcess()
-        let serverController = ServerProcessController(
+        let serverPoolController = RoleServerPoolController(
             processLauncher: FakeProcessLauncher(processes: [process]),
             portChecker: FakePortChecker(isAvailable: true)
         )
@@ -49,7 +49,7 @@ final class DashboardViewModelTests: XCTestCase {
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
             registry: ModelRegistry(fileURL: paths.modelRegistryFile),
             environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:])),
-            serverController: serverController
+            serverPoolController: serverPoolController
         )
         var refreshCount = 0
         let cancellable = viewModel.objectWillChange.sink {
@@ -60,7 +60,7 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertFalse(viewModel.canStopServer)
         XCTAssertFalse(viewModel.canRestartServer)
 
-        try serverController.start(settings: DashboardSettings(), pythonExecutable: URL(filePath: "/venv/bin/python"))
+        try serverPoolController.start(settings: DashboardSettings(), pythonExecutable: URL(filePath: "/venv/bin/python"))
 
         XCTAssertFalse(viewModel.canStartServer)
         XCTAssertTrue(viewModel.canStopServer)
@@ -90,7 +90,7 @@ final class DashboardViewModelTests: XCTestCase {
         FileManager.default.createFile(atPath: python.path, contents: Data())
         let originalProcess = FakeManagedProcess()
         let restartedProcess = FakeManagedProcess()
-        let serverController = ServerProcessController(
+        let serverPoolController = RoleServerPoolController(
             processLauncher: FakeProcessLauncher(processes: [originalProcess, restartedProcess]),
             portChecker: FakePortChecker(isAvailable: true)
         )
@@ -101,15 +101,15 @@ final class DashboardViewModelTests: XCTestCase {
                 "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
                 "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: "")
             ])),
-            serverController: serverController
+            serverPoolController: serverPoolController
         )
 
-        try serverController.start(settings: DashboardSettings(), pythonExecutable: python)
+        try serverPoolController.start(settings: DashboardSettings(), pythonExecutable: python)
         await viewModel.restartServer()
 
         XCTAssertTrue(originalProcess.wasTerminated)
         XCTAssertTrue(restartedProcess.wasLaunched)
-        XCTAssertEqual(serverController.state, .running)
+        XCTAssertEqual(serverPoolController.state, .running)
     }
 
     func testStartServerLogsFriendlyMessageWhenMLXPortIsUnavailable() async throws {
@@ -118,9 +118,9 @@ final class DashboardViewModelTests: XCTestCase {
         try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
         FileManager.default.createFile(atPath: python.path, contents: Data())
         let process = FakeManagedProcess()
-        let serverController = ServerProcessController(
+        let serverPoolController = RoleServerPoolController(
             processLauncher: FakeProcessLauncher(processes: [process]),
-            portChecker: FakePortChecker(isAvailable: false)
+            portChecker: FakePortChecker(unavailablePorts: [DashboardSettings().mlxPort])
         )
         let runner = FakeCommandRunner(results: [
             "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
@@ -130,15 +130,98 @@ final class DashboardViewModelTests: XCTestCase {
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
             registry: ModelRegistry(fileURL: paths.modelRegistryFile),
             environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
-            serverController: serverController
+            serverPoolController: serverPoolController
         )
 
         await viewModel.startServer()
 
-        XCTAssertEqual(serverController.state, .failed)
+        XCTAssertEqual(serverPoolController.state, .failed)
         XCTAssertFalse(process.wasLaunched)
         let logText = try String(contentsOf: paths.logsDirectory.appending(path: "mlxdashboard.log"), encoding: .utf8)
         XCTAssertTrue(logText.contains("Failed to start server: Cannot start mlx-lm because 127.0.0.1:8080 is already in use."))
+    }
+
+    func testStartServerStartsUniqueRoleServerPoolProcesses() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let gemma = FakeManagedProcess()
+        let devstral = FakeManagedProcess()
+        let serverPoolController = RoleServerPoolController(
+            processLauncher: FakeProcessLauncher(processes: [gemma, devstral]),
+            portChecker: FakePortChecker(isAvailable: true)
+        )
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [
+                "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+                "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: "")
+            ])),
+            serverPoolController: serverPoolController
+        )
+        viewModel.settings.activeModel = "mlx-community/gemma4"
+        viewModel.settings.providerPort = 0
+        viewModel.settings.providerRoleAssignments = ProviderRoleAssignments(
+            ask: "mlx-community/gemma4",
+            plan: "mlx-community/devstral",
+            coding: "mlx-community/gemma4"
+        )
+
+        await viewModel.startServer()
+        defer {
+            viewModel.stopProvider()
+            viewModel.stopServer()
+        }
+
+        let expectedKinds: [RoleServerStatusKind] = [.shared, .running, .shared]
+        XCTAssertEqual(serverPoolController.state, .running)
+        XCTAssertTrue(gemma.wasLaunched)
+        XCTAssertTrue(devstral.wasLaunched)
+        XCTAssertEqual(viewModel.roleServerStatuses.map(\.kind), expectedKinds)
+        XCTAssertEqual(serverPoolController.processesByPort.count, 2)
+    }
+
+    func testStopServerStopsRoleServerPoolProcesses() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let gemma = FakeManagedProcess()
+        let devstral = FakeManagedProcess()
+        let serverPoolController = RoleServerPoolController(
+            processLauncher: FakeProcessLauncher(processes: [gemma, devstral]),
+            portChecker: FakePortChecker(isAvailable: true)
+        )
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [
+                "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+                "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: "")
+            ])),
+            serverPoolController: serverPoolController
+        )
+        viewModel.settings.activeModel = "mlx-community/gemma4"
+        viewModel.settings.providerPort = 0
+        viewModel.settings.providerRoleAssignments = ProviderRoleAssignments(
+            ask: "mlx-community/gemma4",
+            plan: "mlx-community/devstral",
+            coding: "mlx-community/gemma4"
+        )
+
+        await viewModel.startServer()
+        viewModel.stopProvider()
+        viewModel.stopServer()
+
+        let expectedKinds: [RoleServerStatusKind] = [.unassigned, .unassigned, .unassigned]
+        XCTAssertEqual(serverPoolController.state, .stopped)
+        XCTAssertTrue(gemma.wasTerminated)
+        XCTAssertTrue(devstral.wasTerminated)
+        XCTAssertEqual(viewModel.roleServerStatuses.map(\.kind), expectedKinds)
     }
 
     func testProviderStartStopAvailabilityFollowsProviderState() throws {
@@ -1595,9 +1678,10 @@ private final class FakeProcessLauncher: ProcessLaunching {
 }
 
 private struct FakePortChecker: ServerPortChecking {
-    let isAvailable: Bool
+    var isAvailable: Bool = true
+    var unavailablePorts: Set<Int> = []
 
     func isPortAvailable(host: String, port: Int) -> Bool {
-        isAvailable
+        isAvailable && !unavailablePorts.contains(port)
     }
 }
