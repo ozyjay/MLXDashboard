@@ -233,10 +233,6 @@ private struct ModelDownloadsSettingsView: View {
         Binding(
             get: { downloadSettings.mode },
             set: { mode in
-                if mode == .xetConservative {
-                    viewModel.updateDownloadSettings(.conservativeDefault)
-                    return
-                }
                 updateDownloadSettings { settings in
                     settings.mode = mode
                 }
