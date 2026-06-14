@@ -132,7 +132,8 @@ final class DashboardViewModel: ObservableObject {
     @Published var selectedInstalledModelID: String?
     @Published var isInstallingModel = false
     @Published var isLoadingMoreSearchResults = false
-    @Published var modelInstallProgress: ModelInstallProgress?
+    @Published private(set) var installProgressByModelID: [String: ModelInstallProgress] = [:]
+    @Published private(set) var activeInstallModelID: String?
     @Published var modelDownloadSettingsNavigationRequestID = 0
     @Published private(set) var roleServerStatuses: [RoleServerStatusRow]
 
@@ -242,6 +243,16 @@ final class DashboardViewModel: ObservableObject {
 
     var hasRunningDownloads: Bool {
         isInstallingModel || activeInstallTask != nil
+    }
+
+    var modelInstallProgress: ModelInstallProgress? {
+        guard let activeInstallModelID else { return nil }
+        return installProgressByModelID[activeInstallModelID]
+    }
+
+    var selectedInstalledModelProgress: ModelInstallProgress? {
+        guard let selectedInstalledModelID else { return nil }
+        return installProgressByModelID[selectedInstalledModelID]
     }
 
     var canStartServer: Bool {
@@ -752,7 +763,6 @@ final class DashboardViewModel: ObservableObject {
         guard let selectedSearchModelID,
               let model = searchResults.first(where: { $0.id == selectedSearchModelID })
         else {
-            modelInstallProgress = nil
             modelInstallMessage = "Select a model from search results before installing."
             return
         }
@@ -801,7 +811,6 @@ final class DashboardViewModel: ObservableObject {
         guard canContinueSelectedInstalledModelInstall,
               let modelID = selectedInstalledModelID
         else {
-            modelInstallProgress = nil
             modelInstallMessage = "Select a failed or incomplete model before continuing."
             return
         }
@@ -818,7 +827,6 @@ final class DashboardViewModel: ObservableObject {
         guard canRetrySelectedInstalledModelInstallWithoutXet,
               let modelID = selectedInstalledModelID
         else {
-            modelInstallProgress = nil
             modelInstallMessage = "Select a failed or incomplete model before retrying without Xet."
             return
         }
@@ -856,7 +864,6 @@ final class DashboardViewModel: ObservableObject {
             return
         }
 
-        modelInstallProgress = nil
         settings.activeModel = selectedInstalledModelID
         activeModelSelection.update(selectedInstalledModelID)
         saveSettings()
@@ -871,7 +878,6 @@ final class DashboardViewModel: ObservableObject {
             return
         }
 
-        modelInstallProgress = nil
         settings.providerRoleAssignments.setModel(selectedInstalledModelID, for: role)
         providerRoleAssignmentState.update(settings.providerRoleAssignments)
         saveSettings()
@@ -883,12 +889,11 @@ final class DashboardViewModel: ObservableObject {
         guard let selectedInstalledModelID,
               let record = installedModels.first(where: { $0.id == selectedInstalledModelID })
         else {
-            modelInstallProgress = nil
             modelInstallMessage = "Select an installed model before deleting from cache."
             return
         }
 
-        modelInstallProgress = nil
+        clearInstallProgress(for: selectedInstalledModelID)
         do {
             _ = try cacheManager.deleteModelCache(
                 modelID: record.id,
@@ -943,10 +948,33 @@ final class DashboardViewModel: ObservableObject {
         activeInstallSessionID = nil
     }
 
+    func setInstallProgressForTesting(_ progress: ModelInstallProgress, makeActive: Bool = true) {
+        setInstallProgress(progress, makeActive: makeActive)
+    }
+
+    private func setInstallProgress(_ progress: ModelInstallProgress, makeActive: Bool) {
+        installProgressByModelID[progress.modelID] = progress
+        if makeActive {
+            activeInstallModelID = progress.modelID
+        }
+    }
+
+    private func clearInstallProgress(for modelID: String) {
+        installProgressByModelID[modelID] = nil
+        if activeInstallModelID == modelID {
+            activeInstallModelID = nil
+        }
+    }
+
+    private func clearActiveInstallProgress() {
+        guard let activeInstallModelID else { return }
+        clearInstallProgress(for: activeInstallModelID)
+    }
+
     private func canApplyDownloadCallback(modelID: String, installSessionID: Int) -> Bool {
         activeInstallSessionID == installSessionID
-            && modelInstallProgress?.modelID == modelID
-            && modelInstallProgress?.phase == .downloading
+            && activeInstallModelID == modelID
+            && installProgressByModelID[modelID]?.phase == .downloading
     }
 
     private func updateInstallProgress(
@@ -955,11 +983,11 @@ final class DashboardViewModel: ObservableObject {
         detail: String,
         downloadProgress: HuggingFaceDownloadProgress? = nil
     ) {
-        let existingProgress = modelInstallProgress?.modelID == modelID ? modelInstallProgress : nil
+        let existingProgress = installProgressByModelID[modelID]
         if phase == .downloading, existingProgress?.phase.isTerminalInstallPhase == true {
             return
         }
-        modelInstallProgress = ModelInstallProgress(
+        let progress = ModelInstallProgress(
             modelID: modelID,
             phase: phase,
             detail: detail,
@@ -967,6 +995,7 @@ final class DashboardViewModel: ObservableObject {
             cacheSummary: existingProgress?.cacheSummary,
             activities: existingProgress?.activities ?? []
         )
+        setInstallProgress(progress, makeActive: true)
         modelInstallMessage = detail
     }
 
@@ -978,20 +1007,16 @@ final class DashboardViewModel: ObservableObject {
         if let installSessionID {
             guard canApplyDownloadCallback(modelID: modelID, installSessionID: installSessionID) else { return }
         }
-        guard let progress = modelInstallProgress,
-              progress.modelID == modelID
-        else { return }
+        guard let progress = installProgressByModelID[modelID] else { return }
 
-        modelInstallProgress = progress.appendingActivity(activity)
+        setInstallProgress(progress.appendingActivity(activity), makeActive: activeInstallModelID == modelID)
     }
 
     private func updateInstallCacheSummary(_ cacheSummary: DownloadCacheSummary, modelID: String) {
-        guard var progress = modelInstallProgress,
-              progress.modelID == modelID
-        else { return }
+        guard var progress = installProgressByModelID[modelID] else { return }
 
         progress.cacheSummary = cacheSummary
-        modelInstallProgress = progress
+        setInstallProgress(progress, makeActive: activeInstallModelID == modelID)
     }
 
     private func startDownloadActivityMonitor(modelID: String, installSessionID: Int) {

@@ -1209,6 +1209,45 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.modelInstallProgress?.stepText, "Step 5 of 5")
     }
 
+    func testInstallProgressIsStoredByModelIDAndExposedForSelectedInstalledModel() async throws {
+        let paths = try temporaryAppPaths()
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+        )
+        let progress = ModelInstallProgress(
+            modelID: "mlx-community/Tiny",
+            phase: .downloading,
+            detail: "Downloading"
+        )
+
+        viewModel.setInstallProgressForTesting(progress)
+        viewModel.selectedInstalledModelID = "mlx-community/Tiny"
+
+        XCTAssertEqual(viewModel.installProgressByModelID["mlx-community/Tiny"], progress)
+        XCTAssertEqual(viewModel.selectedInstalledModelProgress, progress)
+        XCTAssertEqual(viewModel.modelInstallProgress, progress)
+    }
+
+    func testSelectedInstalledModelProgressCanDifferFromActiveInstallProgress() async throws {
+        let paths = try temporaryAppPaths()
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+        )
+        let active = ModelInstallProgress(modelID: "mlx-community/Active", phase: .downloading, detail: "Active")
+        let selected = ModelInstallProgress(modelID: "mlx-community/Selected", phase: .failed, detail: "Failed")
+
+        viewModel.setInstallProgressForTesting(active)
+        viewModel.setInstallProgressForTesting(selected, makeActive: false)
+        viewModel.selectedInstalledModelID = "mlx-community/Selected"
+
+        XCTAssertEqual(viewModel.modelInstallProgress, active)
+        XCTAssertEqual(viewModel.selectedInstalledModelProgress, selected)
+    }
+
     func testInstallSelectedModelShowsDownloadActivityFromInstaller() async throws {
         let paths = try temporaryAppPaths()
         let python = paths.venvDirectory.appending(path: "bin/python")
@@ -1524,11 +1563,11 @@ final class DashboardViewModelTests: XCTestCase {
             modelInstaller: HuggingFaceModelInstaller(runner: runner),
             authChecker: HuggingFaceAuthChecker(runner: runner)
         )
-        viewModel.modelInstallProgress = ModelInstallProgress(
+        viewModel.setInstallProgressForTesting(ModelInstallProgress(
             modelID: "mlx-community/Tiny",
             phase: .failed,
             detail: "Install failed for mlx-community/Tiny: network interrupted"
-        )
+        ))
 
         await viewModel.continueLastModelInstall()
 
@@ -1606,11 +1645,11 @@ final class DashboardViewModelTests: XCTestCase {
             modelInstaller: HuggingFaceModelInstaller(runner: runner),
             authChecker: HuggingFaceAuthChecker(runner: runner)
         )
-        viewModel.modelInstallProgress = ModelInstallProgress(
+        viewModel.setInstallProgressForTesting(ModelInstallProgress(
             modelID: "mlx-community/Tiny",
             phase: .failed,
             detail: "Install failed for mlx-community/Tiny: network interrupted"
-        )
+        ))
 
         await viewModel.retryLastModelInstallWithoutXet()
 
@@ -1773,7 +1812,7 @@ final class DashboardViewModelTests: XCTestCase {
             ModelRecord(id: "mlx-community/Tiny", status: .installing, message: "Installing from Hugging Face")
         ]
         viewModel.selectedInstalledModelID = "mlx-community/Tiny"
-        viewModel.modelInstallProgress = progress
+        viewModel.setInstallProgressForTesting(progress)
 
         XCTAssertFalse(viewModel.canSetSelectedInstalledModelActive)
         XCTAssertFalse(viewModel.canAssignSelectedInstalledModelToProviderRole)
@@ -1830,7 +1869,7 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.modelInstallMessage, "Deleted cache for mlx-community/Tiny.")
     }
 
-    func testDeleteSelectedInstalledModelClearsStaleInstallProgress() throws {
+    func testDeleteSelectedInstalledModelClearsMatchingInstallProgress() throws {
         let paths = try temporaryAppPaths()
         let cacheRoot = try temporaryDirectory()
         let snapshot = cacheRoot.appending(path: "models--mlx-community--Tiny/snapshots/abc", directoryHint: .isDirectory)
@@ -1847,11 +1886,11 @@ final class DashboardViewModelTests: XCTestCase {
             huggingFaceCacheRoot: cacheRoot
         )
         viewModel.selectedInstalledModelID = "mlx-community/Tiny"
-        viewModel.modelInstallProgress = ModelInstallProgress(
-            modelID: "mlx-community/Previous",
+        viewModel.setInstallProgressForTesting(ModelInstallProgress(
+            modelID: "mlx-community/Tiny",
             phase: .installed,
-            detail: "Installed previous model"
-        )
+            detail: "Installed Tiny"
+        ))
 
         viewModel.deleteSelectedInstalledModelFromCache()
 
