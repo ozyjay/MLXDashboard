@@ -250,6 +250,14 @@ final class DashboardViewModel: ObservableObject {
             && searchResults.count == modelSearchLimit
     }
 
+    var canInstallSelectedSearchModel: Bool {
+        ModelDiscoveryPolicy.canInstallSelected(
+            hasSelection: selectedSearchModelID != nil,
+            isInstalling: isInstallingModel,
+            isSelectedInstalled: selectedSearchModelIsInstalled
+        )
+    }
+
     var canContinueLastModelInstall: Bool {
         guard !isInstallingModel,
               let progress = modelInstallProgress
@@ -1045,6 +1053,24 @@ final class DashboardViewModel: ObservableObject {
     private var selectedInstalledModelIsInstalled: Bool {
         guard let selectedInstalledModelID else { return false }
         return installedModels.contains { $0.id == selectedInstalledModelID && $0.status == .installed }
+    }
+
+    private var installedModelIDs: Set<String> {
+        Set(installedModels.filter { $0.status == .installed }.map(\.id))
+    }
+
+    private var selectedSearchModelIsInstalled: Bool {
+        guard let selectedSearchModelID else { return false }
+        return installedModelIDs.contains(selectedSearchModelID)
+    }
+
+    func searchResultAction(for modelID: String) -> ModelSearchResultAction {
+        ModelDiscoveryPolicy.searchResultAction(
+            modelID: modelID,
+            installedModelIDs: installedModelIDs,
+            installingModelID: modelInstallProgress?.modelID,
+            isInstalling: isInstallingModel
+        )
     }
 
     private func friendlyInstallMessage(for error: Error) -> String {

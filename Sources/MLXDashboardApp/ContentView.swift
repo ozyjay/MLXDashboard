@@ -478,10 +478,7 @@ private struct DiscoverModelsView: View {
                 Button("Install Selected") {
                     viewModel.startSelectedModelInstall()
                 }
-                .disabled(!ModelDiscoveryPolicy.canInstallSelected(
-                    hasSelection: viewModel.selectedSearchModelID != nil,
-                    isInstalling: viewModel.isInstallingModel
-                ))
+                .disabled(!viewModel.canInstallSelectedSearchModel)
                 if viewModel.isInstallingModel {
                     ProgressView()
                         .controlSize(.small)
@@ -521,13 +518,17 @@ private struct DiscoverModelsView: View {
                 }
                 .width(min: 42, ideal: 52, max: 64)
                 TableColumn("Action") { model in
-                    if viewModel.isInstallingModel && viewModel.modelInstallProgress?.modelID == model.id {
+                    switch viewModel.searchResultAction(for: model.id) {
+                    case .alreadyInstalled:
+                        Text("Already installed")
+                            .foregroundStyle(.secondary)
+                    case .installing:
                         HStack(spacing: 6) {
                             ProgressView()
                                 .controlSize(.small)
                             Text("Installing")
                         }
-                    } else {
+                    case .install:
                         Button("Install") {
                             viewModel.selectedSearchModelID = model.id
                             viewModel.startSelectedModelInstall()

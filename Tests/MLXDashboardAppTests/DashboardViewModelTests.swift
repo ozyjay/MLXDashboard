@@ -495,6 +495,31 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(try Self.modelIDs(in: data), ["mlx-ask", "mlx-plan", "mlx-fast", "mlx-community/Manual"])
     }
 
+    func testSearchResultActionMarksInstalledModelsFromRegistry() throws {
+        let paths = try temporaryAppPaths()
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+        )
+        viewModel.searchResults = [
+            HuggingFaceModelSummary(id: "mlx-community/Tiny"),
+            HuggingFaceModelSummary(id: "mlx-community/Other")
+        ]
+        viewModel.installedModels = [
+            ModelRecord(id: "mlx-community/Tiny", status: .installed, localPath: "/tmp/tiny")
+        ]
+        viewModel.selectedSearchModelID = "mlx-community/Tiny"
+
+        XCTAssertEqual(viewModel.searchResultAction(for: "mlx-community/Tiny"), .alreadyInstalled)
+        XCTAssertEqual(viewModel.searchResultAction(for: "mlx-community/Other"), .install)
+        XCTAssertFalse(viewModel.canInstallSelectedSearchModel)
+
+        viewModel.selectedSearchModelID = "mlx-community/Other"
+
+        XCTAssertTrue(viewModel.canInstallSelectedSearchModel)
+    }
+
     func testDirectRolePoolStartPublishesEndpointsToRunningProvider() async throws {
         let paths = try temporaryAppPaths()
         let ports = try availableTestPorts()
