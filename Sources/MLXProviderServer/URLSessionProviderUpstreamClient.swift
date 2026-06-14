@@ -2,24 +2,52 @@ import Foundation
 
 public struct URLSessionProviderUpstreamClient: ProviderUpstreamClient {
     private let mlxBaseURL: @Sendable () -> URL
-    private let session: URLSession
+    private let transport: URLSessionProviderUpstreamTransport
 
     public init(mlxBaseURL: @escaping @Sendable () -> URL, session: URLSession = .shared) {
         self.mlxBaseURL = mlxBaseURL
-        self.session = session
+        self.transport = URLSessionProviderUpstreamTransport(session: session)
     }
 
     public func proxy(_ request: ProviderRequest) async throws -> ProviderResponse {
-        let (data, headers, status) = try await dataResponse(for: request)
-        return ProviderResponse(
-            status: status,
-            headers: headers,
-            body: data
-        )
+        try await transport.proxy(request, baseURL: mlxBaseURL())
     }
 
     public func proxyStream(_ request: ProviderRequest) async throws -> ProviderStreamedResponse {
-        let upstreamRequest = urlRequest(for: request)
+        try await transport.proxyStream(request, baseURL: mlxBaseURL())
+    }
+}
+
+public struct URLSessionProviderUpstreamProxyClient: ProviderUpstreamProxyClient {
+    private let transport: URLSessionProviderUpstreamTransport
+
+    public init(session: URLSession = .shared) {
+        self.transport = URLSessionProviderUpstreamTransport(session: session)
+    }
+
+    public func proxy(_ request: ProviderRequest, to endpoint: ProviderUpstreamEndpoint) async throws -> ProviderResponse {
+        try await transport.proxy(request, baseURL: endpoint.baseURL)
+    }
+
+    public func proxyStream(_ request: ProviderRequest, to endpoint: ProviderUpstreamEndpoint) async throws -> ProviderStreamedResponse {
+        try await transport.proxyStream(request, baseURL: endpoint.baseURL)
+    }
+}
+
+private struct URLSessionProviderUpstreamTransport: Sendable {
+    private let session: URLSession
+
+    init(session: URLSession) {
+        self.session = session
+    }
+
+    func proxy(_ request: ProviderRequest, baseURL: URL) async throws -> ProviderResponse {
+        let (data, headers, status) = try await dataResponse(for: request, baseURL: baseURL)
+        return ProviderResponse(status: status, headers: headers, body: data)
+    }
+
+    func proxyStream(_ request: ProviderRequest, baseURL: URL) async throws -> ProviderStreamedResponse {
+        let upstreamRequest = urlRequest(for: request, baseURL: baseURL)
         let (bytes, response) = try await session.bytes(for: upstreamRequest)
         let httpResponse = response as? HTTPURLResponse
         let headers = responseHeaders(from: httpResponse)
@@ -47,8 +75,8 @@ public struct URLSessionProviderUpstreamClient: ProviderUpstreamClient {
         return ProviderStreamedResponse(status: status, headers: headers, chunks: chunks)
     }
 
-    private func dataResponse(for request: ProviderRequest) async throws -> (Data, [String: String], Int) {
-        let upstreamRequest = urlRequest(for: request)
+    private func dataResponse(for request: ProviderRequest, baseURL: URL) async throws -> (Data, [String: String], Int) {
+        let upstreamRequest = urlRequest(for: request, baseURL: baseURL)
         let (data, response) = try await session.data(for: upstreamRequest)
         let httpResponse = response as? HTTPURLResponse
         return (
@@ -58,8 +86,8 @@ public struct URLSessionProviderUpstreamClient: ProviderUpstreamClient {
         )
     }
 
-    private func urlRequest(for request: ProviderRequest) -> URLRequest {
-        let upstreamURL = mlxBaseURL().appending(path: request.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
+    private func urlRequest(for request: ProviderRequest, baseURL: URL) -> URLRequest {
+        let upstreamURL = baseURL.appending(path: request.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
         var upstreamRequest = URLRequest(url: upstreamURL)
         upstreamRequest.httpMethod = request.method
         upstreamRequest.httpBody = request.body.isEmpty ? nil : request.body

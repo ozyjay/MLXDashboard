@@ -3,10 +3,14 @@ import MLXCore
 
 public struct ProviderRouter: Sendable {
     private static let modeAliases = ["mlx-ask", "mlx-plan", "mlx-fast"]
+    private static let compatibilityBaseURL = URL(string: "http://127.0.0.1:8080")!
 
-    private let upstream: any ProviderUpstreamClient
+    private let upstream: any ProviderUpstreamProxyClient
+    private let legacyUpstream: (any ProviderUpstreamClient)?
     private let activeModelProvider: @Sendable () -> String?
     private let roleAssignmentsProvider: @Sendable () -> ProviderRoleAssignments
+    private let defaultEndpointProvider: @Sendable () -> ProviderUpstreamEndpoint?
+    private let roleEndpointProvider: @Sendable (ProviderModelRole) -> ProviderUpstreamEndpoint?
     private let eventLogger: @Sendable (String) -> Void
     private let debugRecorder: ProviderDebugRecorder?
     // Android Studio probes these local-provider discovery paths before using OpenAI-compatible chat routes.
@@ -25,15 +29,61 @@ public struct ProviderRouter: Sendable {
     ]
 
     public init(
+        upstream: any ProviderUpstreamProxyClient,
+        activeModelProvider: @escaping @Sendable () -> String? = { nil },
+        roleAssignmentsProvider: @escaping @Sendable () -> ProviderRoleAssignments = { ProviderRoleAssignments() },
+        defaultEndpointProvider: @escaping @Sendable () -> ProviderUpstreamEndpoint?,
+        roleEndpointProvider: @escaping @Sendable (ProviderModelRole) -> ProviderUpstreamEndpoint?,
+        eventLogger: @escaping @Sendable (String) -> Void = { _ in },
+        debugRecorder: ProviderDebugRecorder? = nil
+    ) {
+        self.init(
+            upstream: upstream,
+            legacyUpstream: nil,
+            activeModelProvider: activeModelProvider,
+            roleAssignmentsProvider: roleAssignmentsProvider,
+            defaultEndpointProvider: defaultEndpointProvider,
+            roleEndpointProvider: roleEndpointProvider,
+            eventLogger: eventLogger,
+            debugRecorder: debugRecorder
+        )
+    }
+
+    public init(
         upstream: any ProviderUpstreamClient,
         activeModelProvider: @escaping @Sendable () -> String? = { nil },
         roleAssignmentsProvider: @escaping @Sendable () -> ProviderRoleAssignments = { ProviderRoleAssignments() },
         eventLogger: @escaping @Sendable (String) -> Void = { _ in },
         debugRecorder: ProviderDebugRecorder? = nil
     ) {
+        self.init(
+            upstream: ProviderUpstreamClientAdapter(upstream: upstream),
+            legacyUpstream: upstream,
+            activeModelProvider: activeModelProvider,
+            roleAssignmentsProvider: roleAssignmentsProvider,
+            defaultEndpointProvider: { nil },
+            roleEndpointProvider: { _ in nil },
+            eventLogger: eventLogger,
+            debugRecorder: debugRecorder
+        )
+    }
+
+    private init(
+        upstream: any ProviderUpstreamProxyClient,
+        legacyUpstream: (any ProviderUpstreamClient)?,
+        activeModelProvider: @escaping @Sendable () -> String?,
+        roleAssignmentsProvider: @escaping @Sendable () -> ProviderRoleAssignments,
+        defaultEndpointProvider: @escaping @Sendable () -> ProviderUpstreamEndpoint?,
+        roleEndpointProvider: @escaping @Sendable (ProviderModelRole) -> ProviderUpstreamEndpoint?,
+        eventLogger: @escaping @Sendable (String) -> Void,
+        debugRecorder: ProviderDebugRecorder?
+    ) {
         self.upstream = upstream
+        self.legacyUpstream = legacyUpstream
         self.activeModelProvider = activeModelProvider
         self.roleAssignmentsProvider = roleAssignmentsProvider
+        self.defaultEndpointProvider = defaultEndpointProvider
+        self.roleEndpointProvider = roleEndpointProvider
         self.eventLogger = eventLogger
         self.debugRecorder = debugRecorder
     }
@@ -199,15 +249,16 @@ public struct ProviderRouter: Sendable {
             return finish(try await responseFromChatCompletion(request))
         }
 
-        let routed = requestWithActiveModelIfAvailable(request)
+        let routed = requestWithSelectedUpstreamIfAvailable(request)
         let proxiedRequest = routed.request
+        let upstreamEndpoint = routed.upstreamEndpoint ?? defaultUpstreamEndpoint()
         if shouldStream(proxiedRequest) {
-            let response = try await upstream.proxyStream(proxiedRequest)
+            let response = try await proxyStream(proxiedRequest, to: upstreamEndpoint)
             eventLogger("Provider streaming \(request.method) \(request.path) from upstream with status \(response.status)")
             return finishStream(response, context: routed.debugContext, upstreamRequest: proxiedRequest)
         }
 
-        let response = try await upstream.proxy(proxiedRequest)
+        let response = try await proxy(proxiedRequest, to: upstreamEndpoint)
         eventLogger("Provider proxied \(request.method) \(request.path) to upstream with status \(response.status)")
         if response.status >= 400 {
             eventLogger("Provider upstream error body for \(request.method) \(request.path) status \(response.status): \(sanitizedErrorBody(response.body))")
@@ -286,6 +337,45 @@ public struct ProviderRouter: Sendable {
 
     private func activeModel() -> String? {
         activeModelProvider().flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    private func compatibilityEndpoint(for modelID: String) -> ProviderUpstreamEndpoint {
+        ProviderUpstreamEndpoint(modelID: modelID, baseURL: Self.compatibilityBaseURL, port: nil)
+    }
+
+    private func defaultUpstreamEndpoint() -> ProviderUpstreamEndpoint? {
+        if let endpoint = defaultEndpointProvider() {
+            return endpoint
+        }
+        guard let activeModel = activeModel() else { return nil }
+        return compatibilityEndpoint(for: activeModel)
+    }
+
+    private func proxy(_ request: ProviderRequest, to endpoint: ProviderUpstreamEndpoint?) async throws -> ProviderResponse {
+        if let endpoint {
+            return try await upstream.proxy(request, to: endpoint)
+        }
+        if let legacyUpstream {
+            return try await legacyUpstream.proxy(request)
+        }
+        return json(status: 503, #"{"error":"no upstream endpoint available"}"#)
+    }
+
+    private func proxyStream(_ request: ProviderRequest, to endpoint: ProviderUpstreamEndpoint?) async throws -> ProviderStreamedResponse {
+        if let endpoint {
+            return try await upstream.proxyStream(request, to: endpoint)
+        }
+        if let legacyUpstream {
+            return try await legacyUpstream.proxyStream(request)
+        }
+        return ProviderStreamedResponse(
+            status: 503,
+            headers: ["content-type": "application/json"],
+            chunks: AsyncThrowingStream { continuation in
+                continuation.yield(Data(#"{"error":"no upstream endpoint available"}"#.utf8))
+                continuation.finish()
+            }
+        )
     }
 
     private func advertisedModels() -> [String] {
@@ -491,7 +581,7 @@ public struct ProviderRouter: Sendable {
            let activeModel = activeModel() {
             eventLogger("Provider resolved model alias \(requestedModel ?? "") to active model \(activeModel)")
         }
-        let model = activeModel() ?? requestedModel ?? "local"
+        let model = defaultUpstreamEndpoint()?.modelID ?? activeModel() ?? requestedModel ?? "local"
         let messages = object["messages"] as? [[String: Any]] ?? []
         let stream = object["stream"] as? Bool ?? true
         let chatResponse = try await proxyChatCompletion(model: model, messages: messages, stream: stream, headers: request.headers)
@@ -532,7 +622,7 @@ public struct ProviderRouter: Sendable {
            let activeModel = activeModel() {
             eventLogger("Provider resolved model alias \(requestedModel ?? "") to active model \(activeModel)")
         }
-        let model = activeModel() ?? requestedModel ?? "local"
+        let model = defaultUpstreamEndpoint()?.modelID ?? activeModel() ?? requestedModel ?? "local"
         let prompt = object["prompt"] as? String ?? ""
         let stream = object["stream"] as? Bool ?? true
         let chatResponse = try await proxyChatCompletion(
@@ -579,9 +669,8 @@ public struct ProviderRouter: Sendable {
                 "stream": stream
             ]
         )
-        return try await upstream.proxy(
-            ProviderRequest(method: "POST", path: "/v1/chat/completions", headers: headers, body: chatBody)
-        )
+        let request = ProviderRequest(method: "POST", path: "/v1/chat/completions", headers: headers, body: chatBody)
+        return try await proxy(request, to: defaultUpstreamEndpoint())
     }
 
     private func androidStudioStreamingChatResponse(model: String, chatBody: Data) -> ProviderResponse {
@@ -690,7 +779,11 @@ public struct ProviderRouter: Sendable {
         return ProviderResponse(status: 200, headers: ["content-type": "application/json"], body: data)
     }
 
-    private func requestWithActiveModelIfAvailable(_ request: ProviderRequest) -> (request: ProviderRequest, debugContext: ProviderDebugContext) {
+    private func requestWithSelectedUpstreamIfAvailable(_ request: ProviderRequest) -> (
+        request: ProviderRequest,
+        debugContext: ProviderDebugContext,
+        upstreamEndpoint: ProviderUpstreamEndpoint?
+    ) {
         let selectedModel = selectedModel(from: request.body)
         var debugContext = ProviderDebugContext(
             selectedModel: selectedModel,
@@ -699,31 +792,40 @@ public struct ProviderRouter: Sendable {
         )
         guard request.method == "POST",
               request.path == "/v1/chat/completions" || request.path == "/v1/completions",
-              let activeModel = activeModel(),
               let object = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any]
-        else { return (request, debugContext) }
+        else { return (request, debugContext, nil) }
 
         var payload = object
         let routingDecision = routingDecision(
             selectedModel: selectedModel,
             payload: object,
-            activeModel: activeModel
+            defaultEndpoint: defaultUpstreamEndpoint()
         )
+        let upstreamEndpoint = routingDecision.upstreamEndpoint
         debugContext.routingDecision = routingDecision
         if let selectedModel,
            Self.modeAliases.contains(selectedModel) {
-            debugContext.aliasResolution = "\(selectedModel) -> \(activeModel)"
-            eventLogger("Provider resolved model alias \(selectedModel) to active model \(activeModel)")
+            debugContext.aliasResolution = "\(selectedModel) -> \(routingDecision.upstreamModel)"
+            if routingDecision.upstreamModel == activeModel() {
+                eventLogger("Provider resolved model alias \(selectedModel) to active model \(routingDecision.upstreamModel)")
+            } else {
+                eventLogger("Provider resolved model alias \(selectedModel) to upstream model \(routingDecision.upstreamModel)")
+            }
         }
-        if let selectedAlias = routingDecision.selectedAlias,
-           let desiredRoleModel = routingDecision.desiredRoleModel,
-           let fallbackReason = routingDecision.fallbackReason {
-            eventLogger("Provider routing fallback for \(selectedAlias): desired role model \(desiredRoleModel) is not loaded; using active model \(activeModel)")
-            eventLogger("Provider routing decision for \(selectedAlias): role=\(routingDecision.inferredRole?.rawValue ?? "none"), capability=\(routingDecision.clientCapability.rawValue), upstream=\(activeModel), fallback=\(fallbackReason)")
-        } else if let selectedAlias = routingDecision.selectedAlias {
-            eventLogger("Provider routing decision for \(selectedAlias): role=\(routingDecision.inferredRole?.rawValue ?? "none"), capability=\(routingDecision.clientCapability.rawValue), upstream=\(activeModel)")
+        if let selectedAlias = routingDecision.selectedAlias {
+            if let fallbackReason = routingDecision.fallbackReason {
+                eventLogger("Provider routing fallback for \(selectedAlias): \(fallbackReason)")
+            }
+            let portText = routingDecision.upstreamEndpoint?.port.map { ", port=\($0)" } ?? ""
+            let fallbackText = routingDecision.fallbackReason.map { ", fallback=\($0)" } ?? ""
+            eventLogger(
+                "Provider routing decision for \(selectedAlias): role=\(routingDecision.inferredRole?.rawValue ?? "none"), capability=\(routingDecision.clientCapability.rawValue), upstream=\(routingDecision.upstreamModel)\(portText)\(fallbackText)"
+            )
         }
-        payload["model"] = activeModel
+        guard let upstreamEndpoint else {
+            return (request, debugContext, nil)
+        }
+        payload["model"] = upstreamEndpoint.modelID
         if routingDecision.shouldInjectMetadata,
            debugRecorder?.isEnabledNow == true {
             prependSystemMessage(
@@ -744,20 +846,26 @@ public struct ProviderRouter: Sendable {
             eventLogger("Provider removed tool-calling fields for MLX upstream compatibility")
         }
         guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
-            return (request, debugContext)
+            return (request, debugContext, upstreamEndpoint)
         }
-        eventLogger("Provider rewrote \(request.method) \(request.path) model to active model \(activeModel)")
+        if upstreamEndpoint.modelID == activeModel() {
+            eventLogger("Provider rewrote \(request.method) \(request.path) model to active model \(upstreamEndpoint.modelID)")
+        } else {
+            let portText = upstreamEndpoint.port.map { " on port \($0)" } ?? ""
+            eventLogger("Provider rewrote \(request.method) \(request.path) model to upstream model \(upstreamEndpoint.modelID)\(portText)")
+        }
 
         return (
             ProviderRequest(method: request.method, path: request.path, headers: request.headers, body: body),
-            debugContext
+            debugContext,
+            upstreamEndpoint
         )
     }
 
     private func routingDecision(
         selectedModel: String?,
         payload: [String: Any],
-        activeModel: String
+        defaultEndpoint: ProviderUpstreamEndpoint?
     ) -> ProviderRoutingDecision {
         let selectedAlias = selectedModel.flatMap { Self.modeAliases.contains($0) ? $0 : nil }
         let aliasRole = selectedAlias.flatMap(role(forAlias:))
@@ -768,12 +876,27 @@ public struct ProviderRouter: Sendable {
             inferredRole = aliasRole
         }
         let desiredRoleModel = inferredRole.flatMap { roleAssignmentsProvider().model(for: $0) }
+        let selectedEndpoint: ProviderUpstreamEndpoint?
         let fallbackReason: String?
-        if inferredRole != nil, desiredRoleModel == nil {
+        if let inferredRole, let desiredRoleModel {
+            let roleEndpoint = roleEndpointProvider(inferredRole).flatMap { endpoint in
+                endpoint.modelID == desiredRoleModel ? endpoint : nil
+            }
+            if let roleEndpoint {
+                selectedEndpoint = roleEndpoint
+                fallbackReason = nil
+            } else if let defaultEndpoint, defaultEndpoint.modelID == desiredRoleModel {
+                selectedEndpoint = defaultEndpoint
+                fallbackReason = nil
+            } else {
+                selectedEndpoint = defaultEndpoint
+                fallbackReason = defaultEndpoint == nil ? nil : "role server unavailable; using active model"
+            }
+        } else if inferredRole != nil, desiredRoleModel == nil {
+            selectedEndpoint = defaultEndpoint
             fallbackReason = "no model assigned for inferred role"
-        } else if let desiredRoleModel, desiredRoleModel != activeModel {
-            fallbackReason = "desired role model is not the active loaded model"
         } else {
+            selectedEndpoint = defaultEndpoint
             fallbackReason = nil
         }
         return ProviderRoutingDecision(
@@ -782,7 +905,7 @@ public struct ProviderRouter: Sendable {
             inferredRole: inferredRole,
             clientCapability: clientCapability(from: payload["tools"]),
             desiredRoleModel: desiredRoleModel,
-            upstreamModel: activeModel,
+            upstreamEndpoint: selectedEndpoint,
             fallbackReason: fallbackReason
         )
     }
@@ -1003,7 +1126,7 @@ public struct ProviderRouter: Sendable {
             return json(status: 400, #"{"error":"invalid responses request"}"#)
         }
 
-        let model = activeModelProvider().flatMap { $0.isEmpty ? nil : $0 } ?? responseRequest.model ?? "local"
+        let model = defaultUpstreamEndpoint()?.modelID ?? activeModelProvider().flatMap { $0.isEmpty ? nil : $0 } ?? responseRequest.model ?? "local"
         let chatPayload = responseRequest.chatCompletionPayload(model: model)
         let chatBody = try JSONSerialization.data(withJSONObject: chatPayload)
         let chatRequest = ProviderRequest(
@@ -1012,7 +1135,7 @@ public struct ProviderRouter: Sendable {
             headers: request.headers,
             body: chatBody
         )
-        let chatResponse = try await upstream.proxy(chatRequest)
+        let chatResponse = try await proxy(chatRequest, to: defaultUpstreamEndpoint())
         guard chatResponse.status >= 200, chatResponse.status < 300 else {
             return chatResponse
         }
@@ -1326,8 +1449,12 @@ private struct ProviderRoutingDecision {
     var inferredRole: ProviderModelRole?
     var clientCapability: ProviderClientCapability
     var desiredRoleModel: String?
-    var upstreamModel: String
+    var upstreamEndpoint: ProviderUpstreamEndpoint?
     var fallbackReason: String?
+
+    var upstreamModel: String {
+        upstreamEndpoint?.modelID ?? desiredRoleModel ?? requestedModel ?? "local"
+    }
 
     var shouldInjectMetadata: Bool {
         selectedAlias != nil || inferredRole != nil
@@ -1352,6 +1479,12 @@ private struct ProviderRoutingDecision {
             "client_capability": clientCapability.rawValue,
             "upstream_model": upstreamModel
         ]
+        if let upstreamEndpoint {
+            payload["upstream_base_url"] = upstreamEndpoint.baseURL.absoluteString
+            if let port = upstreamEndpoint.port {
+                payload["upstream_port"] = port
+            }
+        }
         if let requestedModel {
             payload["requested_model"] = requestedModel
         }
@@ -1368,6 +1501,18 @@ private struct ProviderRoutingDecision {
             payload["fallback_reason"] = fallbackReason
         }
         return payload
+    }
+}
+
+private struct ProviderUpstreamClientAdapter: ProviderUpstreamProxyClient {
+    let upstream: any ProviderUpstreamClient
+
+    func proxy(_ request: ProviderRequest, to endpoint: ProviderUpstreamEndpoint) async throws -> ProviderResponse {
+        try await upstream.proxy(request)
+    }
+
+    func proxyStream(_ request: ProviderRequest, to endpoint: ProviderUpstreamEndpoint) async throws -> ProviderStreamedResponse {
+        try await upstream.proxyStream(request)
     }
 }
 

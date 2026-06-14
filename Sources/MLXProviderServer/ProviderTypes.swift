@@ -53,6 +53,18 @@ public enum ProviderRouteResult: Sendable {
     case streamed(ProviderStreamedResponse)
 }
 
+public struct ProviderUpstreamEndpoint: Equatable, Sendable {
+    public var modelID: String
+    public var baseURL: URL
+    public var port: Int?
+
+    public init(modelID: String, baseURL: URL, port: Int?) {
+        self.modelID = modelID
+        self.baseURL = baseURL
+        self.port = port
+    }
+}
+
 public protocol ProviderUpstreamClient: Sendable {
     func proxy(_ request: ProviderRequest) async throws -> ProviderResponse
     func proxyStream(_ request: ProviderRequest) async throws -> ProviderStreamedResponse
@@ -61,6 +73,24 @@ public protocol ProviderUpstreamClient: Sendable {
 public extension ProviderUpstreamClient {
     func proxyStream(_ request: ProviderRequest) async throws -> ProviderStreamedResponse {
         let response = try await proxy(request)
+        let chunks = AsyncThrowingStream<Data, Error> { continuation in
+            if !response.body.isEmpty {
+                continuation.yield(response.body)
+            }
+            continuation.finish()
+        }
+        return ProviderStreamedResponse(status: response.status, headers: response.headers, chunks: chunks)
+    }
+}
+
+public protocol ProviderUpstreamProxyClient: Sendable {
+    func proxy(_ request: ProviderRequest, to endpoint: ProviderUpstreamEndpoint) async throws -> ProviderResponse
+    func proxyStream(_ request: ProviderRequest, to endpoint: ProviderUpstreamEndpoint) async throws -> ProviderStreamedResponse
+}
+
+public extension ProviderUpstreamProxyClient {
+    func proxyStream(_ request: ProviderRequest, to endpoint: ProviderUpstreamEndpoint) async throws -> ProviderStreamedResponse {
+        let response = try await proxy(request, to: endpoint)
         let chunks = AsyncThrowingStream<Data, Error> { continuation in
             if !response.body.isEmpty {
                 continuation.yield(response.body)
