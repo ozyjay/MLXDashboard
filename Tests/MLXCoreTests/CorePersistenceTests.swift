@@ -85,6 +85,19 @@ final class CorePersistenceTests: XCTestCase {
         XCTAssertEqual(settings.downloadSettings, .standardDefault)
     }
 
+    func testDashboardSettingsDefaultsPartialDownloadSettingsFields() throws {
+        let json = Data(
+            #"{"activeModel":"mlx-community/Tiny","mlxHost":"127.0.0.1","mlxPort":8080,"providerHost":"127.0.0.1","providerPort":8123,"serverFlags":[],"providerDebugCaptureEnabled":true,"providerRoleAssignments":{},"downloadSettings":{"mode":"xetCustom"}}"#.utf8
+        )
+
+        let settings = try JSONDecoder().decode(DashboardSettings.self, from: json)
+
+        XCTAssertEqual(settings.downloadSettings.mode, .xetCustom)
+        XCTAssertEqual(settings.downloadSettings.xetConcurrency, 4)
+        XCTAssertEqual(settings.downloadSettings.downloadTimeoutSeconds, 60)
+        XCTAssertEqual(settings.downloadSettings.etagTimeoutSeconds, 30)
+    }
+
     func testDownloadSettingsClampsCustomValues() {
         let settings = HuggingFaceDownloadSettings(
             mode: .xetCustom,

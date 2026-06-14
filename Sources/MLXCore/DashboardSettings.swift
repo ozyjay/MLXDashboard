@@ -78,6 +78,24 @@ public struct HuggingFaceDownloadSettings: Codable, Equatable, Sendable {
         self.etagTimeoutSeconds = etagTimeoutSeconds
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case mode
+        case xetConcurrency
+        case downloadTimeoutSeconds
+        case etagTimeoutSeconds
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decoded = HuggingFaceDownloadSettings(
+            mode: try container.decodeIfPresent(HuggingFaceDownloadMode.self, forKey: .mode) ?? .standard,
+            xetConcurrency: try container.decodeIfPresent(Int.self, forKey: .xetConcurrency) ?? 4,
+            downloadTimeoutSeconds: try container.decodeIfPresent(Int.self, forKey: .downloadTimeoutSeconds) ?? 60,
+            etagTimeoutSeconds: try container.decodeIfPresent(Int.self, forKey: .etagTimeoutSeconds) ?? 30
+        ).validated()
+        self = decoded
+    }
+
     public func validated() -> HuggingFaceDownloadSettings {
         HuggingFaceDownloadSettings(
             mode: mode,
