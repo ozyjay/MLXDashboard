@@ -75,15 +75,23 @@ public final class ServerProcessController: ObservableObject {
     }
 
     public func makeArguments(settings: DashboardSettings) -> [String] {
+        makeArguments(
+            modelID: settings.activeModel,
+            port: settings.mlxPort,
+            serverFlags: settings.serverFlags
+        )
+    }
+
+    public func makeArguments(modelID: String?, port: Int, serverFlags: [String]) -> [String] {
         var arguments = [
             "-m", "mlx_lm", "server",
             "--host", DashboardSettings.localMLXHost,
-            "--port", String(settings.mlxPort)
+            "--port", String(port)
         ]
-        if let activeModel = settings.activeModel, !activeModel.isEmpty {
-            arguments += ["--model", activeModel]
+        if let modelID, !modelID.isEmpty {
+            arguments += ["--model", modelID]
         }
-        arguments += sanitizedServerFlags(settings.serverFlags)
+        arguments += sanitizedServerFlags(serverFlags)
         return arguments
     }
 

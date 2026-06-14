@@ -3,6 +3,13 @@ import MLXCore
 @testable import MLXServerControl
 
 final class ServerControlTests: XCTestCase {
+    func testProviderModelRolesHaveDeterministicRoutingOrder() {
+        XCTAssertEqual(ProviderModelRole.orderedRoutingRoles, [.ask, .plan, .coding])
+        XCTAssertEqual(ProviderModelRole.ask.displayName, "Ask")
+        XCTAssertEqual(ProviderModelRole.plan.displayName, "Plan")
+        XCTAssertEqual(ProviderModelRole.coding.displayName, "Coding")
+    }
+
     func testControllerStartsAndStopsOwnedMLXServerProcess() throws {
         let process = FakeManagedProcess()
         let launcher = FakeProcessLauncher(process: process)
@@ -24,6 +31,27 @@ final class ServerControlTests: XCTestCase {
 
         XCTAssertEqual(controller.state, .stopped)
         XCTAssertTrue(process.wasTerminated)
+    }
+
+    func testMakeArgumentsUsesExplicitModelPortAndLocalhost() {
+        let controller = ServerProcessController()
+
+        let arguments = controller.makeArguments(
+            modelID: "mlx-community/Devstral",
+            port: 8081,
+            serverFlags: ["--temp", "0.2", "--host", "0.0.0.0", "--host=0.0.0.0"]
+        )
+
+        XCTAssertEqual(
+            arguments,
+            [
+                "-m", "mlx_lm", "server",
+                "--host", "127.0.0.1",
+                "--port", "8081",
+                "--model", "mlx-community/Devstral",
+                "--temp", "0.2"
+            ]
+        )
     }
 
     func testControllerFailsBeforeLaunchingWhenMLXPortIsUnavailable() throws {

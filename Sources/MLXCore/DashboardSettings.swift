@@ -4,6 +4,19 @@ public enum ProviderModelRole: String, Codable, Equatable, Sendable {
     case ask
     case plan
     case coding
+
+    public static let orderedRoutingRoles: [ProviderModelRole] = [.ask, .plan, .coding]
+
+    public var displayName: String {
+        switch self {
+        case .ask:
+            "Ask"
+        case .plan:
+            "Plan"
+        case .coding:
+            "Coding"
+        }
+    }
 }
 
 public struct ProviderRoleAssignments: Codable, Equatable, Sendable {
