@@ -39,6 +39,45 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertFalse(ControllerButtonPolicy.canRestartServer(state: .failed))
     }
 
+    func testRoleServerStatusTablePolicyStopsOnlyNonDefaultRoleEndpoints() {
+        let defaultEndpoint = RoleServerEndpoint(
+            modelID: "base",
+            port: 8080,
+            baseURL: URL(string: "http://127.0.0.1:8080")!
+        )
+        let nonDefaultEndpoint = RoleServerEndpoint(
+            modelID: "plan",
+            port: 8081,
+            baseURL: URL(string: "http://127.0.0.1:8081")!
+        )
+
+        let fallbackRow = RoleServerStatusRow(
+            role: .plan,
+            assignedModel: "plan",
+            endpoint: defaultEndpoint,
+            kind: .fallback,
+            detail: "Using active model"
+        )
+        let defaultSharedRow = RoleServerStatusRow(
+            role: .ask,
+            assignedModel: "base",
+            endpoint: defaultEndpoint,
+            kind: .shared,
+            detail: "Shared on port 8080"
+        )
+        let sharedRoleRow = RoleServerStatusRow(
+            role: .coding,
+            assignedModel: "plan",
+            endpoint: nonDefaultEndpoint,
+            kind: .shared,
+            detail: "Shared on port 8081"
+        )
+
+        XCTAssertFalse(RoleServerStatusTablePolicy.canStop(fallbackRow, defaultEndpoint: defaultEndpoint))
+        XCTAssertFalse(RoleServerStatusTablePolicy.canStop(defaultSharedRow, defaultEndpoint: defaultEndpoint))
+        XCTAssertTrue(RoleServerStatusTablePolicy.canStop(sharedRoleRow, defaultEndpoint: defaultEndpoint))
+    }
+
     func testControllerAvailabilityRefreshesWhenServerStateChanges() throws {
         let paths = try temporaryAppPaths()
         let process = FakeManagedProcess()

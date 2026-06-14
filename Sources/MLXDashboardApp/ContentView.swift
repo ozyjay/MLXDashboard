@@ -78,6 +78,20 @@ struct DashboardLayoutPolicy {
     static let recentLogsMinHeight: CGFloat = 240
 }
 
+struct RoleServerStatusTablePolicy {
+    static func canStop(_ row: RoleServerStatusRow, defaultEndpoint: RoleServerEndpoint?) -> Bool {
+        guard row.endpoint != nil else {
+            return false
+        }
+
+        guard row.endpoint?.port != defaultEndpoint?.port else {
+            return false
+        }
+
+        return row.kind == .running || row.kind == .shared
+    }
+}
+
 private struct AppHeader: View {
     @EnvironmentObject private var viewModel: DashboardViewModel
     let section: DashboardSection
@@ -238,7 +252,13 @@ private struct RoleServerStatusTable: View {
                             Button("Stop") {
                                 viewModel.stopRoleServer(row.role)
                             }
-                            .disabled(viewModel.serverState != .running || row.endpoint == nil)
+                            .disabled(
+                                viewModel.serverState != .running
+                                || !RoleServerStatusTablePolicy.canStop(
+                                    row,
+                                    defaultEndpoint: viewModel.serverPoolController.defaultEndpoint
+                                )
+                            )
                         }
                         .buttonStyle(.borderless)
                         .frame(width: 120, alignment: .leading)
