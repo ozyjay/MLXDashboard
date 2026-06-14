@@ -111,6 +111,39 @@ final class CorePersistenceTests: XCTestCase {
         XCTAssertEqual(settings.etagTimeoutSeconds, 120)
     }
 
+    func testStandardDownloadEnvironmentDisablesXet() {
+        let environment = HuggingFaceDownloadSettings.standardDefault.huggingFaceEnvironment
+
+        XCTAssertEqual(environment["HF_HUB_DISABLE_XET"], "1")
+        XCTAssertNil(environment["HF_XET_NUM_CONCURRENT_RANGE_GETS"])
+        XCTAssertNil(environment["HF_XET_HIGH_PERFORMANCE"])
+    }
+
+    func testConservativeDownloadEnvironmentEnablesTunedXet() {
+        let environment = HuggingFaceDownloadSettings.conservativeDefault.huggingFaceEnvironment
+
+        XCTAssertNil(environment["HF_HUB_DISABLE_XET"])
+        XCTAssertEqual(environment["HF_XET_NUM_CONCURRENT_RANGE_GETS"], "4")
+        XCTAssertEqual(environment["HF_HUB_DOWNLOAD_TIMEOUT"], "60")
+        XCTAssertEqual(environment["HF_HUB_ETAG_TIMEOUT"], "30")
+        XCTAssertNil(environment["HF_XET_HIGH_PERFORMANCE"])
+    }
+
+    func testCustomDownloadEnvironmentUsesValidatedValues() {
+        let environment = HuggingFaceDownloadSettings(
+            mode: .xetCustom,
+            xetConcurrency: 0,
+            downloadTimeoutSeconds: 700,
+            etagTimeoutSeconds: 1
+        ).huggingFaceEnvironment
+
+        XCTAssertNil(environment["HF_HUB_DISABLE_XET"])
+        XCTAssertEqual(environment["HF_XET_NUM_CONCURRENT_RANGE_GETS"], "1")
+        XCTAssertEqual(environment["HF_HUB_DOWNLOAD_TIMEOUT"], "600")
+        XCTAssertEqual(environment["HF_HUB_ETAG_TIMEOUT"], "5")
+        XCTAssertNil(environment["HF_XET_HIGH_PERFORMANCE"])
+    }
+
     func testTokenStoreCreatesStableTokenAndCanRegenerate() throws {
         let store = EphemeralProviderTokenStore()
 

@@ -105,6 +105,20 @@ public struct HuggingFaceDownloadSettings: Codable, Equatable, Sendable {
         )
     }
 
+    public var huggingFaceEnvironment: [String: String] {
+        let settings = validated()
+        switch settings.mode {
+        case .standard:
+            return ["HF_HUB_DISABLE_XET": "1"]
+        case .xetConservative, .xetCustom:
+            return [
+                "HF_XET_NUM_CONCURRENT_RANGE_GETS": String(settings.xetConcurrency),
+                "HF_HUB_DOWNLOAD_TIMEOUT": String(settings.downloadTimeoutSeconds),
+                "HF_HUB_ETAG_TIMEOUT": String(settings.etagTimeoutSeconds)
+            ]
+        }
+    }
+
     private static func clamp(_ value: Int, lower: Int, upper: Int) -> Int {
         min(max(value, lower), upper)
     }
