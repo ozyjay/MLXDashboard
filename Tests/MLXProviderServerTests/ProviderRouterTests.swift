@@ -734,6 +734,42 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertTrue(logger.messages.contains { $0.contains("role server unavailable; using active model") })
     }
 
+    func testMissingRoleEndpointFallbackReasonMentionsDefaultEndpointWhenDefaultDiffersFromActive() async throws {
+        let root = try temporaryDirectory()
+        let debugFile = root.appending(path: "provider-debug.jsonl")
+        let logger = CapturingProviderLogger()
+        let router = ProviderRouter(
+            upstream: FakeUpstream(),
+            activeModelProvider: { "mlx-community/Active" },
+            roleAssignmentsProvider: { ProviderRoleAssignments(plan: "mlx-community/Plan") },
+            defaultEndpointProvider: {
+                ProviderUpstreamEndpoint(
+                    modelID: "mlx-community/Default",
+                    baseURL: URL(string: "http://127.0.0.1:8085")!,
+                    port: 8085
+                )
+            },
+            roleEndpointProvider: { _ in nil },
+            eventLogger: logger.log,
+            debugRecorder: ProviderDebugRecorder(fileURL: debugFile, isEnabled: { true })
+        )
+
+        _ = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/v1/chat/completions",
+                headers: [:],
+                body: Data(#"{"model":"mlx-plan","messages":[{"role":"user","content":"plan"}],"stream":false}"#.utf8)
+            )
+        )
+
+        let record = try lastDebugRecord(in: debugFile)
+        let decision = try XCTUnwrap(record["routing_decision"] as? [String: Any])
+        XCTAssertEqual(decision["upstream_model"] as? String, "mlx-community/Default")
+        XCTAssertEqual(decision["fallback_reason"] as? String, "role server unavailable; using default endpoint")
+        XCTAssertTrue(logger.messages.contains { $0.contains("role server unavailable; using default endpoint") })
+    }
+
     func testEndpointAwareRouterReturnsUnavailableWhenDefaultEndpointMissing() async throws {
         let upstream = FakeUpstream()
         let router = ProviderRouter(

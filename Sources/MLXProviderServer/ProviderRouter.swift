@@ -885,6 +885,16 @@ public struct ProviderRouter: Sendable {
         defaultEndpoint: ProviderUpstreamEndpoint?,
         canProxyWithoutEndpoint: Bool
     ) -> ProviderRoutingDecision {
+        func fallbackReasonForUnavailableRoleEndpoint(using defaultEndpoint: ProviderUpstreamEndpoint?) -> String {
+            guard let defaultEndpoint else {
+                return "no upstream endpoint available"
+            }
+            if defaultEndpoint.modelID == activeModel {
+                return "role server unavailable; using active model"
+            }
+            return "role server unavailable; using default endpoint"
+        }
+
         let selectedAlias = selectedModel.flatMap { Self.modeAliases.contains($0) ? $0 : nil }
         let aliasRole = selectedAlias.flatMap(role(forAlias:))
         let inferredRole: ProviderModelRole?
@@ -926,7 +936,7 @@ public struct ProviderRouter: Sendable {
                 selectedEndpoint = defaultEndpoint
                 upstreamModel = defaultEndpoint?.modelID ?? activeModel ?? desiredRoleModel
                 rewrittenModel = defaultEndpoint?.modelID
-                fallbackReason = defaultEndpoint == nil ? "no upstream endpoint available" : "role server unavailable; using active model"
+                fallbackReason = fallbackReasonForUnavailableRoleEndpoint(using: defaultEndpoint)
             }
         } else if inferredRole != nil, desiredRoleModel == nil {
             if let defaultEndpoint {
