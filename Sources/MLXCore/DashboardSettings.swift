@@ -40,6 +40,58 @@ public struct ProviderRoleAssignments: Codable, Equatable, Sendable {
     }
 }
 
+public enum HuggingFaceDownloadMode: String, Codable, CaseIterable, Equatable, Sendable {
+    case standard
+    case xetConservative
+    case xetCustom
+
+    public var displayName: String {
+        switch self {
+        case .standard:
+            "Standard download"
+        case .xetConservative:
+            "Xet conservative"
+        case .xetCustom:
+            "Xet custom"
+        }
+    }
+}
+
+public struct HuggingFaceDownloadSettings: Codable, Equatable, Sendable {
+    public static let standardDefault = HuggingFaceDownloadSettings()
+    public static let conservativeDefault = HuggingFaceDownloadSettings(mode: .xetConservative)
+
+    public var mode: HuggingFaceDownloadMode
+    public var xetConcurrency: Int
+    public var downloadTimeoutSeconds: Int
+    public var etagTimeoutSeconds: Int
+
+    public init(
+        mode: HuggingFaceDownloadMode = .standard,
+        xetConcurrency: Int = 4,
+        downloadTimeoutSeconds: Int = 60,
+        etagTimeoutSeconds: Int = 30
+    ) {
+        self.mode = mode
+        self.xetConcurrency = xetConcurrency
+        self.downloadTimeoutSeconds = downloadTimeoutSeconds
+        self.etagTimeoutSeconds = etagTimeoutSeconds
+    }
+
+    public func validated() -> HuggingFaceDownloadSettings {
+        HuggingFaceDownloadSettings(
+            mode: mode,
+            xetConcurrency: Self.clamp(xetConcurrency, lower: 1, upper: 16),
+            downloadTimeoutSeconds: Self.clamp(downloadTimeoutSeconds, lower: 10, upper: 600),
+            etagTimeoutSeconds: Self.clamp(etagTimeoutSeconds, lower: 5, upper: 120)
+        )
+    }
+
+    private static func clamp(_ value: Int, lower: Int, upper: Int) -> Int {
+        min(max(value, lower), upper)
+    }
+}
+
 public struct DashboardSettings: Codable, Equatable, Sendable {
     public static let localMLXHost = "127.0.0.1"
 
@@ -51,6 +103,7 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
     public var serverFlags: [String]
     public var providerDebugCaptureEnabled: Bool
     public var providerRoleAssignments: ProviderRoleAssignments
+    public var downloadSettings: HuggingFaceDownloadSettings
 
     public init(
         activeModel: String? = nil,
@@ -60,7 +113,8 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
         providerPort: Int = 8123,
         serverFlags: [String] = [],
         providerDebugCaptureEnabled: Bool = true,
-        providerRoleAssignments: ProviderRoleAssignments = ProviderRoleAssignments()
+        providerRoleAssignments: ProviderRoleAssignments = ProviderRoleAssignments(),
+        downloadSettings: HuggingFaceDownloadSettings = .standardDefault
     ) {
         self.activeModel = activeModel
         self.mlxHost = mlxHost
@@ -70,6 +124,7 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
         self.serverFlags = serverFlags
         self.providerDebugCaptureEnabled = providerDebugCaptureEnabled
         self.providerRoleAssignments = providerRoleAssignments
+        self.downloadSettings = downloadSettings.validated()
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -81,6 +136,7 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
         case serverFlags
         case providerDebugCaptureEnabled
         case providerRoleAssignments
+        case downloadSettings
     }
 
     public init(from decoder: Decoder) throws {
@@ -93,6 +149,7 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
         self.serverFlags = try container.decodeIfPresent([String].self, forKey: .serverFlags) ?? []
         self.providerDebugCaptureEnabled = try container.decodeIfPresent(Bool.self, forKey: .providerDebugCaptureEnabled) ?? true
         self.providerRoleAssignments = try container.decodeIfPresent(ProviderRoleAssignments.self, forKey: .providerRoleAssignments) ?? ProviderRoleAssignments()
+        self.downloadSettings = (try container.decodeIfPresent(HuggingFaceDownloadSettings.self, forKey: .downloadSettings) ?? .standardDefault).validated()
     }
 
     public var providerBaseURL: URL {

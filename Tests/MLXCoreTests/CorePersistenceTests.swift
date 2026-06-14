@@ -33,6 +33,27 @@ final class CorePersistenceTests: XCTestCase {
         XCTAssertEqual(reloaded.providerRoleAssignments.coding, "mlx-community/Coder")
     }
 
+    func testSettingsStorePersistsDownloadSettings() throws {
+        let root = try temporaryDirectory()
+        let store = SettingsStore(fileURL: root.appending(path: "config/settings.json"))
+        let settings = DashboardSettings(
+            downloadSettings: HuggingFaceDownloadSettings(
+                mode: .xetCustom,
+                xetConcurrency: 3,
+                downloadTimeoutSeconds: 120,
+                etagTimeoutSeconds: 45
+            )
+        )
+
+        try store.save(settings)
+
+        let reloaded = try store.load()
+        XCTAssertEqual(reloaded.downloadSettings.mode, .xetCustom)
+        XCTAssertEqual(reloaded.downloadSettings.xetConcurrency, 3)
+        XCTAssertEqual(reloaded.downloadSettings.downloadTimeoutSeconds, 120)
+        XCTAssertEqual(reloaded.downloadSettings.etagTimeoutSeconds, 45)
+    }
+
     func testMLXBaseURLUsesLocalhostEvenIfPersistedHostIsUnsafe() {
         let settings = DashboardSettings(mlxHost: "0.0.0.0", mlxPort: 8080)
 
@@ -52,6 +73,29 @@ final class CorePersistenceTests: XCTestCase {
 
         XCTAssertEqual(settings.activeModel, "mlx-community/Tiny")
         XCTAssertEqual(settings.providerRoleAssignments, ProviderRoleAssignments())
+    }
+
+    func testDashboardSettingsDefaultsDownloadSettingsWhenMissing() throws {
+        let json = Data(
+            #"{"activeModel":"mlx-community/Tiny","mlxHost":"127.0.0.1","mlxPort":8080,"providerHost":"127.0.0.1","providerPort":8123,"serverFlags":[],"providerDebugCaptureEnabled":true,"providerRoleAssignments":{}}"#.utf8
+        )
+
+        let settings = try JSONDecoder().decode(DashboardSettings.self, from: json)
+
+        XCTAssertEqual(settings.downloadSettings, .standardDefault)
+    }
+
+    func testDownloadSettingsClampsCustomValues() {
+        let settings = HuggingFaceDownloadSettings(
+            mode: .xetCustom,
+            xetConcurrency: 50,
+            downloadTimeoutSeconds: 2,
+            etagTimeoutSeconds: 999
+        ).validated()
+
+        XCTAssertEqual(settings.xetConcurrency, 16)
+        XCTAssertEqual(settings.downloadTimeoutSeconds, 10)
+        XCTAssertEqual(settings.etagTimeoutSeconds, 120)
     }
 
     func testTokenStoreCreatesStableTokenAndCanRegenerate() throws {
