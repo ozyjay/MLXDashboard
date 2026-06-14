@@ -622,6 +622,66 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertTrue(logger.messages.contains { $0.contains("role server unavailable; using active model") })
     }
 
+    func testEndpointAwareRouterReturnsUnavailableWhenDefaultEndpointMissing() async throws {
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Gemma" },
+            roleAssignmentsProvider: { ProviderRoleAssignments(plan: "mlx-community/Devstral") },
+            defaultEndpointProvider: { nil },
+            roleEndpointProvider: { _ in nil }
+        )
+
+        let response = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/v1/chat/completions",
+                headers: [:],
+                body: Data(#"{"model":"mlx-plan","messages":[{"role":"user","content":"plan"}],"stream":false}"#.utf8)
+            )
+        )
+
+        XCTAssertEqual(response.status, 503)
+        XCTAssertEqual(upstream.requests.count, 0)
+        XCTAssertEqual(upstream.endpoints.count, 0)
+    }
+
+    func testEndpointAwareRouterRecordsUnavailableRoutingWithoutInventedEndpoint() async throws {
+        let root = try temporaryDirectory()
+        let debugFile = root.appending(path: "provider-debug.jsonl")
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Gemma" },
+            roleAssignmentsProvider: { ProviderRoleAssignments(plan: "mlx-community/Devstral") },
+            defaultEndpointProvider: { nil },
+            roleEndpointProvider: { _ in nil },
+            debugRecorder: ProviderDebugRecorder(fileURL: debugFile, isEnabled: { true })
+        )
+
+        let response = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/v1/chat/completions",
+                headers: [:],
+                body: Data(#"{"model":"mlx-plan","messages":[{"role":"user","content":"plan"}],"stream":false}"#.utf8)
+            )
+        )
+
+        XCTAssertEqual(response.status, 503)
+        XCTAssertEqual(upstream.requests.count, 0)
+        XCTAssertEqual(upstream.endpoints.count, 0)
+
+        let record = try lastDebugRecord(in: debugFile)
+        let decision = try XCTUnwrap(record["routing_decision"] as? [String: Any])
+        XCTAssertEqual(decision["selected_alias"] as? String, "mlx-plan")
+        XCTAssertEqual(decision["inferred_role"] as? String, "plan")
+        XCTAssertEqual(decision["desired_role_model"] as? String, "mlx-community/Devstral")
+        XCTAssertEqual(decision["fallback_reason"] as? String, "no upstream endpoint available")
+        XCTAssertNil(decision["upstream_base_url"])
+        XCTAssertNil(decision["upstream_port"])
+    }
+
     func testRoutingDebugPayloadIncludesUpstreamEndpointFields() async throws {
         let root = try temporaryDirectory()
         let debugFile = root.appending(path: "provider-debug.jsonl")

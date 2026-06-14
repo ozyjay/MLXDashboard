@@ -347,6 +347,7 @@ public struct ProviderRouter: Sendable {
         if let endpoint = defaultEndpointProvider() {
             return endpoint
         }
+        guard legacyUpstream != nil else { return nil }
         guard let activeModel = activeModel() else { return nil }
         return compatibilityEndpoint(for: activeModel)
     }
@@ -804,9 +805,10 @@ public struct ProviderRouter: Sendable {
         let upstreamEndpoint = routingDecision.upstreamEndpoint
         debugContext.routingDecision = routingDecision
         if let selectedModel,
+           let upstreamEndpoint,
            Self.modeAliases.contains(selectedModel) {
             debugContext.aliasResolution = "\(selectedModel) -> \(routingDecision.upstreamModel)"
-            if routingDecision.upstreamModel == activeModel() {
+            if upstreamEndpoint.modelID == activeModel() {
                 eventLogger("Provider resolved model alias \(selectedModel) to active model \(routingDecision.upstreamModel)")
             } else {
                 eventLogger("Provider resolved model alias \(selectedModel) to upstream model \(routingDecision.upstreamModel)")
@@ -890,14 +892,14 @@ public struct ProviderRouter: Sendable {
                 fallbackReason = nil
             } else {
                 selectedEndpoint = defaultEndpoint
-                fallbackReason = defaultEndpoint == nil ? nil : "role server unavailable; using active model"
+                fallbackReason = defaultEndpoint == nil ? "no upstream endpoint available" : "role server unavailable; using active model"
             }
         } else if inferredRole != nil, desiredRoleModel == nil {
             selectedEndpoint = defaultEndpoint
-            fallbackReason = "no model assigned for inferred role"
+            fallbackReason = defaultEndpoint == nil ? "no upstream endpoint available" : "no model assigned for inferred role"
         } else {
             selectedEndpoint = defaultEndpoint
-            fallbackReason = nil
+            fallbackReason = defaultEndpoint == nil ? "no upstream endpoint available" : nil
         }
         return ProviderRoutingDecision(
             requestedModel: selectedModel,
