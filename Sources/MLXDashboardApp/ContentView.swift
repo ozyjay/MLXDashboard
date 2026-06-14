@@ -90,6 +90,17 @@ struct RoleServerStatusTablePolicy {
 
         return row.kind == .running || row.kind == .shared
     }
+
+    static func canRestart(_ row: RoleServerStatusRow, defaultEndpoint: RoleServerEndpoint?) -> Bool {
+        guard row.assignedModel != nil,
+              row.endpoint != nil,
+              row.endpoint?.port != defaultEndpoint?.port
+        else {
+            return false
+        }
+
+        return row.kind == .running
+    }
 }
 
 private struct AppHeader: View {
@@ -247,7 +258,13 @@ private struct RoleServerStatusTable: View {
                             Button("Restart") {
                                 Task { await viewModel.restartRoleServer(row.role) }
                             }
-                            .disabled(viewModel.serverState != .running || row.assignedModel == nil)
+                            .disabled(
+                                viewModel.serverState != .running
+                                || !RoleServerStatusTablePolicy.canRestart(
+                                    row,
+                                    defaultEndpoint: viewModel.serverPoolController.defaultEndpoint
+                                )
+                            )
 
                             Button("Stop") {
                                 viewModel.stopRoleServer(row.role)

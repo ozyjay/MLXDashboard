@@ -78,6 +78,53 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertTrue(RoleServerStatusTablePolicy.canStop(sharedRoleRow, defaultEndpoint: defaultEndpoint))
     }
 
+    func testRoleServerStatusTablePolicyRestartsOnlyNonDefaultRunningOwnerEndpoints() {
+        let defaultEndpoint = RoleServerEndpoint(
+            modelID: "base",
+            port: 8080,
+            baseURL: URL(string: "http://127.0.0.1:8080")!
+        )
+        let nonDefaultEndpoint = RoleServerEndpoint(
+            modelID: "plan",
+            port: 8081,
+            baseURL: URL(string: "http://127.0.0.1:8081")!
+        )
+
+        let fallbackRow = RoleServerStatusRow(
+            role: .plan,
+            assignedModel: "plan",
+            endpoint: defaultEndpoint,
+            kind: .fallback,
+            detail: "Using active model"
+        )
+        let defaultSharedRow = RoleServerStatusRow(
+            role: .ask,
+            assignedModel: "base",
+            endpoint: defaultEndpoint,
+            kind: .shared,
+            detail: "Shared on port 8080"
+        )
+        let sharedRoleRow = RoleServerStatusRow(
+            role: .coding,
+            assignedModel: "plan",
+            endpoint: nonDefaultEndpoint,
+            kind: .shared,
+            detail: "Shared on port 8081"
+        )
+        let runningRoleRow = RoleServerStatusRow(
+            role: .plan,
+            assignedModel: "plan",
+            endpoint: nonDefaultEndpoint,
+            kind: .running,
+            detail: "Running on port 8081"
+        )
+
+        XCTAssertFalse(RoleServerStatusTablePolicy.canRestart(fallbackRow, defaultEndpoint: defaultEndpoint))
+        XCTAssertFalse(RoleServerStatusTablePolicy.canRestart(defaultSharedRow, defaultEndpoint: defaultEndpoint))
+        XCTAssertFalse(RoleServerStatusTablePolicy.canRestart(sharedRoleRow, defaultEndpoint: defaultEndpoint))
+        XCTAssertTrue(RoleServerStatusTablePolicy.canRestart(runningRoleRow, defaultEndpoint: defaultEndpoint))
+    }
+
     func testControllerAvailabilityRefreshesWhenServerStateChanges() throws {
         let paths = try temporaryAppPaths()
         let process = FakeManagedProcess()
@@ -332,6 +379,45 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.roleServerStatuses, serverPoolController.roleStatuses)
         XCTAssertEqual(viewModel.roleServerStatuses.first(where: { $0.role == .ask })?.kind, .running)
         XCTAssertEqual(serverPoolController.endpoint(for: .ask)?.port, 8081)
+    }
+
+    func testRestartRoleServerLogsFailureWhenRolePortIsUnavailable() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let portChecker = MutableFakePortChecker()
+        let base = FakeManagedProcess()
+        let ask = FakeManagedProcess()
+        let serverPoolController = RoleServerPoolController(
+            processLauncher: FakeProcessLauncher(processes: [base, ask]),
+            portChecker: portChecker
+        )
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [
+                "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+                "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: "")
+            ])),
+            serverPoolController: serverPoolController
+        )
+        viewModel.settings.activeModel = "base"
+        viewModel.settings.providerRoleAssignments = ProviderRoleAssignments(ask: "ask")
+
+        await viewModel.startServer()
+        viewModel.stopRoleServer(.ask)
+        portChecker.unavailablePorts = [8081]
+
+        await viewModel.restartRoleServer(.ask)
+
+        XCTAssertEqual(serverPoolController.status(for: .ask).kind, .fallback)
+        XCTAssertNil(serverPoolController.endpoint(for: .ask))
+
+        let logText = try String(contentsOf: paths.logsDirectory.appending(path: "mlxdashboard.log"), encoding: .utf8)
+        XCTAssertTrue(logText.contains("Could not restart Ask role server: Port 8081 unavailable; using active model"))
+        XCTAssertFalse(logText.contains("Restarted Ask role server"))
     }
 
     func testProviderStartStopAvailabilityFollowsProviderState() throws {
@@ -1934,6 +2020,15 @@ private final class FakeProcessLauncher: ProcessLaunching {
 
 private struct FakePortChecker: ServerPortChecking {
     var isAvailable: Bool = true
+    var unavailablePorts: Set<Int> = []
+
+    func isPortAvailable(host: String, port: Int) -> Bool {
+        isAvailable && !unavailablePorts.contains(port)
+    }
+}
+
+private final class MutableFakePortChecker: ServerPortChecking, @unchecked Sendable {
+    var isAvailable = true
     var unavailablePorts: Set<Int> = []
 
     func isPortAvailable(host: String, port: Int) -> Bool {

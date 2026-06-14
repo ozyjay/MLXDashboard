@@ -387,11 +387,16 @@ final class DashboardViewModel: ObservableObject {
             try serverPoolController.restart(role: role, settings: settings, pythonExecutable: python)
             roleServerStatuses = serverPoolController.roleStatuses
             updateProviderEndpointState()
-            telemetry.appendLog("Restarted \(role.displayName.lowercased()) role server")
+            let status = serverPoolController.status(for: role)
+            if status.endpoint != nil, status.kind == .running || status.kind == .shared {
+                telemetry.appendLog("Restarted \(role.displayName) role server")
+            } else {
+                telemetry.appendLog("Could not restart \(role.displayName) role server: \(status.detail)")
+            }
         } catch {
             roleServerStatuses = serverPoolController.roleStatuses
             updateProviderEndpointState()
-            telemetry.appendLog("Failed to restart \(role.displayName.lowercased()) role server: \(error.localizedDescription)")
+            telemetry.appendLog("Failed to restart \(role.displayName) role server: \(error.localizedDescription)")
         }
     }
 

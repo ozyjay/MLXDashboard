@@ -347,6 +347,36 @@ final class ServerControlTests: XCTestCase {
         XCTAssertEqual(Set(controller.processesByPort.keys), [8080, 8081])
     }
 
+    func testRestartingSharedNonDefaultRoleDoesNotTerminateOrRelaunchSharedProcess() throws {
+        let base = FakeManagedProcess()
+        let shared = FakeManagedProcess()
+        let controller = RoleServerPoolController(
+            processLauncher: FakeProcessLauncher(processes: [base, shared]),
+            portChecker: FakePortChecker(isAvailable: true)
+        )
+        let settings = DashboardSettings(
+            activeModel: "base",
+            providerRoleAssignments: ProviderRoleAssignments(
+                ask: "shared",
+                coding: "shared"
+            )
+        )
+
+        try controller.start(settings: settings, pythonExecutable: URL(filePath: "/usr/bin/python3"))
+
+        try controller.restart(
+            role: .ask,
+            settings: settings,
+            pythonExecutable: URL(filePath: "/usr/bin/python3")
+        )
+
+        XCTAssertFalse(shared.wasTerminated)
+        XCTAssertEqual(shared.launchCount, 1)
+        XCTAssertEqual(controller.endpoint(for: .ask)?.port, 8081)
+        XCTAssertEqual(controller.endpoint(for: .coding)?.port, 8081)
+        XCTAssertEqual(Set(controller.processesByPort.keys), [8080, 8081])
+    }
+
     func testProviderModelRolesHaveDeterministicRoutingOrder() {
         XCTAssertEqual(ProviderModelRole.orderedRoutingRoles, [.ask, .plan, .coding])
         XCTAssertEqual(ProviderModelRole.ask.displayName, "Ask")
@@ -460,6 +490,7 @@ private final class FakeManagedProcess: ManagedProcess {
     var arguments: [String] = []
     var environment: [String: String]?
     var wasLaunched = false
+    var launchCount = 0
     var wasTerminated = false
     var isRunning = false
     let errorToThrowOnLaunch: Error?
@@ -473,6 +504,7 @@ private final class FakeManagedProcess: ManagedProcess {
             throw errorToThrowOnLaunch
         }
         wasLaunched = true
+        launchCount += 1
         isRunning = true
     }
 
