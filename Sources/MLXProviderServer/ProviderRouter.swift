@@ -568,25 +568,22 @@ public struct ProviderRouter: Sendable {
         }
 
         let requestedModel = object["model"] as? String
-        if aliasResolution(for: requestedModel) != nil,
-           let activeModel = activeModel() {
-            eventLogger("Provider resolved model alias \(requestedModel ?? "") to active model \(activeModel)")
-        }
-        let model = defaultUpstreamEndpoint()?.modelID ?? activeModel() ?? requestedModel ?? "local"
+        let model = requestedModel ?? activeModel() ?? "local"
         let messages = object["messages"] as? [[String: Any]] ?? []
         let stream = object["stream"] as? Bool ?? true
-        let chatResponse = try await proxyChatCompletion(model: model, messages: messages, stream: stream, headers: request.headers)
+        let chatResult = try await proxyChatCompletion(model: model, messages: messages, stream: stream, headers: request.headers)
+        let chatResponse = chatResult.response
         guard chatResponse.status >= 200, chatResponse.status < 300 else {
             return chatResponse
         }
 
         if stream {
-            return androidStudioStreamingChatResponse(model: model, chatBody: chatResponse.body)
+            return androidStudioStreamingChatResponse(model: chatResult.model, chatBody: chatResponse.body)
         }
 
         let text = assistantText(fromChatCompletionBody: chatResponse.body)
         let payload: [String: Any] = [
-            "model": model,
+            "model": chatResult.model,
             "created_at": compatibilityTimestamp(),
             "message": [
                 "role": "assistant",
@@ -609,30 +606,27 @@ public struct ProviderRouter: Sendable {
         }
 
         let requestedModel = object["model"] as? String
-        if aliasResolution(for: requestedModel) != nil,
-           let activeModel = activeModel() {
-            eventLogger("Provider resolved model alias \(requestedModel ?? "") to active model \(activeModel)")
-        }
-        let model = defaultUpstreamEndpoint()?.modelID ?? activeModel() ?? requestedModel ?? "local"
+        let model = requestedModel ?? activeModel() ?? "local"
         let prompt = object["prompt"] as? String ?? ""
         let stream = object["stream"] as? Bool ?? true
-        let chatResponse = try await proxyChatCompletion(
+        let chatResult = try await proxyChatCompletion(
             model: model,
             messages: [["role": "user", "content": prompt]],
             stream: stream,
             headers: request.headers
         )
+        let chatResponse = chatResult.response
         guard chatResponse.status >= 200, chatResponse.status < 300 else {
             return chatResponse
         }
 
         if stream {
-            return androidStudioStreamingGenerateResponse(model: model, chatBody: chatResponse.body)
+            return androidStudioStreamingGenerateResponse(model: chatResult.model, chatBody: chatResponse.body)
         }
 
         let text = assistantText(fromChatCompletionBody: chatResponse.body)
         let payload: [String: Any] = [
-            "model": model,
+            "model": chatResult.model,
             "created_at": compatibilityTimestamp(),
             "response": text,
             "done": true,
@@ -652,16 +646,26 @@ public struct ProviderRouter: Sendable {
         messages: [[String: Any]],
         stream: Bool,
         headers: [String: String]
-    ) async throws -> ProviderResponse {
-        let chatBody = try JSONSerialization.data(
-            withJSONObject: [
-                "model": model,
-                "messages": messages,
-                "stream": stream
-            ]
-        )
+    ) async throws -> (response: ProviderResponse, model: String) {
+        let payload: [String: Any] = [
+            "model": model,
+            "messages": messages,
+            "stream": stream
+        ]
+        return try await proxyChatCompletion(payload: payload, headers: headers, fallbackModel: model)
+    }
+
+    private func proxyChatCompletion(
+        payload: [String: Any],
+        headers: [String: String],
+        fallbackModel: String
+    ) async throws -> (response: ProviderResponse, model: String) {
+        let chatBody = try JSONSerialization.data(withJSONObject: payload)
         let request = ProviderRequest(method: "POST", path: "/v1/chat/completions", headers: headers, body: chatBody)
-        return try await proxy(request, to: defaultUpstreamEndpoint())
+        let routed = requestWithSelectedUpstreamIfAvailable(request)
+        let selectedModel = selectedModel(from: routed.request.body) ?? fallbackModel
+        let response = try await proxy(routed.request, to: routed.upstreamEndpoint ?? defaultUpstreamEndpoint())
+        return (response, selectedModel)
     }
 
     private func androidStudioStreamingChatResponse(model: String, chatBody: Data) -> ProviderResponse {
@@ -1173,26 +1177,26 @@ public struct ProviderRouter: Sendable {
             return json(status: 400, #"{"error":"invalid responses request"}"#)
         }
 
-        let model = defaultUpstreamEndpoint()?.modelID ?? activeModelProvider().flatMap { $0.isEmpty ? nil : $0 } ?? responseRequest.model ?? "local"
-        let chatPayload = responseRequest.chatCompletionPayload(model: model)
-        let chatBody = try JSONSerialization.data(withJSONObject: chatPayload)
-        let chatRequest = ProviderRequest(
-            method: "POST",
-            path: "/v1/chat/completions",
+        let requestedModel = responseRequest.model
+            ?? activeModelProvider().flatMap { $0.isEmpty ? nil : $0 }
+            ?? "local"
+        let chatPayload = responseRequest.chatCompletionPayload(model: requestedModel)
+        let chatResult = try await proxyChatCompletion(
+            payload: chatPayload,
             headers: request.headers,
-            body: chatBody
+            fallbackModel: requestedModel
         )
-        let chatResponse = try await proxy(chatRequest, to: defaultUpstreamEndpoint())
+        let chatResponse = chatResult.response
         guard chatResponse.status >= 200, chatResponse.status < 300 else {
             return chatResponse
         }
 
         if responseRequest.stream {
-            return streamingResponsesResponse(model: model, chatBody: chatResponse.body)
+            return streamingResponsesResponse(model: chatResult.model, chatBody: chatResponse.body)
         }
 
         let assistantText = assistantText(fromChatCompletionBody: chatResponse.body)
-        let payload = responsesPayload(model: model, outputText: assistantText, chatBody: chatResponse.body)
+        let payload = responsesPayload(model: chatResult.model, outputText: assistantText, chatBody: chatResponse.body)
         let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data(#"{"object":"response","status":"completed","output":[]}"#.utf8)
         return ProviderResponse(status: 200, headers: ["content-type": "application/json"], body: data)
     }

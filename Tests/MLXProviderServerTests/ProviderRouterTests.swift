@@ -328,6 +328,84 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(responseJSON?["done"] as? Bool, true)
     }
 
+    func testAndroidCompatibilityChatRoutesToAssignedRoleEndpoint() async throws {
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Gemma" },
+            roleAssignmentsProvider: { ProviderRoleAssignments(plan: "mlx-community/Devstral") },
+            defaultEndpointProvider: {
+                ProviderUpstreamEndpoint(modelID: "mlx-community/Gemma", baseURL: URL(string: "http://127.0.0.1:8080")!, port: 8080)
+            },
+            roleEndpointProvider: { role in
+                role == .plan
+                ? ProviderUpstreamEndpoint(modelID: "mlx-community/Devstral", baseURL: URL(string: "http://127.0.0.1:8081")!, port: 8081)
+                : nil
+            }
+        )
+        let body = Data(#"{"model":"mlx-plan","messages":[{"role":"user","content":"plan"}],"stream":false}"#.utf8)
+
+        let response = try await router.handle(ProviderRequest(method: "POST", path: "/api/chat", headers: [:], body: body))
+
+        XCTAssertEqual(response.status, 200)
+        let endpoint = try XCTUnwrap(upstream.endpoints.last)
+        XCTAssertEqual(endpoint.modelID, "mlx-community/Devstral")
+        XCTAssertEqual(endpoint.port, 8081)
+        let proxied = try XCTUnwrap(upstream.requests.last)
+        let proxiedJSON = try JSONSerialization.jsonObject(with: proxied.body) as? [String: Any]
+        XCTAssertEqual(proxiedJSON?["model"] as? String, "mlx-community/Devstral")
+        let responseJSON = try JSONSerialization.jsonObject(with: response.body) as? [String: Any]
+        XCTAssertEqual(responseJSON?["model"] as? String, "mlx-community/Devstral")
+    }
+
+    func testAndroidCompatibilityGenerateRoutesToAssignedRoleEndpoint() async throws {
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Gemma" },
+            roleAssignmentsProvider: { ProviderRoleAssignments(plan: "mlx-community/Devstral") },
+            defaultEndpointProvider: {
+                ProviderUpstreamEndpoint(modelID: "mlx-community/Gemma", baseURL: URL(string: "http://127.0.0.1:8080")!, port: 8080)
+            },
+            roleEndpointProvider: { role in
+                role == .plan
+                ? ProviderUpstreamEndpoint(modelID: "mlx-community/Devstral", baseURL: URL(string: "http://127.0.0.1:8081")!, port: 8081)
+                : nil
+            }
+        )
+        let body = Data(#"{"model":"mlx-plan","prompt":"plan","stream":false}"#.utf8)
+
+        let response = try await router.handle(ProviderRequest(method: "POST", path: "/api/generate", headers: [:], body: body))
+
+        XCTAssertEqual(response.status, 200)
+        let endpoint = try XCTUnwrap(upstream.endpoints.last)
+        XCTAssertEqual(endpoint.modelID, "mlx-community/Devstral")
+        XCTAssertEqual(endpoint.port, 8081)
+        let proxied = try XCTUnwrap(upstream.requests.last)
+        let proxiedJSON = try JSONSerialization.jsonObject(with: proxied.body) as? [String: Any]
+        XCTAssertEqual(proxiedJSON?["model"] as? String, "mlx-community/Devstral")
+        let responseJSON = try JSONSerialization.jsonObject(with: response.body) as? [String: Any]
+        XCTAssertEqual(responseJSON?["model"] as? String, "mlx-community/Devstral")
+    }
+
+    func testAndroidCompatibilityChatFailsClosedWithoutAnyAvailableEndpoint() async throws {
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Gemma" },
+            roleAssignmentsProvider: { ProviderRoleAssignments(plan: "mlx-community/Devstral") },
+            defaultEndpointProvider: { nil },
+            roleEndpointProvider: { _ in nil }
+        )
+        let body = Data(#"{"model":"mlx-plan","messages":[{"role":"user","content":"plan"}],"stream":false}"#.utf8)
+
+        let response = try await router.handle(ProviderRequest(method: "POST", path: "/api/chat", headers: [:], body: body))
+
+        XCTAssertEqual(response.status, 503)
+        XCTAssertEqual(upstream.requests.count, 0)
+        XCTAssertEqual(upstream.endpoints.count, 0)
+    }
+
     func testProviderRewritesChatCompletionModelToActiveModel() async throws {
         let upstream = FakeUpstream()
         let logger = CapturingProviderLogger()
@@ -1007,6 +1085,38 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(responseJSON?["status"] as? String, "completed")
         XCTAssertEqual(responseJSON?["model"] as? String, "mlx-community/Tiny")
         XCTAssertEqual(try outputText(in: response.body), "Hello from chat.")
+    }
+
+    func testResponsesRouteToAssignedRoleEndpoint() async throws {
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Gemma" },
+            roleAssignmentsProvider: { ProviderRoleAssignments(plan: "mlx-community/Devstral") },
+            defaultEndpointProvider: {
+                ProviderUpstreamEndpoint(modelID: "mlx-community/Gemma", baseURL: URL(string: "http://127.0.0.1:8080")!, port: 8080)
+            },
+            roleEndpointProvider: { role in
+                role == .plan
+                ? ProviderUpstreamEndpoint(modelID: "mlx-community/Devstral", baseURL: URL(string: "http://127.0.0.1:8081")!, port: 8081)
+                : nil
+            }
+        )
+        let body = Data(#"{"model":"mlx-plan","input":"plan","temperature":0.2,"max_output_tokens":32}"#.utf8)
+
+        let response = try await router.handle(
+            ProviderRequest(method: "POST", path: "/v1/responses", headers: [:], body: body)
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let endpoint = try XCTUnwrap(upstream.endpoints.last)
+        XCTAssertEqual(endpoint.modelID, "mlx-community/Devstral")
+        XCTAssertEqual(endpoint.port, 8081)
+        let proxied = try XCTUnwrap(upstream.requests.last)
+        let proxiedJSON = try JSONSerialization.jsonObject(with: proxied.body) as? [String: Any]
+        XCTAssertEqual(proxiedJSON?["model"] as? String, "mlx-community/Devstral")
+        let responseJSON = try JSONSerialization.jsonObject(with: response.body) as? [String: Any]
+        XCTAssertEqual(responseJSON?["model"] as? String, "mlx-community/Devstral")
     }
 
     func testProviderTranslatesResponsesInputMessagesToChatCompletion() async throws {
