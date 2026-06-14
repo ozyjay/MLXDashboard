@@ -80,6 +80,110 @@ final class ServerControlTests: XCTestCase {
         XCTAssertEqual(plan.endpoint(for: .plan)?.port, 8081)
     }
 
+    func testRoleServerPoolStartsOneProcessPerUniqueModel() throws {
+        let gemma = FakeManagedProcess()
+        let devstral = FakeManagedProcess()
+        let launcher = FakeProcessLauncher(processes: [gemma, devstral])
+        let controller = RoleServerPoolController(
+            processLauncher: launcher,
+            portChecker: FakePortChecker(isAvailable: true)
+        )
+        let settings = DashboardSettings(
+            activeModel: "mlx-community/gemma4",
+            mlxPort: 8080,
+            providerRoleAssignments: ProviderRoleAssignments(
+                ask: "mlx-community/gemma4",
+                plan: "mlx-community/devstral",
+                coding: "mlx-community/gemma4"
+            )
+        )
+
+        try controller.start(settings: settings, pythonExecutable: URL(filePath: "/usr/bin/python3"))
+
+        XCTAssertTrue(gemma.wasLaunched)
+        XCTAssertTrue(devstral.wasLaunched)
+        XCTAssertEqual(gemma.arguments, [
+            "-m", "mlx_lm", "server", "--host", "127.0.0.1", "--port", "8080", "--model", "mlx-community/gemma4"
+        ])
+        XCTAssertEqual(devstral.arguments, [
+            "-m", "mlx_lm", "server", "--host", "127.0.0.1", "--port", "8081", "--model", "mlx-community/devstral"
+        ])
+        XCTAssertEqual(controller.state, .running)
+        XCTAssertEqual(controller.endpoint(for: .ask)?.port, 8080)
+        XCTAssertEqual(controller.endpoint(for: .plan)?.port, 8081)
+        XCTAssertEqual(controller.endpoint(for: .coding)?.port, 8080)
+        XCTAssertEqual(controller.roleStatuses.map(\.kind), [.shared, .running, .shared])
+    }
+
+    func testRoleServerPoolStartsDefaultWithoutModelArgumentWhenActiveModelMissing() throws {
+        let base = FakeManagedProcess()
+        let plan = FakeManagedProcess()
+        let launcher = FakeProcessLauncher(processes: [base, plan])
+        let controller = RoleServerPoolController(
+            processLauncher: launcher,
+            portChecker: FakePortChecker(isAvailable: true)
+        )
+        let settings = DashboardSettings(
+            activeModel: nil,
+            mlxPort: 8080,
+            providerRoleAssignments: ProviderRoleAssignments(plan: "plan")
+        )
+
+        try controller.start(settings: settings, pythonExecutable: URL(filePath: "/usr/bin/python3"))
+
+        XCTAssertEqual(base.arguments, ["-m", "mlx_lm", "server", "--host", "127.0.0.1", "--port", "8080"])
+        XCTAssertEqual(plan.arguments, ["-m", "mlx_lm", "server", "--host", "127.0.0.1", "--port", "8081", "--model", "plan"])
+        XCTAssertNil(controller.defaultEndpoint?.modelID)
+        XCTAssertEqual(controller.endpoint(for: .plan)?.modelID, "plan")
+    }
+
+    func testRoleServerPoolStopsEveryOwnedProcess() throws {
+        let base = FakeManagedProcess()
+        let ask = FakeManagedProcess()
+        let plan = FakeManagedProcess()
+        let launcher = FakeProcessLauncher(processes: [base, ask, plan])
+        let controller = RoleServerPoolController(
+            processLauncher: launcher,
+            portChecker: FakePortChecker(isAvailable: true)
+        )
+        let settings = DashboardSettings(
+            activeModel: "base",
+            providerRoleAssignments: ProviderRoleAssignments(ask: "ask", plan: "plan")
+        )
+
+        try controller.start(settings: settings, pythonExecutable: URL(filePath: "/usr/bin/python3"))
+        controller.stopAll()
+
+        XCTAssertTrue(base.wasTerminated)
+        XCTAssertTrue(ask.wasTerminated)
+        XCTAssertTrue(plan.wasTerminated)
+        XCTAssertEqual(controller.state, .stopped)
+        XCTAssertNil(controller.defaultEndpoint)
+        XCTAssertEqual(controller.roleEndpoints, [:])
+    }
+
+    func testRoleServerPoolKeepsDefaultRunningWhenAdditionalRolePortUnavailable() throws {
+        let base = FakeManagedProcess()
+        let launcher = FakeProcessLauncher(processes: [base])
+        let controller = RoleServerPoolController(
+            processLauncher: launcher,
+            portChecker: FakePortChecker(unavailablePorts: [8081])
+        )
+        let settings = DashboardSettings(
+            activeModel: "base",
+            mlxPort: 8080,
+            providerRoleAssignments: ProviderRoleAssignments(plan: "plan")
+        )
+
+        try controller.start(settings: settings, pythonExecutable: URL(filePath: "/usr/bin/python3"))
+
+        XCTAssertTrue(base.wasLaunched)
+        XCTAssertEqual(controller.state, .running)
+        XCTAssertEqual(controller.endpoint(for: .plan), nil)
+        XCTAssertEqual(controller.status(for: .plan).kind, .fallback)
+        XCTAssertEqual(controller.status(for: .plan).detail, "Port 8081 unavailable; using active model")
+    }
+
     func testProviderModelRolesHaveDeterministicRoutingOrder() {
         XCTAssertEqual(ProviderModelRole.orderedRoutingRoles, [.ask, .plan, .coding])
         XCTAssertEqual(ProviderModelRole.ask.displayName, "Ask")
@@ -203,18 +307,32 @@ private final class FakeManagedProcess: ManagedProcess {
     }
 }
 
-private struct FakeProcessLauncher: ProcessLaunching {
-    let process: FakeManagedProcess
+private final class FakeProcessLauncher: ProcessLaunching {
+    var processes: [FakeManagedProcess]
+
+    init(process: FakeManagedProcess = FakeManagedProcess()) {
+        self.processes = [process]
+    }
+
+    init(processes: [FakeManagedProcess]) {
+        self.processes = processes
+    }
 
     func makeProcess() -> ManagedProcess {
-        process
+        if processes.isEmpty {
+            let process = FakeManagedProcess()
+            processes.append(process)
+            return process
+        }
+        return processes.removeFirst()
     }
 }
 
 private struct FakePortChecker: ServerPortChecking {
-    let isAvailable: Bool
+    var isAvailable: Bool = true
+    var unavailablePorts: Set<Int> = []
 
     func isPortAvailable(host: String, port: Int) -> Bool {
-        isAvailable
+        isAvailable && !unavailablePorts.contains(port)
     }
 }
