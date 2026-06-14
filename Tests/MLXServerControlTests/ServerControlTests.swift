@@ -184,6 +184,71 @@ final class ServerControlTests: XCTestCase {
         XCTAssertEqual(controller.status(for: .plan).detail, "Port 8081 unavailable; using active model")
     }
 
+    func testRoleServerPoolClearsLifecycleStateWhenDefaultPortUnavailable() {
+        let process = FakeManagedProcess()
+        let controller = RoleServerPoolController(
+            processLauncher: FakeProcessLauncher(process: process),
+            portChecker: FakePortChecker(unavailablePorts: [8080])
+        )
+        let settings = DashboardSettings(
+            activeModel: "base",
+            mlxPort: 8080,
+            providerRoleAssignments: ProviderRoleAssignments(plan: "plan")
+        )
+
+        XCTAssertThrowsError(try controller.start(settings: settings, pythonExecutable: URL(filePath: "/usr/bin/python3")))
+
+        XCTAssertFalse(process.wasLaunched)
+        XCTAssertEqual(controller.state, .failed)
+        XCTAssertNil(controller.defaultEndpoint)
+        XCTAssertEqual(controller.roleEndpoints, [:])
+        XCTAssertEqual(controller.roleStatuses.map(\.kind), [.unassigned, .unassigned, .unassigned])
+    }
+
+    func testRoleServerPoolTerminatesLaunchedProcessesAndClearsStateWhenLaunchThrows() {
+        let base = FakeManagedProcess()
+        let plan = FakeManagedProcess(errorToThrowOnLaunch: FakeManagedProcessError.launchFailed)
+        let controller = RoleServerPoolController(
+            processLauncher: FakeProcessLauncher(processes: [base, plan]),
+            portChecker: FakePortChecker(isAvailable: true)
+        )
+        let settings = DashboardSettings(
+            activeModel: "base",
+            providerRoleAssignments: ProviderRoleAssignments(plan: "plan")
+        )
+
+        XCTAssertThrowsError(try controller.start(settings: settings, pythonExecutable: URL(filePath: "/usr/bin/python3")))
+
+        XCTAssertTrue(base.wasLaunched)
+        XCTAssertTrue(base.wasTerminated)
+        XCTAssertEqual(controller.state, .failed)
+        XCTAssertNil(controller.defaultEndpoint)
+        XCTAssertEqual(controller.roleEndpoints, [:])
+        XCTAssertEqual(controller.roleStatuses.map(\.kind), [.unassigned, .unassigned, .unassigned])
+    }
+
+    func testRoleServerPoolMarksRoleFailedWhenRolePortUnavailableWithoutActiveModel() throws {
+        let base = FakeManagedProcess()
+        let controller = RoleServerPoolController(
+            processLauncher: FakeProcessLauncher(process: base),
+            portChecker: FakePortChecker(unavailablePorts: [8081])
+        )
+        let settings = DashboardSettings(
+            activeModel: nil,
+            mlxPort: 8080,
+            providerRoleAssignments: ProviderRoleAssignments(plan: "plan")
+        )
+
+        try controller.start(settings: settings, pythonExecutable: URL(filePath: "/usr/bin/python3"))
+
+        XCTAssertTrue(base.wasLaunched)
+        XCTAssertEqual(controller.state, .running)
+        XCTAssertNil(controller.endpoint(for: .plan))
+        XCTAssertEqual(controller.status(for: .plan).kind, .failed)
+        XCTAssertNil(controller.status(for: .plan).endpoint)
+        XCTAssertEqual(controller.status(for: .plan).detail, "Port 8081 unavailable; no active model fallback")
+    }
+
     func testProviderModelRolesHaveDeterministicRoutingOrder() {
         XCTAssertEqual(ProviderModelRole.orderedRoutingRoles, [.ask, .plan, .coding])
         XCTAssertEqual(ProviderModelRole.ask.displayName, "Ask")
@@ -288,6 +353,10 @@ private extension Array where Element == String {
     }
 }
 
+private enum FakeManagedProcessError: Error {
+    case launchFailed
+}
+
 private final class FakeManagedProcess: ManagedProcess {
     var executableURL: URL?
     var arguments: [String] = []
@@ -295,8 +364,16 @@ private final class FakeManagedProcess: ManagedProcess {
     var wasLaunched = false
     var wasTerminated = false
     var isRunning = false
+    let errorToThrowOnLaunch: Error?
+
+    init(errorToThrowOnLaunch: Error? = nil) {
+        self.errorToThrowOnLaunch = errorToThrowOnLaunch
+    }
 
     func launch() throws {
+        if let errorToThrowOnLaunch {
+            throw errorToThrowOnLaunch
+        }
         wasLaunched = true
         isRunning = true
     }

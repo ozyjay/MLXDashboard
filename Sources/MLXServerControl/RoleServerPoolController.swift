@@ -168,6 +168,7 @@ public final class RoleServerPoolController: ObservableObject {
                 host: DashboardSettings.localMLXHost,
                 port: defaultPort
             )
+            resetRuntimeState()
             state = .failed
             lastError = error.localizedDescription
             throw error
@@ -199,9 +200,7 @@ public final class RoleServerPoolController: ObservableObject {
             for process in launchedProcesses.values where process.isRunning {
                 process.terminate()
             }
-            processesByPort = [:]
-            defaultEndpoint = nil
-            roleEndpoints = [:]
+            resetRuntimeState()
             state = .failed
             lastError = String(describing: error)
             throw error
@@ -226,11 +225,7 @@ public final class RoleServerPoolController: ObservableObject {
         for process in processesByPort.values where process.isRunning {
             process.terminate()
         }
-        processesByPort = [:]
-        plan = nil
-        defaultEndpoint = nil
-        roleEndpoints = [:]
-        roleStatuses = Self.makeUnassignedStatuses()
+        resetRuntimeState()
         state = .stopped
     }
 
@@ -321,17 +316,29 @@ public final class RoleServerPoolController: ObservableObject {
             let plannedEndpoint = plan.endpoint(for: role) ?? plannedStatus.endpoint ?? defaultEndpoint
 
             guard let runningEndpoint = runningRoleEndpoints[role] else {
+                let activeFallbackAvailable = defaultEndpoint.modelID != nil
+                let kind: RoleServerStatusKind
+                let endpoint: RoleServerEndpoint?
                 let detail: String
-                if unavailablePorts.contains(plannedEndpoint.port) {
-                    detail = "Port \(plannedEndpoint.port) unavailable; using active model"
+
+                if unavailablePorts.contains(plannedEndpoint.port), !activeFallbackAvailable {
+                    kind = .failed
+                    endpoint = nil
+                    detail = "Port \(plannedEndpoint.port) unavailable; no active model fallback"
                 } else {
-                    detail = "Using active model"
+                    kind = .fallback
+                    endpoint = activeFallbackAvailable ? defaultEndpoint : nil
+                    if unavailablePorts.contains(plannedEndpoint.port) {
+                        detail = "Port \(plannedEndpoint.port) unavailable; using active model"
+                    } else {
+                        detail = "Using active model"
+                    }
                 }
                 return RoleServerStatusRow(
                     role: role,
                     assignedModel: assignedModel,
-                    endpoint: defaultEndpoint,
-                    kind: .fallback,
+                    endpoint: endpoint,
+                    kind: kind,
                     detail: detail
                 )
             }
@@ -372,5 +379,13 @@ public final class RoleServerPoolController: ObservableObject {
             kind: .unassigned,
             detail: "No model assigned"
         )
+    }
+
+    private func resetRuntimeState() {
+        processesByPort = [:]
+        plan = nil
+        defaultEndpoint = nil
+        roleEndpoints = [:]
+        roleStatuses = Self.makeUnassignedStatuses()
     }
 }
