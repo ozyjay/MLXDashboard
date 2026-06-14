@@ -754,16 +754,7 @@ private struct InstallProgressBanner: View {
                     .textSelection(.enabled)
             }
             if !displayedActivityRows.isEmpty {
-                VStack(alignment: .leading, spacing: 3) {
-                    ForEach(displayedActivityRows) { row in
-                        Text(row.message)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(showsFullActivity ? 2 : 1)
-                            .truncationMode(.middle)
-                            .textSelection(.enabled)
-                    }
-                }
+                activityRowsView
             }
             Text(progress.detail)
                 .font(.caption)
@@ -773,6 +764,32 @@ private struct InstallProgressBanner: View {
         }
         .padding(10)
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    @ViewBuilder
+    private var activityRowsView: some View {
+        if showsFullActivity {
+            ScrollView(.vertical) {
+                activityRowsList
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 160)
+        } else {
+            activityRowsList
+        }
+    }
+
+    private var activityRowsList: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            ForEach(displayedActivityRows) { row in
+                Text(row.message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(showsFullActivity ? 2 : 1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+        }
     }
 }
 
