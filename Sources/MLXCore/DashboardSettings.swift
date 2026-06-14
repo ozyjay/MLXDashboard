@@ -110,12 +110,27 @@ public struct HuggingFaceDownloadSettings: Codable, Equatable, Sendable {
         switch settings.mode {
         case .standard:
             return ["HF_HUB_DISABLE_XET": "1"]
-        case .xetConservative, .xetCustom:
+        case .xetConservative:
+            return [
+                "HF_XET_NUM_CONCURRENT_RANGE_GETS": "4",
+                "HF_HUB_DOWNLOAD_TIMEOUT": "60",
+                "HF_HUB_ETAG_TIMEOUT": "30"
+            ]
+        case .xetCustom:
             return [
                 "HF_XET_NUM_CONCURRENT_RANGE_GETS": String(settings.xetConcurrency),
                 "HF_HUB_DOWNLOAD_TIMEOUT": String(settings.downloadTimeoutSeconds),
                 "HF_HUB_ETAG_TIMEOUT": String(settings.etagTimeoutSeconds)
             ]
+        }
+    }
+
+    public var huggingFaceEnvironmentRemovals: [String] {
+        switch mode {
+        case .standard:
+            []
+        case .xetConservative, .xetCustom:
+            ["HF_HUB_DISABLE_XET"]
         }
     }
 

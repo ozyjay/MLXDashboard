@@ -129,6 +129,28 @@ final class CorePersistenceTests: XCTestCase {
         XCTAssertNil(environment["HF_XET_HIGH_PERFORMANCE"])
     }
 
+    func testConservativeDownloadEnvironmentIgnoresStaleCustomValues() {
+        let environment = HuggingFaceDownloadSettings(
+            mode: .xetConservative,
+            xetConcurrency: 16,
+            downloadTimeoutSeconds: 600,
+            etagTimeoutSeconds: 120
+        ).huggingFaceEnvironment
+
+        XCTAssertEqual(environment["HF_XET_NUM_CONCURRENT_RANGE_GETS"], "4")
+        XCTAssertEqual(environment["HF_HUB_DOWNLOAD_TIMEOUT"], "60")
+        XCTAssertEqual(environment["HF_HUB_ETAG_TIMEOUT"], "30")
+    }
+
+    func testXetDownloadEnvironmentRemovesInheritedDisableXetFlag() {
+        XCTAssertEqual(HuggingFaceDownloadSettings.standardDefault.huggingFaceEnvironmentRemovals, [])
+        XCTAssertEqual(HuggingFaceDownloadSettings.conservativeDefault.huggingFaceEnvironmentRemovals, ["HF_HUB_DISABLE_XET"])
+        XCTAssertEqual(
+            HuggingFaceDownloadSettings(mode: .xetCustom).huggingFaceEnvironmentRemovals,
+            ["HF_HUB_DISABLE_XET"]
+        )
+    }
+
     func testCustomDownloadEnvironmentUsesValidatedValues() {
         let environment = HuggingFaceDownloadSettings(
             mode: .xetCustom,

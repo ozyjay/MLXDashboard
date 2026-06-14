@@ -5,18 +5,29 @@ public struct Command: Sendable, Equatable {
     public var executableURL: URL
     public var arguments: [String]
     public var environment: [String: String]
+    public var environmentRemovals: [String]
     public var workingDirectory: URL?
 
     public init(
         executableURL: URL,
         arguments: [String],
         environment: [String: String] = [:],
+        environmentRemovals: [String] = [],
         workingDirectory: URL? = nil
     ) {
         self.executableURL = executableURL
         self.arguments = arguments
         self.environment = environment
+        self.environmentRemovals = environmentRemovals
         self.workingDirectory = workingDirectory
+    }
+
+    public func resolvedEnvironment(base: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {
+        var resolved = base
+        for key in environmentRemovals {
+            resolved.removeValue(forKey: key)
+        }
+        return resolved.merging(environment) { _, new in new }
     }
 }
 
@@ -71,8 +82,8 @@ public struct ShellCommandRunner: CommandRunning {
 
                 process.executableURL = command.executableURL
                 process.arguments = command.arguments
-                if !command.environment.isEmpty {
-                    process.environment = ProcessInfo.processInfo.environment.merging(command.environment) { _, new in new }
+                if !command.environment.isEmpty || !command.environmentRemovals.isEmpty {
+                    process.environment = command.resolvedEnvironment()
                 }
                 if let workingDirectory = command.workingDirectory {
                     process.currentDirectoryURL = workingDirectory

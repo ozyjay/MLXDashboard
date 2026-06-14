@@ -472,6 +472,7 @@ final class DashboardViewModel: ObservableObject {
         isInstallingModel = true
         let downloadSettings = forceStandardDownload ? .standardDefault : settings.downloadSettings.validated()
         let downloadEnvironment = downloadSettings.huggingFaceEnvironment
+        let downloadEnvironmentRemovals = downloadSettings.huggingFaceEnvironmentRemovals
         let isStandardDownload = downloadSettings.mode == .standard
         defer {
             stopDownloadActivityMonitor(installSessionID: installSessionID)
@@ -530,6 +531,7 @@ final class DashboardViewModel: ObservableObject {
                 modelID: model.id,
                 pythonExecutable: status.pythonExecutable,
                 downloadEnvironment: downloadEnvironment,
+                downloadEnvironmentRemovals: downloadEnvironmentRemovals,
                 progressHandler: { [weak self] progress in
                     Task { @MainActor [weak self] in
                         guard self?.canApplyDownloadCallback(modelID: model.id, installSessionID: installSessionID) == true else { return }

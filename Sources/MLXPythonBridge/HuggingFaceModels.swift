@@ -296,6 +296,7 @@ public struct HuggingFaceModelInstaller: Sendable {
             modelID: modelID,
             pythonExecutable: pythonExecutable,
             downloadEnvironment: downloadEnvironment,
+            downloadEnvironmentRemovals: disableXet ? [] : ["HF_HUB_DISABLE_XET"],
             progressHandler: progressHandler,
             activityHandler: activityHandler
         )
@@ -305,6 +306,7 @@ public struct HuggingFaceModelInstaller: Sendable {
         modelID: String,
         pythonExecutable: URL,
         downloadEnvironment: [String: String] = [:],
+        downloadEnvironmentRemovals: [String] = [],
         progressHandler: (@Sendable (HuggingFaceDownloadProgress) -> Void)? = nil,
         activityHandler: (@Sendable (HuggingFaceDownloadActivity) -> Void)? = nil
     ) async throws -> HuggingFaceInstallResult {
@@ -325,7 +327,8 @@ public struct HuggingFaceModelInstaller: Sendable {
         let result = try await runner.run(Command(
             executableURL: pythonExecutable,
             arguments: ["-c", script],
-            environment: environment
+            environment: environment,
+            environmentRemovals: downloadEnvironmentRemovals
         )) { output in
             if let progress = HuggingFaceDownloadProgress.parse(from: output) {
                 progressHandler?(progress)

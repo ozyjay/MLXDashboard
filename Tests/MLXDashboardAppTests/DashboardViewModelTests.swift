@@ -616,6 +616,54 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(installCommands.last?.environment["HF_HUB_ETAG_TIMEOUT"], "30")
     }
 
+    func testInstallSelectedModelUsesFixedConservativeEnvironmentWhenCustomValuesWereStored() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(
+            at: python.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let settingsStore = SettingsStore(fileURL: paths.settingsFile)
+        try settingsStore.save(DashboardSettings(
+            downloadSettings: HuggingFaceDownloadSettings(
+                mode: .xetConservative,
+                xetConcurrency: 16,
+                downloadTimeoutSeconds: 600,
+                etagTimeoutSeconds: 120
+            )
+        ))
+        let runner = FakeCommandRunner(results: [
+            "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "whoami": CommandResult(exitCode: 0, standardOutput: #"{"name":"octocat"}"#, standardError: ""),
+            "install": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/abc"}"#,
+                standardError: ""
+            )
+        ])
+        let viewModel = DashboardViewModel(
+            settingsStore: settingsStore,
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
+            modelInstaller: HuggingFaceModelInstaller(runner: runner),
+            authChecker: HuggingFaceAuthChecker(runner: runner)
+        )
+        viewModel.searchResults = [HuggingFaceModelSummary(id: "mlx-community/Tiny")]
+        viewModel.selectedSearchModelID = "mlx-community/Tiny"
+
+        await viewModel.installSelectedModel()
+
+        let installCommands = runner.commands.filter { ($0.arguments.last ?? "").contains("snapshot_download") }
+        XCTAssertNil(installCommands.last?.environment["HF_HUB_DISABLE_XET"])
+        XCTAssertEqual(installCommands.last?.environment["HF_XET_NUM_CONCURRENT_RANGE_GETS"], "4")
+        XCTAssertEqual(installCommands.last?.environment["HF_HUB_DOWNLOAD_TIMEOUT"], "60")
+        XCTAssertEqual(installCommands.last?.environment["HF_HUB_ETAG_TIMEOUT"], "30")
+        XCTAssertEqual(installCommands.last?.environmentRemovals, ["HF_HUB_DISABLE_XET"])
+    }
+
     func testInstallSelectedModelFinishesWithCompletedProgress() async throws {
         let paths = try temporaryAppPaths()
         let python = paths.venvDirectory.appending(path: "bin/python")

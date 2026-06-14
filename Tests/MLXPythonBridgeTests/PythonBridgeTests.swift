@@ -316,6 +316,43 @@ final class PythonBridgeTests: XCTestCase {
         XCTAssertNil(runner.commands.last?.environment["HF_HUB_DISABLE_XET"])
     }
 
+    func testHuggingFaceInstallerAppliesProvidedDownloadEnvironmentRemovals() async throws {
+        let runner = RecordingCommandRunner(result: CommandResult(
+            exitCode: 0,
+            standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/abc"}"#,
+            standardError: ""
+        ))
+        let installer = HuggingFaceModelInstaller(runner: runner)
+
+        _ = try await installer.install(
+            modelID: "mlx-community/Tiny",
+            pythonExecutable: URL(filePath: "/tmp/python"),
+            downloadEnvironment: ["HF_XET_NUM_CONCURRENT_RANGE_GETS": "2"],
+            downloadEnvironmentRemovals: ["HF_HUB_DISABLE_XET"]
+        )
+
+        XCTAssertEqual(runner.commands.last?.environment["HF_XET_NUM_CONCURRENT_RANGE_GETS"], "2")
+        XCTAssertEqual(runner.commands.last?.environmentRemovals, ["HF_HUB_DISABLE_XET"])
+    }
+
+    func testCommandResolvedEnvironmentRemovesInheritedValues() {
+        let command = Command(
+            executableURL: URL(filePath: "/tmp/python"),
+            arguments: ["-c", "print('ok')"],
+            environment: ["HF_XET_NUM_CONCURRENT_RANGE_GETS": "2"],
+            environmentRemovals: ["HF_HUB_DISABLE_XET"]
+        )
+
+        let environment = command.resolvedEnvironment(base: [
+            "HF_HUB_DISABLE_XET": "1",
+            "PATH": "/usr/bin"
+        ])
+
+        XCTAssertNil(environment["HF_HUB_DISABLE_XET"])
+        XCTAssertEqual(environment["HF_XET_NUM_CONCURRENT_RANGE_GETS"], "2")
+        XCTAssertEqual(environment["PATH"], "/usr/bin")
+    }
+
     func testHuggingFaceInstallerDisablesXetWhenRequested() async throws {
         let runner = RecordingCommandRunner(result: CommandResult(
             exitCode: 0,
