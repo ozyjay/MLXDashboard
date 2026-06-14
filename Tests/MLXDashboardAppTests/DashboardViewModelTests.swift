@@ -1385,18 +1385,18 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(progress.xetFallbackHint, "Xet download is stalled. Pause, then retry without Xet.")
     }
 
-    func testModelInstallProgressHidesActivityStatusTextOutsideDownloading() {
+    func testModelInstallProgressShowsActivityRowsForTerminalPhases() {
         let progress = ModelInstallProgress(
             modelID: "mlx-community/Tiny",
-            phase: .installed,
-            detail: "Installed.",
+            phase: .failed,
+            detail: "Install failed",
             activities: [
-                HuggingFaceDownloadActivity(message: "Xet transfer: connection struggling", tone: .warning, source: .xetLog)
+                HuggingFaceDownloadActivity(message: "Downloading config", tone: .info, source: .commandOutput)
             ]
         )
 
-        XCTAssertEqual(progress.activityMessages, [])
-        XCTAssertEqual(progress.activityRows, [])
+        XCTAssertEqual(progress.activityRows.map(\.message), ["Downloading config"])
+        XCTAssertEqual(progress.fullActivityRows.map(\.message), ["Downloading config"])
     }
 
     func testModelInstallProgressActivityRowsKeepDuplicateMessagesDistinct() {
@@ -1414,20 +1414,53 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertNotEqual(progress.activityRows[0].id, progress.activityRows[1].id)
     }
 
-    func testModelInstallProgressCapsActivityToLatestFiveEntries() {
+    func testModelInstallProgressRetainsFiftyActivitiesAndPreviewsLatestFive() {
         var progress = ModelInstallProgress(
             modelID: "mlx-community/Tiny",
             phase: .downloading,
-            detail: "Downloading."
+            detail: "Downloading"
         )
 
-        for index in 1...6 {
+        for index in 1...60 {
             progress = progress.appendingActivity(
                 HuggingFaceDownloadActivity(message: "event \(index)", tone: .info, source: .commandOutput)
             )
         }
 
-        XCTAssertEqual(progress.activities.map(\.message), ["event 2", "event 3", "event 4", "event 5", "event 6"])
+        XCTAssertEqual(progress.activities.count, 50)
+        XCTAssertEqual(progress.activities.first?.message, "event 11")
+        XCTAssertEqual(progress.activities.last?.message, "event 60")
+        XCTAssertEqual(progress.activityRows.map(\.message), ["event 56", "event 57", "event 58", "event 59", "event 60"])
+        XCTAssertEqual(progress.fullActivityRows.count, 50)
+    }
+
+    func testModelInstallProgressDisplayModeUsesDeterminateIndeterminateAndPhaseFallback() {
+        let waiting = ModelInstallProgress(
+            modelID: "mlx-community/Tiny",
+            phase: .downloading,
+            detail: "Downloading"
+        )
+        XCTAssertEqual(waiting.progressDisplayMode, .indeterminateDownload)
+
+        let transfer = ModelInstallProgress(
+            modelID: "mlx-community/Tiny",
+            phase: .downloading,
+            detail: "Downloading",
+            downloadProgress: HuggingFaceDownloadProgress(
+                fractionCompleted: 0.42,
+                percentText: "42%",
+                etaText: "7m 12s",
+                rateText: "13.4MB/s"
+            )
+        )
+        XCTAssertEqual(transfer.progressDisplayMode, .determinate(value: 0.42))
+
+        let preparing = ModelInstallProgress(
+            modelID: "mlx-community/Tiny",
+            phase: .preparing,
+            detail: "Preparing"
+        )
+        XCTAssertEqual(preparing.progressDisplayMode, .phaseFallback(value: 0.08))
     }
 
     func testInstallSelectedModelFinishesWithFailedProgress() async throws {

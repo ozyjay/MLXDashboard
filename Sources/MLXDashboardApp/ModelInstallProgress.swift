@@ -83,11 +83,20 @@ enum ModelInstallPhase: String, Equatable {
     }
 }
 
+enum ModelInstallProgressDisplayMode: Equatable {
+    case determinate(value: Double)
+    case indeterminateDownload
+    case phaseFallback(value: Double)
+}
+
 struct ModelInstallProgress: Equatable {
     struct ActivityRow: Equatable, Identifiable {
         var id: Int
         var message: String
     }
+
+    private let activityHistoryLimit = 50
+    private let compactActivityLimit = 5
 
     var modelID: String
     var phase: ModelInstallPhase
@@ -109,6 +118,16 @@ struct ModelInstallProgress: Equatable {
             return downloadProgress.fractionCompleted
         }
         return phase.fractionCompleted
+    }
+
+    var progressDisplayMode: ModelInstallProgressDisplayMode {
+        if phase == .downloading {
+            if let downloadProgress {
+                return .determinate(value: downloadProgress.fractionCompleted)
+            }
+            return .indeterminateDownload
+        }
+        return .phaseFallback(value: phase.fractionCompleted)
     }
 
     var isWaitingForDownloadData: Bool {
@@ -149,10 +168,23 @@ struct ModelInstallProgress: Equatable {
     }
 
     var activityRows: [ActivityRow] {
-        guard phase == .downloading else { return [] }
+        compactActivityRows(from: activities)
+    }
+
+    var fullActivityRows: [ActivityRow] {
         return activities.enumerated().map { offset, activity in
             ActivityRow(id: offset, message: activity.message)
         }
+    }
+
+    private func compactActivityRows(from activities: [HuggingFaceDownloadActivity]) -> [ActivityRow] {
+        let startID = max(activities.count - compactActivityLimit, 0)
+        return activities
+            .suffix(compactActivityLimit)
+            .enumerated()
+            .map { offset, activity in
+                ActivityRow(id: startID + offset, message: activity.message)
+            }
     }
 
     func appendingActivity(_ activity: HuggingFaceDownloadActivity) -> ModelInstallProgress {
@@ -160,8 +192,8 @@ struct ModelInstallProgress: Equatable {
 
         var copy = self
         copy.activities.append(activity)
-        if copy.activities.count > 5 {
-            copy.activities = Array(copy.activities.suffix(5))
+        if copy.activities.count > activityHistoryLimit {
+            copy.activities = Array(copy.activities.suffix(activityHistoryLimit))
         }
         return copy
     }
