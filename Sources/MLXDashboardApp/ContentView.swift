@@ -172,8 +172,93 @@ private struct ControllerTab: View {
                 Button("Install Packages") { Task { await viewModel.installPythonPackages() } }
                     .disabled(!viewModel.shouldOfferPythonPackageInstall)
             }
+            Divider()
+            ModelDownloadsSettingsView()
             Spacer()
         }
+    }
+}
+
+private struct ModelDownloadsSettingsView: View {
+    @EnvironmentObject private var viewModel: DashboardViewModel
+
+    private var downloadSettings: HuggingFaceDownloadSettings {
+        viewModel.settings.downloadSettings
+    }
+
+    private var customFieldsDisabled: Bool {
+        downloadSettings.mode != .xetCustom
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Model Downloads")
+                .font(.headline)
+            Text("Standard download is recommended until Xet is tested on this network.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Picker("Download mode", selection: modeBinding) {
+                ForEach(HuggingFaceDownloadMode.allCases, id: \.self) { mode in
+                    Text(mode.displayName).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 520)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Stepper(
+                    "Concurrency: \(downloadSettings.xetConcurrency)",
+                    value: integerBinding(\.xetConcurrency),
+                    in: 1...16
+                )
+                Stepper(
+                    "Download timeout: \(downloadSettings.downloadTimeoutSeconds)s",
+                    value: integerBinding(\.downloadTimeoutSeconds),
+                    in: 10...600,
+                    step: 10
+                )
+                Stepper(
+                    "ETag timeout: \(downloadSettings.etagTimeoutSeconds)s",
+                    value: integerBinding(\.etagTimeoutSeconds),
+                    in: 5...120,
+                    step: 5
+                )
+            }
+            .disabled(customFieldsDisabled)
+        }
+    }
+
+    private var modeBinding: Binding<HuggingFaceDownloadMode> {
+        Binding(
+            get: { downloadSettings.mode },
+            set: { mode in
+                if mode == .xetConservative {
+                    viewModel.updateDownloadSettings(.conservativeDefault)
+                    return
+                }
+                updateDownloadSettings { settings in
+                    settings.mode = mode
+                }
+            }
+        )
+    }
+
+    private func integerBinding(_ keyPath: WritableKeyPath<HuggingFaceDownloadSettings, Int>) -> Binding<Int> {
+        Binding(
+            get: { downloadSettings[keyPath: keyPath] },
+            set: { value in
+                updateDownloadSettings { settings in
+                    settings[keyPath: keyPath] = value
+                }
+            }
+        )
+    }
+
+    private func updateDownloadSettings(_ update: (inout HuggingFaceDownloadSettings) -> Void) {
+        var settings = downloadSettings
+        update(&settings)
+        viewModel.updateDownloadSettings(settings)
     }
 }
 
