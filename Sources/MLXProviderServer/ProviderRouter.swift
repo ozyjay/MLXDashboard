@@ -13,7 +13,7 @@ public struct ProviderRouter: Sendable {
     private let roleEndpointProvider: @Sendable (ProviderModelRole) -> ProviderUpstreamEndpoint?
     private let eventLogger: @Sendable (String) -> Void
     private let debugRecorder: ProviderDebugRecorder?
-    // Android Studio probes these local-provider discovery paths before using OpenAI-compatible chat routes.
+    // Local provider discovery paths complement the OpenAI-compatible chat routes.
     private let allowedPaths: Set<String> = [
         "/api/chat",
         "/api/generate",
@@ -22,6 +22,7 @@ public struct ProviderRouter: Sendable {
         "/api/tags",
         "/api/v0/models",
         "/api/version",
+        "/provider/v1/models",
         "/v1/models",
         "/v1/chat/completions",
         "/v1/completions",
@@ -200,8 +201,13 @@ public struct ProviderRouter: Sendable {
             return finish(modelResponse(for: requestedModel))
         }
 
+        if request.method == "GET", let requestedModel = providerMetadataModelID(from: request.path) {
+            eventLogger("Provider served GET /provider/v1/models/\(requestedModel)")
+            return finish(androidStudioV0ModelResponse(for: requestedModel))
+        }
+
         if request.method == "GET", let requestedModel = androidStudioV0ModelID(from: request.path) {
-            eventLogger("Provider served Android Studio compatibility GET /api/v0/models/\(requestedModel)")
+            eventLogger("Provider served legacy provider metadata GET /api/v0/models/\(requestedModel)")
             return finish(androidStudioV0ModelResponse(for: requestedModel))
         }
 
@@ -216,7 +222,12 @@ public struct ProviderRouter: Sendable {
         }
 
         if request.method == "GET", request.path == "/api/v0/models" {
-            eventLogger("Provider served Android Studio compatibility GET /api/v0/models")
+            eventLogger("Provider served legacy provider metadata GET /api/v0/models")
+            return finish(androidStudioV0ModelsResponse())
+        }
+
+        if request.method == "GET", request.path == "/provider/v1/models" {
+            eventLogger("Provider served GET /provider/v1/models")
             return finish(androidStudioV0ModelsResponse())
         }
 
@@ -289,6 +300,9 @@ public struct ProviderRouter: Sendable {
             path.removeLast()
         }
         if path == "/api/v0/models" || path.hasPrefix("/api/v0/models/") {
+            return path
+        }
+        if path == "/provider/v1/models" || path.hasPrefix("/provider/v1/models/") {
             return path
         }
         while path.hasPrefix("/api/v0/") {
@@ -816,6 +830,13 @@ public struct ProviderRouter: Sendable {
 
     private func androidStudioV0ModelID(from path: String) -> String? {
         let prefix = "/api/v0/models/"
+        guard path.hasPrefix(prefix), path.count > prefix.count else { return nil }
+        let encodedModel = String(path.dropFirst(prefix.count))
+        return encodedModel.removingPercentEncoding ?? encodedModel
+    }
+
+    private func providerMetadataModelID(from path: String) -> String? {
+        let prefix = "/provider/v1/models/"
         guard path.hasPrefix(prefix), path.count > prefix.count else { return nil }
         let encodedModel = String(path.dropFirst(prefix.count))
         return encodedModel.removingPercentEncoding ?? encodedModel

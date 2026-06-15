@@ -164,6 +164,43 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(upstream.requests, [])
     }
 
+    func testProviderServesCanonicalProviderModelMetadataRoutes() async throws {
+        let upstream = FakeUpstream()
+        let logger = CapturingProviderLogger()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit" },
+            eventLogger: logger.log
+        )
+
+        let models = try await router.handle(
+            ProviderRequest(method: "GET", path: "/provider/v1/models", headers: [:], body: Data())
+        )
+        let model = try await router.handle(
+            ProviderRequest(
+                method: "GET",
+                path: "/provider/v1/models/mlx-community%2FDevstral-Small-2-24B-Instruct-2512-4bit",
+                headers: [:],
+                body: Data()
+            )
+        )
+
+        XCTAssertEqual(models.status, 200)
+        let modelsJSON = try JSONSerialization.jsonObject(with: models.body) as? [String: Any]
+        let data = try XCTUnwrap(modelsJSON?["data"] as? [[String: Any]])
+        XCTAssertEqual(data.compactMap { $0["id"] as? String }, expectedModels(active: "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit"))
+
+        XCTAssertEqual(model.status, 200)
+        let modelJSON = try JSONSerialization.jsonObject(with: model.body) as? [String: Any]
+        XCTAssertEqual(modelJSON?["id"] as? String, "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit")
+        XCTAssertEqual(modelJSON?["generation_type"] as? String, "text")
+        XCTAssertEqual(modelJSON?["model_family"] as? String, "chat")
+        XCTAssertEqual(modelJSON?["state"] as? String, "loaded")
+        XCTAssertTrue(logger.messages.contains("Provider served GET /provider/v1/models"))
+        XCTAssertTrue(logger.messages.contains("Provider served GET /provider/v1/models/mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit"))
+        XCTAssertEqual(upstream.requests, [])
+    }
+
     func testProviderServesTextDiffusionMetadataWhenRunnable() async throws {
         let upstream = FakeUpstream()
         let router = ProviderRouter(
