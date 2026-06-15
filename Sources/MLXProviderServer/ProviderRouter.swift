@@ -272,19 +272,25 @@ public struct ProviderRouter: Sendable {
         let routed = requestWithSelectedUpstreamIfAvailable(request)
         let proxiedRequest = routed.request
         let upstreamEndpoint = routed.upstreamEndpoint ?? defaultUpstreamEndpoint()
-        if shouldStream(proxiedRequest) {
-            let response = try await proxyStream(proxiedRequest, to: upstreamEndpoint)
-            eventLogger("Provider streaming \(request.method) \(request.path) from upstream with status \(response.status)")
-            return finishStream(response, context: routed.debugContext, upstreamRequest: proxiedRequest)
-        }
+        do {
+            if shouldStream(proxiedRequest) {
+                let response = try await proxyStream(proxiedRequest, to: upstreamEndpoint)
+                eventLogger("Provider streaming \(request.method) \(request.path) from upstream with status \(response.status)")
+                return finishStream(response, context: routed.debugContext, upstreamRequest: proxiedRequest)
+            }
 
-        let response = try await proxy(proxiedRequest, to: upstreamEndpoint)
-        eventLogger("Provider proxied \(request.method) \(request.path) to upstream with status \(response.status)")
-        if response.status >= 400 {
-            eventLogger("Provider upstream error body for \(request.method) \(request.path) status \(response.status): \(sanitizedErrorBody(response.body))")
+            let response = try await proxy(proxiedRequest, to: upstreamEndpoint)
+            eventLogger("Provider proxied \(request.method) \(request.path) to upstream with status \(response.status)")
+            if response.status >= 400 {
+                eventLogger("Provider upstream error body for \(request.method) \(request.path) status \(response.status): \(sanitizedErrorBody(response.body))")
+                eventLogger("Provider upstream request summary for \(request.method) \(request.path): \(requestSummary(from: proxiedRequest.body))")
+            }
+            return finish(response, context: routed.debugContext)
+        } catch {
+            eventLogger("Provider upstream request failed for \(request.method) \(request.path): \(error.localizedDescription)")
             eventLogger("Provider upstream request summary for \(request.method) \(request.path): \(requestSummary(from: proxiedRequest.body))")
+            return finish(json(status: 502, #"{"error":"bad gateway"}"#), context: routed.debugContext)
         }
-        return finish(response, context: routed.debugContext)
     }
 
     private func requestWithCanonicalPath(_ request: ProviderRequest) -> ProviderRequest {
@@ -518,6 +524,11 @@ public struct ProviderRouter: Sendable {
     }
 
     private func modelMetadata(for model: String) -> ProviderModelMetadata {
+        if Self.modeAliases.contains(model),
+           let role = role(forAlias: model),
+           let roleModel = roleAssignmentsProvider().model(for: role) {
+            return modelMetadataProvider()[roleModel] ?? .inferred(modelID: roleModel)
+        }
         if Self.modeAliases.contains(model), let activeModel = activeModel() {
             return modelMetadataProvider()[activeModel] ?? .inferred(modelID: activeModel)
         }

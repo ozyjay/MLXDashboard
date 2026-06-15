@@ -53,7 +53,12 @@ public struct ProviderModelMetadata: Codable, Equatable, Sendable {
 
     public static func modelFamily(modelID: String, modelType: String?) -> ProviderModelFamily {
         let values = [modelType, modelID].compactMap { $0?.lowercased() }
-        if values.contains(where: { $0.contains("diffusion_gemma") || $0.contains("diffusion-gemma") }) {
+        if values.contains(where: { value in
+            value.contains("diffusion_gemma")
+                || value.contains("diffusion-gemma")
+                || value.contains("nemotron_labs_diffusion")
+                || value.contains("nemotron-labs-diffusion")
+        }) {
             return .diffusionText
         }
         return .chat

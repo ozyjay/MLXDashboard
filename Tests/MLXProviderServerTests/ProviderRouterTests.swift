@@ -201,6 +201,50 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(upstream.requests, [])
     }
 
+    func testProviderMetadataForAliasesFollowsAssignedRoleModels() async throws {
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit" },
+            modelMetadataProvider: {
+                [
+                    "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit": .inferred(
+                        modelID: "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit",
+                        modelType: "mistral3"
+                    ),
+                    "mlx-community/Nemotron-Labs-Diffusion-3B-4bit": .inferred(
+                        modelID: "mlx-community/Nemotron-Labs-Diffusion-3B-4bit",
+                        modelType: "nemotron_labs_diffusion"
+                    )
+                ]
+            },
+            roleAssignmentsProvider: {
+                ProviderRoleAssignments(
+                    ask: "mlx-community/Nemotron-Labs-Diffusion-3B-4bit",
+                    plan: "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit",
+                    coding: "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit"
+                )
+            }
+        )
+
+        let response = try await router.handle(
+            ProviderRequest(method: "GET", path: "/provider/v1/models", headers: [:], body: Data())
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let json = try JSONSerialization.jsonObject(with: response.body) as? [String: Any]
+        let data = try XCTUnwrap(json?["data"] as? [[String: Any]])
+        let ask = try XCTUnwrap(data.first { $0["id"] as? String == "mlx-ask" })
+        let plan = try XCTUnwrap(data.first { $0["id"] as? String == "mlx-plan" })
+        let fast = try XCTUnwrap(data.first { $0["id"] as? String == "mlx-fast" })
+        XCTAssertEqual(ask["generation_type"] as? String, "text")
+        XCTAssertEqual(ask["model_family"] as? String, "diffusion_text")
+        XCTAssertEqual(ask["state"] as? String, "loaded")
+        XCTAssertEqual(plan["model_family"] as? String, "chat")
+        XCTAssertEqual(fast["model_family"] as? String, "chat")
+        XCTAssertEqual(upstream.requests, [])
+    }
+
     func testProviderServesTextDiffusionMetadataWhenRunnable() async throws {
         let upstream = FakeUpstream()
         let router = ProviderRouter(
@@ -1213,6 +1257,50 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertFalse(logger.messages.contains { $0.contains("secret prompt") })
     }
 
+    func testProviderLogsThrownUpstreamFailuresForProxiedRequests() async throws {
+        let upstream = ThrowingUpstream(errorDescription: "diffusion server returned 502: model timed out")
+        let logger = CapturingProviderLogger()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit" },
+            roleAssignmentsProvider: {
+                ProviderRoleAssignments(ask: "mlx-community/Nemotron-Labs-Diffusion-3B-4bit")
+            },
+            defaultEndpointProvider: {
+                ProviderUpstreamEndpoint(
+                    modelID: "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit",
+                    baseURL: URL(string: "http://127.0.0.1:8080")!,
+                    port: 8080
+                )
+            },
+            roleEndpointProvider: { role in
+                role == .ask
+                ? ProviderUpstreamEndpoint(
+                    modelID: "mlx-community/Nemotron-Labs-Diffusion-3B-4bit",
+                    baseURL: URL(string: "http://127.0.0.1:8081")!,
+                    port: 8081
+                )
+                : nil
+            },
+            eventLogger: logger.log
+        )
+        let body = Data(#"{"model":"mlx-ask","messages":[{"role":"user","content":"secret prompt"}],"stream":false}"#.utf8)
+
+        let response = try await router.handle(
+            ProviderRequest(method: "POST", path: "/v1/chat/completions", headers: [:], body: body)
+        )
+
+        XCTAssertEqual(response.status, 502)
+        XCTAssertEqual(String(data: response.body, encoding: .utf8), #"{"error":"bad gateway"}"#)
+        XCTAssertTrue(logger.messages.contains {
+            $0 == "Provider upstream request failed for POST /v1/chat/completions: diffusion server returned 502: model timed out"
+        })
+        XCTAssertTrue(logger.messages.contains {
+            $0 == "Provider upstream request summary for POST /v1/chat/completions: keys=[messages,model,stream], model=mlx-community/Nemotron-Labs-Diffusion-3B-4bit, stream=false, message_count=1"
+        })
+        XCTAssertFalse(logger.messages.contains { $0.contains("secret prompt") })
+    }
+
     func testProviderNormalizesStructuredChatMessagesForMLXUpstream() async throws {
         let upstream = FakeUpstream()
         let logger = CapturingProviderLogger()
@@ -1771,6 +1859,26 @@ private final class FakeUpstream: ProviderUpstreamClient, ProviderUpstreamProxyC
             return ProviderResponse(status: 200, headers: ["content-type": "text/event-stream"], body: Data(stream.utf8))
         default:
             return ProviderResponse(status: 404, headers: [:], body: notFoundBody)
+        }
+    }
+}
+
+private struct ThrowingUpstream: ProviderUpstreamProxyClient {
+    let errorDescription: String
+
+    func proxy(_ request: ProviderRequest, to endpoint: ProviderUpstreamEndpoint) async throws -> ProviderResponse {
+        throw UpstreamFailure(description: errorDescription)
+    }
+
+    func proxyStream(_ request: ProviderRequest, to endpoint: ProviderUpstreamEndpoint) async throws -> ProviderStreamedResponse {
+        throw UpstreamFailure(description: errorDescription)
+    }
+
+    private struct UpstreamFailure: LocalizedError {
+        let description: String
+
+        var errorDescription: String? {
+            description
         }
     }
 }
