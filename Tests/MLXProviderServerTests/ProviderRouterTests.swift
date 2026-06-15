@@ -226,6 +226,41 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(upstream.requests, [])
     }
 
+    func testProviderV0ModelsExcludesLoadedMetadataOnlyModelsButIncludesUnsupportedModels() async throws {
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Tiny" },
+            modelMetadataProvider: {
+                [
+                    "mlx-community/Other-Installed": ProviderModelMetadata(),
+                    "mlx-community/Diffusion-Gemma": ProviderModelMetadata(
+                        modelFamily: .diffusionText,
+                        state: .unsupported,
+                        unsupportedReason: "Unsupported by installed mlx-lm: diffusion_gemma"
+                    )
+                ]
+            }
+        )
+
+        let response = try await router.handle(
+            ProviderRequest(method: "GET", path: "/api/v0/models", headers: [:], body: Data())
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let json = try JSONSerialization.jsonObject(with: response.body) as? [String: Any]
+        let data = try XCTUnwrap(json?["data"] as? [[String: Any]])
+        XCTAssertEqual(
+            data.compactMap { $0["id"] as? String },
+            ["mlx-ask", "mlx-plan", "mlx-fast", "mlx-community/Tiny", "mlx-community/Diffusion-Gemma"]
+        )
+        XCTAssertNil(data.first { $0["id"] as? String == "mlx-community/Other-Installed" })
+        let unsupported = try XCTUnwrap(data.first { $0["id"] as? String == "mlx-community/Diffusion-Gemma" })
+        XCTAssertEqual(unsupported["state"] as? String, "unsupported")
+        XCTAssertEqual(unsupported["unsupported_reason"] as? String, "Unsupported by installed mlx-lm: diffusion_gemma")
+        XCTAssertEqual(upstream.requests, [])
+    }
+
     func testProviderV1ModelsOnlyAdvertisesLoadedModels() async throws {
         let upstream = FakeUpstream()
         let router = ProviderRouter(
@@ -1245,6 +1280,60 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(chat.headers["content-type"], "text/event-stream")
         let stream = try XCTUnwrap(String(data: chat.body, encoding: .utf8))
         XCTAssertTrue(stream.contains(#""content":"Hel""#))
+        XCTAssertTrue(stream.contains("data: [DONE]"))
+        XCTAssertEqual(upstream.requests.map(\.path), ["/v1/chat/completions"])
+    }
+
+    func testProviderRoutesRunnableTextDiffusionChatCompletionsAsText() async throws {
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Diffusion-Gemma" },
+            modelMetadataProvider: {
+                [
+                    "mlx-community/Diffusion-Gemma": ProviderModelMetadata(modelFamily: .diffusionText)
+                ]
+            }
+        )
+        let body = Data(#"{"model":"mlx-community/Diffusion-Gemma","messages":[{"role":"user","content":"hi"}],"stream":false}"#.utf8)
+
+        let response = try await router.handle(
+            ProviderRequest(method: "POST", path: "/v1/chat/completions", headers: [:], body: body)
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let responseJSON = try JSONSerialization.jsonObject(with: response.body) as? [String: Any]
+        let choices = try XCTUnwrap(responseJSON?["choices"] as? [[String: Any]])
+        let message = try XCTUnwrap(choices.first?["message"] as? [String: Any])
+        XCTAssertEqual(message["content"] as? String, "Hello from chat.")
+        let proxied = try XCTUnwrap(upstream.requests.last)
+        XCTAssertEqual(proxied.path, "/v1/chat/completions")
+        let proxiedJSON = try JSONSerialization.jsonObject(with: proxied.body) as? [String: Any]
+        XCTAssertEqual(proxiedJSON?["model"] as? String, "mlx-community/Diffusion-Gemma")
+    }
+
+    func testProviderStreamsRunnableTextDiffusionChatCompletionsAsOpenAITextDeltas() async throws {
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Diffusion-Gemma" },
+            modelMetadataProvider: {
+                [
+                    "mlx-community/Diffusion-Gemma": ProviderModelMetadata(modelFamily: .diffusionText)
+                ]
+            }
+        )
+        let body = Data(#"{"model":"mlx-community/Diffusion-Gemma","messages":[{"role":"user","content":"hi"}],"stream":true}"#.utf8)
+
+        let response = try await router.handle(
+            ProviderRequest(method: "POST", path: "/v1/chat/completions", headers: [:], body: body)
+        )
+
+        XCTAssertEqual(response.status, 200)
+        XCTAssertEqual(response.headers["content-type"], "text/event-stream")
+        let stream = try XCTUnwrap(String(data: response.body, encoding: .utf8))
+        XCTAssertTrue(stream.contains(#"data: {"choices":[{"delta":{"content":"Hel"},"finish_reason":null}]}"#))
+        XCTAssertTrue(stream.contains(#"data: {"choices":[{"delta":{"content":"lo"},"finish_reason":null}]}"#))
         XCTAssertTrue(stream.contains("data: [DONE]"))
         XCTAssertEqual(upstream.requests.map(\.path), ["/v1/chat/completions"])
     }

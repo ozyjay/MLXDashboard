@@ -9,7 +9,7 @@ Native macOS SwiftUI dashboard for owning a local `mlx-lm` server, installing ML
 
 ## MLXChat Provider Contract
 
-MLXDashboard exposes a localhost-only provider for MLXChat. `/v1/models` and its `/api/v1/models` compatibility spelling remain the OpenAI-compatible model list used for normal chat routing and role aliases, and only advertise runnable provider models. `/api/v0/models` and `/api/v0/models/{model}` include additional optional capability metadata for clients that need to decide whether a discovered model is usable:
+MLXDashboard exposes a localhost-only provider for MLXChat. `/v1/models` and its `/api/v1/models` compatibility spelling remain the OpenAI-compatible model list used for normal chat routing and role aliases, and only advertise runnable provider models: the mode aliases plus the active runnable local model. `/api/v0/models` and `/api/v0/models/{model}` include optional capability metadata for those advertised models, and may also include known non-runnable models so clients can show an explanatory unavailable state. Loaded metadata-only catalogue or registry entries are not advertised unless they are the active provider model:
 
 - `generation_type: "text"`
 - `model_family: "chat"` for normal chat/LLM models

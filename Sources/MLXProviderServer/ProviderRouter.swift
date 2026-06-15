@@ -394,8 +394,10 @@ public struct ProviderRouter: Sendable {
     }
 
     private func androidStudioV0AdvertisedModels() -> [String] {
+        let metadata = modelMetadataProvider()
         let activeModels = activeModel().map { Self.modeAliases + [$0] } ?? []
-        return modelMetadataProvider().keys.sorted().reduce(into: activeModels) { models, model in
+        return metadata.keys.sorted().reduce(into: activeModels) { models, model in
+            guard metadata[model]?.state != .loaded else { return }
             if !models.contains(model) {
                 models.append(model)
             }
