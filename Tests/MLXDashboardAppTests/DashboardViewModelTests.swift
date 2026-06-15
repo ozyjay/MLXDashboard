@@ -19,6 +19,10 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(DashboardLayoutPolicy.activeModelMinHeight, 240)
     }
 
+    func testDashboardSectionDefaultsToDashboardLandingView() {
+        XCTAssertEqual(DashboardSection.defaultSelection, .dashboard)
+    }
+
     func testControllerButtonPolicyFollowsServerState() {
         XCTAssertTrue(ControllerButtonPolicy.canStartServer(state: .stopped))
         XCTAssertTrue(ControllerButtonPolicy.canStartServer(state: .failed))
@@ -441,15 +445,15 @@ final class DashboardViewModelTests: XCTestCase {
 
     func testRunningProviderUsesActiveModelSelectedAfterProviderStart() async throws {
         let paths = try temporaryAppPaths()
+        let registry = ModelRegistry(fileURL: paths.modelRegistryFile)
+        registry.upsert(ModelRecord(id: "mlx-community/Tiny", status: .installed, localPath: "/tmp/tiny"))
+        try registry.save()
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
-            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            registry: registry,
             environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
         )
         viewModel.settings.providerPort = 18123
-        viewModel.installedModels = [
-            ModelRecord(id: "mlx-community/Tiny", status: .installed, localPath: "/tmp/tiny")
-        ]
 
         do {
             try viewModel.startProvider()
@@ -488,11 +492,20 @@ final class DashboardViewModelTests: XCTestCase {
         viewModel.settings.activeModel = "mlx-community/Manual"
         viewModel.saveSettings()
 
-        let url = URL(string: "http://127.0.0.1:\(ports.providerPort)/v1/models")!
-        let (data, response) = try await URLSession.shared.data(from: url)
+        let v1URL = URL(string: "http://127.0.0.1:\(ports.providerPort)/v1/models")!
+        let (v1Data, v1Response) = try await URLSession.shared.data(from: v1URL)
 
-        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
-        XCTAssertEqual(try Self.modelIDs(in: data), ["mlx-ask", "mlx-plan", "mlx-fast", "mlx-community/Manual"])
+        XCTAssertEqual((v1Response as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(try Self.modelIDs(in: v1Data), [])
+
+        let v0URL = URL(string: "http://127.0.0.1:\(ports.providerPort)/api/v0/models")!
+        let (v0Data, v0Response) = try await URLSession.shared.data(from: v0URL)
+
+        XCTAssertEqual((v0Response as? HTTPURLResponse)?.statusCode, 200)
+        let models = try Self.models(in: v0Data)
+        let manual = try XCTUnwrap(models.first { $0["id"] as? String == "mlx-community/Manual" })
+        XCTAssertEqual(manual["state"] as? String, "not_installed")
+        XCTAssertEqual(manual["reason"] as? String, "Model is not installed in the local Hugging Face cache.")
     }
 
     func testSearchResultActionMarksInstalledModelsFromRegistry() throws {
@@ -614,7 +627,7 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(unavailableStatus, 503)
     }
 
-    func testDefaultsModelQueryToDevstralSmall() throws {
+    func testDefaultsModelQueryToEmptyString() throws {
         let paths = try temporaryAppPaths()
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
@@ -622,7 +635,7 @@ final class DashboardViewModelTests: XCTestCase {
             environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
         )
 
-        XCTAssertEqual(viewModel.modelQuery, "Devstral-Small")
+        XCTAssertEqual(viewModel.modelQuery, "")
     }
 
     func testSearchDefaultModelsIfReadyRunsSearchWhenPackagesAreReady() async throws {
@@ -2255,9 +2268,12 @@ final class DashboardViewModelTests: XCTestCase {
     }
 
     private static func modelIDs(in data: Data) throws -> [String] {
+        try models(in: data).compactMap { $0["id"] as? String }
+    }
+
+    private static func models(in data: Data) throws -> [[String: Any]] {
         let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        let models = object?["data"] as? [[String: Any]]
-        return models?.compactMap { $0["id"] as? String } ?? []
+        return object?["data"] as? [[String: Any]] ?? []
     }
 }
 

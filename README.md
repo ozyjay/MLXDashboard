@@ -9,12 +9,13 @@ Native macOS SwiftUI dashboard for owning a local `mlx-lm` server, installing ML
 
 ## MLXChat Provider Contract
 
-MLXDashboard exposes a localhost-only provider for MLXChat. `/v1/models` remains the OpenAI-compatible model list used for normal chat routing and role aliases. `/api/v0/models` and `/api/v0/models/{model}` include additional optional capability metadata for clients that need to decide whether a discovered model is usable:
+MLXDashboard exposes a localhost-only provider for MLXChat. `/v1/models` and its `/api/v1/models` compatibility spelling remain the OpenAI-compatible model list used for normal chat routing and role aliases, and only advertise runnable provider models. `/api/v0/models` and `/api/v0/models/{model}` include additional optional capability metadata for clients that need to decide whether a discovered model is usable:
 
 - `generation_type: "text"`
 - `model_family: "chat"` for normal chat/LLM models
 - `model_family: "diffusion_text"` for runnable text diffusion models such as `diffusion_gemma`
 - `state: "loaded"` for runnable models
-- `state: "unsupported"` with `unsupported_reason` when the installed runtime cannot serve the model
+- `state: "unsupported"` with `reason` and `unsupported_reason` when the installed runtime cannot serve the model
+- `state: "not_installed"` with `reason` and `not_installed_reason` when a configured provider model is not available in the local cache
 
 Text diffusion models are text-generation models in this provider contract. They remain chat-completions-compatible when runnable; MLXDashboard does not expose image generation or `/v1/images/generations`.

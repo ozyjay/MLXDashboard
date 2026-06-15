@@ -381,6 +381,7 @@ public struct ProviderRouter: Sendable {
 
     private func advertisedModels() -> [String] {
         guard let activeModel = activeModel() else { return [] }
+        guard modelMetadata(for: activeModel).state == .loaded else { return [] }
         return (Self.modeAliases + [activeModel]).reduce(into: []) { models, model in
             if !models.contains(model) {
                 models.append(model)
@@ -393,7 +394,8 @@ public struct ProviderRouter: Sendable {
     }
 
     private func androidStudioV0AdvertisedModels() -> [String] {
-        modelMetadataProvider().keys.sorted().reduce(into: advertisedModels()) { models, model in
+        let activeModels = activeModel().map { Self.modeAliases + [$0] } ?? []
+        return modelMetadataProvider().keys.sorted().reduce(into: activeModels) { models, model in
             if !models.contains(model) {
                 models.append(model)
             }
@@ -485,14 +487,25 @@ public struct ProviderRouter: Sendable {
             "state": metadata.state.rawValue,
             "max_context_length": 32768
         ]
-        if let unsupportedReason = metadata.unsupportedReason, metadata.state == .unsupported {
-            payload["unsupported_reason"] = unsupportedReason
+        if metadata.state != .loaded, let reason = metadata.unavailableReason {
+            payload["reason"] = reason
+            switch metadata.state {
+            case .loaded:
+                break
+            case .unsupported:
+                payload["unsupported_reason"] = reason
+            case .notInstalled:
+                payload["not_installed_reason"] = reason
+            }
         }
         return payload
     }
 
     private func modelMetadata(for model: String) -> ProviderModelMetadata {
-        modelMetadataProvider()[model] ?? .inferred(modelID: model)
+        if Self.modeAliases.contains(model), let activeModel = activeModel() {
+            return modelMetadataProvider()[activeModel] ?? .inferred(modelID: activeModel)
+        }
+        return modelMetadataProvider()[model] ?? .inferred(modelID: model)
     }
 
     private func publisher(for model: String) -> String {

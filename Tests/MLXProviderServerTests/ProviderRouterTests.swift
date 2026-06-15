@@ -226,6 +226,65 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(upstream.requests, [])
     }
 
+    func testProviderV1ModelsOnlyAdvertisesLoadedModels() async throws {
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Missing" },
+            modelMetadataProvider: {
+                [
+                    "mlx-community/Missing": ProviderModelMetadata(
+                        state: .notInstalled,
+                        unavailableReason: "Model is not installed in the local Hugging Face cache."
+                    )
+                ]
+            }
+        )
+
+        let v1Models = try await router.handle(
+            ProviderRequest(method: "GET", path: "/v1/models", headers: [:], body: Data())
+        )
+        let apiV1Models = try await router.handle(
+            ProviderRequest(method: "GET", path: "/api/v1/models", headers: [:], body: Data())
+        )
+
+        XCTAssertEqual(v1Models.status, 200)
+        XCTAssertEqual(try modelIDs(in: v1Models.body), [])
+        XCTAssertEqual(apiV1Models.status, 200)
+        XCTAssertEqual(try modelIDs(in: apiV1Models.body), [])
+        XCTAssertEqual(upstream.requests, [])
+    }
+
+    func testProviderV0ModelsMarksActiveAliasesNotInstalledWhenActiveModelIsNotInstalled() async throws {
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Missing" },
+            modelMetadataProvider: {
+                [
+                    "mlx-community/Missing": ProviderModelMetadata(
+                        state: .notInstalled,
+                        unavailableReason: "Model is not installed in the local Hugging Face cache."
+                    )
+                ]
+            }
+        )
+
+        let response = try await router.handle(
+            ProviderRequest(method: "GET", path: "/api/v0/models", headers: [:], body: Data())
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let json = try JSONSerialization.jsonObject(with: response.body) as? [String: Any]
+        let data = try XCTUnwrap(json?["data"] as? [[String: Any]])
+        XCTAssertEqual(data.compactMap { $0["id"] as? String }, ["mlx-ask", "mlx-plan", "mlx-fast", "mlx-community/Missing"])
+        for model in data {
+            XCTAssertEqual(model["state"] as? String, "not_installed")
+            XCTAssertEqual(model["reason"] as? String, "Model is not installed in the local Hugging Face cache.")
+        }
+        XCTAssertEqual(upstream.requests, [])
+    }
+
     func testProviderServesAndroidStudioV0ModelMetadataByID() async throws {
         let upstream = FakeUpstream()
         let router = ProviderRouter(

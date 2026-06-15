@@ -341,6 +341,7 @@ final class DashboardViewModel: ObservableObject {
             activeModelSelection.update(settings.activeModel)
             providerDebugCaptureState.update(settings.providerDebugCaptureEnabled)
             providerRoleAssignmentState.update(settings.providerRoleAssignments)
+            refreshProviderModelMetadataState()
             try settingsStore.save(settings)
             telemetry.appendLog("Saved settings")
         } catch {
@@ -1238,7 +1239,28 @@ final class DashboardViewModel: ObservableObject {
                 )
             }
         }
-        providerModelMetadataState.update(metadata)
+        var providerMetadata = metadata
+        for modelID in configuredProviderModelIDs() where providerMetadata[modelID] == nil {
+            providerMetadata[modelID] = .inferred(
+                modelID: modelID,
+                state: .notInstalled,
+                unavailableReason: registry.record(id: modelID)?.message ?? "Model is not installed in the local Hugging Face cache."
+            )
+        }
+        providerModelMetadataState.update(providerMetadata)
+    }
+
+    private func configuredProviderModelIDs() -> [String] {
+        var models: [String] = []
+        func append(_ model: String?) {
+            guard let model, !models.contains(model) else { return }
+            models.append(model)
+        }
+        append(settings.activeModel)
+        for role in ProviderModelRole.orderedRoutingRoles {
+            append(settings.providerRoleAssignments.model(for: role))
+        }
+        return models
     }
 
     @discardableResult

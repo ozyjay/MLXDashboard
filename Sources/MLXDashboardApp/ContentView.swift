@@ -9,6 +9,8 @@ enum DashboardSection: String, CaseIterable, Identifiable {
     case provider = "Provider"
     case dashboard = "Dashboard"
 
+    static let defaultSelection: DashboardSection = .dashboard
+
     var id: String { rawValue }
 
     var systemImage: String {
@@ -29,7 +31,7 @@ enum DashboardSection: String, CaseIterable, Identifiable {
 
 struct ContentView: View {
     @EnvironmentObject private var viewModel: DashboardViewModel
-    @State private var selectedSection: DashboardSection? = .discover
+    @State private var selectedSection: DashboardSection? = DashboardSection.defaultSelection
 
     var body: some View {
         NavigationSplitView {
@@ -41,9 +43,9 @@ struct ContentView: View {
             .navigationSplitViewColumnWidth(min: 160, ideal: 190, max: 240)
         } detail: {
             VStack(spacing: 0) {
-                AppHeader(section: selectedSection ?? .discover)
+                AppHeader(section: selectedSection ?? DashboardSection.defaultSelection)
                 Divider()
-                detailView(for: selectedSection ?? .discover)
+                detailView(for: selectedSection ?? DashboardSection.defaultSelection)
                     .padding(16)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }

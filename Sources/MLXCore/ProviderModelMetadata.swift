@@ -12,6 +12,7 @@ public enum ProviderModelFamily: String, Codable, Equatable, Sendable {
 public enum ProviderModelRuntimeState: String, Codable, Equatable, Sendable {
     case loaded
     case unsupported
+    case notInstalled = "not_installed"
 }
 
 public struct ProviderModelMetadata: Codable, Equatable, Sendable {
@@ -19,29 +20,34 @@ public struct ProviderModelMetadata: Codable, Equatable, Sendable {
     public var modelFamily: ProviderModelFamily
     public var state: ProviderModelRuntimeState
     public var unsupportedReason: String?
+    public var unavailableReason: String?
 
     public init(
         generationType: ProviderGenerationType = .text,
         modelFamily: ProviderModelFamily = .chat,
         state: ProviderModelRuntimeState = .loaded,
-        unsupportedReason: String? = nil
+        unsupportedReason: String? = nil,
+        unavailableReason: String? = nil
     ) {
         self.generationType = generationType
         self.modelFamily = modelFamily
         self.state = state
-        self.unsupportedReason = unsupportedReason
+        self.unsupportedReason = unsupportedReason ?? unavailableReason
+        self.unavailableReason = unavailableReason ?? unsupportedReason
     }
 
     public static func inferred(
         modelID: String,
         modelType: String? = nil,
         state: ProviderModelRuntimeState = .loaded,
-        unsupportedReason: String? = nil
+        unsupportedReason: String? = nil,
+        unavailableReason: String? = nil
     ) -> ProviderModelMetadata {
         ProviderModelMetadata(
             modelFamily: modelFamily(modelID: modelID, modelType: modelType),
             state: state,
-            unsupportedReason: unsupportedReason
+            unsupportedReason: unsupportedReason,
+            unavailableReason: unavailableReason
         )
     }
 
