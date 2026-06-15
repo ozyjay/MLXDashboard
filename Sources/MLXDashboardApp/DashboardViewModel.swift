@@ -139,7 +139,7 @@ final class DashboardViewModel: ObservableObject {
     @Published var installedModels: [ModelRecord] = []
     @Published var searchResults: [HuggingFaceModelSummary] = []
     @Published var searchResultFamilies: [ModelFamilySearchResult] = []
-    @Published var modelQuery = "Devstral-Small"
+    @Published var modelQuery = ""
     @Published var modelSearchMessage: String?
     @Published var modelInstallMessage: String?
     @Published var huggingFaceAuthMessage = "Hugging Face: Not checked"
