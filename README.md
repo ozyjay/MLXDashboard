@@ -6,3 +6,15 @@ Native macOS SwiftUI dashboard for owning a local `mlx-lm` server, installing ML
 
 - [MLX-LM runtime and model planning](docs/notes/mlx-lm-runtime-and-model-planning.md): runtime choice, localhost-only server binding, context budgeting, model-role presets, and 64GB memory guidance.
 - [Ollama lessons for MLXDashboard](docs/notes/ollama-lessons-for-mlx-dashboard.md): UX and architecture lessons to apply from OllamaPull and OllamaAgent.
+
+## MLXChat Provider Contract
+
+MLXDashboard exposes a localhost-only provider for MLXChat. `/v1/models` remains the OpenAI-compatible model list used for normal chat routing and role aliases. `/api/v0/models` and `/api/v0/models/{model}` include additional optional capability metadata for clients that need to decide whether a discovered model is usable:
+
+- `generation_type: "text"`
+- `model_family: "chat"` for normal chat/LLM models
+- `model_family: "diffusion_text"` for runnable text diffusion models such as `diffusion_gemma`
+- `state: "loaded"` for runnable models
+- `state: "unsupported"` with `unsupported_reason` when the installed runtime cannot serve the model
+
+Text diffusion models are text-generation models in this provider contract. They remain chat-completions-compatible when runnable; MLXDashboard does not expose image generation or `/v1/images/generations`.

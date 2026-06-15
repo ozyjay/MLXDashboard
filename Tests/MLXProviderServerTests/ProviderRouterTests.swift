@@ -157,8 +157,72 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(model["type"] as? String, "llm")
         XCTAssertEqual(model["publisher"] as? String, "mlx-community")
         XCTAssertEqual(model["compatibility_type"] as? String, "mlx")
+        XCTAssertEqual(model["generation_type"] as? String, "text")
+        XCTAssertEqual(model["model_family"] as? String, "chat")
         XCTAssertEqual(model["state"] as? String, "loaded")
         XCTAssertEqual(model["max_context_length"] as? Int, 32768)
+        XCTAssertEqual(upstream.requests, [])
+    }
+
+    func testProviderServesTextDiffusionMetadataWhenRunnable() async throws {
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Diffusion-Gemma" },
+            modelMetadataProvider: {
+                [
+                    "mlx-community/Diffusion-Gemma": ProviderModelMetadata(modelFamily: .diffusionText)
+                ]
+            }
+        )
+
+        let response = try await router.handle(
+            ProviderRequest(method: "GET", path: "/api/v0/models/mlx-community%2FDiffusion-Gemma", headers: [:], body: Data())
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let model = try JSONSerialization.jsonObject(with: response.body) as? [String: Any]
+        XCTAssertEqual(model?["id"] as? String, "mlx-community/Diffusion-Gemma")
+        XCTAssertEqual(model?["generation_type"] as? String, "text")
+        XCTAssertEqual(model?["model_family"] as? String, "diffusion_text")
+        XCTAssertEqual(model?["state"] as? String, "loaded")
+        XCTAssertNil(model?["unsupported_reason"])
+        XCTAssertEqual(upstream.requests, [])
+    }
+
+    func testProviderServesUnsupportedTextDiffusionMetadataFromV0ModelsWithoutChangingV1Models() async throws {
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Tiny" },
+            modelMetadataProvider: {
+                [
+                    "mlx-community/Diffusion-Gemma": ProviderModelMetadata(
+                        modelFamily: .diffusionText,
+                        state: .unsupported,
+                        unsupportedReason: "Unsupported by installed mlx-lm: diffusion_gemma"
+                    )
+                ]
+            }
+        )
+
+        let v1Models = try await router.handle(
+            ProviderRequest(method: "GET", path: "/v1/models", headers: [:], body: Data())
+        )
+        let v0Models = try await router.handle(
+            ProviderRequest(method: "GET", path: "/api/v0/models", headers: [:], body: Data())
+        )
+
+        XCTAssertEqual(try modelIDs(in: v1Models.body), ["mlx-ask", "mlx-plan", "mlx-fast", "mlx-community/Tiny"])
+
+        let json = try JSONSerialization.jsonObject(with: v0Models.body) as? [String: Any]
+        let data = try XCTUnwrap(json?["data"] as? [[String: Any]])
+        XCTAssertEqual(data.compactMap { $0["id"] as? String }, ["mlx-ask", "mlx-plan", "mlx-fast", "mlx-community/Tiny", "mlx-community/Diffusion-Gemma"])
+        let unsupported = try XCTUnwrap(data.first { $0["id"] as? String == "mlx-community/Diffusion-Gemma" })
+        XCTAssertEqual(unsupported["generation_type"] as? String, "text")
+        XCTAssertEqual(unsupported["model_family"] as? String, "diffusion_text")
+        XCTAssertEqual(unsupported["state"] as? String, "unsupported")
+        XCTAssertEqual(unsupported["unsupported_reason"] as? String, "Unsupported by installed mlx-lm: diffusion_gemma")
         XCTAssertEqual(upstream.requests, [])
     }
 

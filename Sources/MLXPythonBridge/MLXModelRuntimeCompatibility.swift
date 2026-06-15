@@ -21,18 +21,25 @@ public enum MLXModelRuntimeCompatibility: Equatable, Sendable {
 
 public struct MLXModelRuntimeCompatibilityChecker: Sendable {
     private static let unsupportedModelTypes: Set<String> = [
-        "diffusion_gemma",
         "gemma4_unified"
     ]
+    private static let capabilityGatedModelTypes: Set<String> = [
+        "diffusion_gemma"
+    ]
 
-    public init() {}
+    private let runtimeCapabilities: MLXModelRuntimeCapabilities
+
+    public init(runtimeCapabilities: MLXModelRuntimeCapabilities = MLXModelRuntimeCapabilities()) {
+        self.runtimeCapabilities = runtimeCapabilities
+    }
 
     public func compatibility(modelType: String?) -> MLXModelRuntimeCompatibility {
         guard let modelType, !modelType.isEmpty else {
             return .runnable(modelType: nil)
         }
 
-        if Self.unsupportedModelTypes.contains(modelType) {
+        if Self.unsupportedModelTypes.contains(modelType)
+            || Self.capabilityGatedModelTypes.contains(modelType) && !runtimeCapabilities.supports(modelType: modelType) {
             return .unsupported(modelType: modelType, reason: "Unsupported by installed mlx-lm: \(modelType)")
         }
         return .runnable(modelType: modelType)
@@ -53,5 +60,17 @@ public struct MLXModelRuntimeCompatibilityChecker: Sendable {
         }
 
         return compatibility(modelType: modelType)
+    }
+}
+
+public struct MLXModelRuntimeCapabilities: Equatable, Sendable {
+    private let supportedModelTypes: Set<String>
+
+    public init(supportedModelTypes: Set<String> = []) {
+        self.supportedModelTypes = Set(supportedModelTypes.map { $0.lowercased() })
+    }
+
+    public func supports(modelType: String) -> Bool {
+        supportedModelTypes.contains(modelType.lowercased())
     }
 }

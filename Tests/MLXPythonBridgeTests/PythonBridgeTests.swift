@@ -76,13 +76,23 @@ final class PythonBridgeTests: XCTestCase {
         )
     }
 
-    func testRuntimeCompatibilityRejectsDiffusionGemmaModelType() throws {
+    func testRuntimeCompatibilityRejectsDiffusionGemmaModelTypeWithoutRuntimeCapability() throws {
         let compatibility = MLXModelRuntimeCompatibilityChecker().compatibility(modelType: "diffusion_gemma")
 
         XCTAssertEqual(
             compatibility,
             .unsupported(modelType: "diffusion_gemma", reason: "Unsupported by installed mlx-lm: diffusion_gemma")
         )
+    }
+
+    func testRuntimeCompatibilityAllowsDiffusionGemmaWhenRuntimeCapabilityIsKnown() throws {
+        let checker = MLXModelRuntimeCompatibilityChecker(
+            runtimeCapabilities: MLXModelRuntimeCapabilities(supportedModelTypes: ["diffusion_gemma"])
+        )
+
+        let compatibility = checker.compatibility(modelType: "diffusion_gemma")
+
+        XCTAssertEqual(compatibility, .runnable(modelType: "diffusion_gemma"))
     }
 
     func testCacheManagerDeletesWholeRepoCacheFolderForModel() throws {

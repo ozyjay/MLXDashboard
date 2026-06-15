@@ -7,6 +7,7 @@ public struct ProviderRouter: Sendable {
     private let upstream: any ProviderUpstreamProxyClient
     private let legacyUpstream: (any ProviderUpstreamClient)?
     private let activeModelProvider: @Sendable () -> String?
+    private let modelMetadataProvider: @Sendable () -> [String: ProviderModelMetadata]
     private let roleAssignmentsProvider: @Sendable () -> ProviderRoleAssignments
     private let defaultEndpointProvider: @Sendable () -> ProviderUpstreamEndpoint?
     private let roleEndpointProvider: @Sendable (ProviderModelRole) -> ProviderUpstreamEndpoint?
@@ -30,6 +31,7 @@ public struct ProviderRouter: Sendable {
     public init(
         upstream: any ProviderUpstreamProxyClient,
         activeModelProvider: @escaping @Sendable () -> String? = { nil },
+        modelMetadataProvider: @escaping @Sendable () -> [String: ProviderModelMetadata] = { [:] },
         roleAssignmentsProvider: @escaping @Sendable () -> ProviderRoleAssignments = { ProviderRoleAssignments() },
         defaultEndpointProvider: @escaping @Sendable () -> ProviderUpstreamEndpoint?,
         roleEndpointProvider: @escaping @Sendable (ProviderModelRole) -> ProviderUpstreamEndpoint?,
@@ -40,6 +42,7 @@ public struct ProviderRouter: Sendable {
             upstream: upstream,
             legacyUpstream: nil,
             activeModelProvider: activeModelProvider,
+            modelMetadataProvider: modelMetadataProvider,
             roleAssignmentsProvider: roleAssignmentsProvider,
             defaultEndpointProvider: defaultEndpointProvider,
             roleEndpointProvider: roleEndpointProvider,
@@ -51,6 +54,7 @@ public struct ProviderRouter: Sendable {
     public init(
         upstream: any ProviderUpstreamClient,
         activeModelProvider: @escaping @Sendable () -> String? = { nil },
+        modelMetadataProvider: @escaping @Sendable () -> [String: ProviderModelMetadata] = { [:] },
         roleAssignmentsProvider: @escaping @Sendable () -> ProviderRoleAssignments = { ProviderRoleAssignments() },
         eventLogger: @escaping @Sendable (String) -> Void = { _ in },
         debugRecorder: ProviderDebugRecorder? = nil
@@ -59,6 +63,7 @@ public struct ProviderRouter: Sendable {
             upstream: ProviderUpstreamClientAdapter(upstream: upstream),
             legacyUpstream: upstream,
             activeModelProvider: activeModelProvider,
+            modelMetadataProvider: modelMetadataProvider,
             roleAssignmentsProvider: roleAssignmentsProvider,
             defaultEndpointProvider: { nil },
             roleEndpointProvider: { _ in nil },
@@ -71,6 +76,7 @@ public struct ProviderRouter: Sendable {
         upstream: any ProviderUpstreamProxyClient,
         legacyUpstream: (any ProviderUpstreamClient)?,
         activeModelProvider: @escaping @Sendable () -> String?,
+        modelMetadataProvider: @escaping @Sendable () -> [String: ProviderModelMetadata],
         roleAssignmentsProvider: @escaping @Sendable () -> ProviderRoleAssignments,
         defaultEndpointProvider: @escaping @Sendable () -> ProviderUpstreamEndpoint?,
         roleEndpointProvider: @escaping @Sendable (ProviderModelRole) -> ProviderUpstreamEndpoint?,
@@ -80,6 +86,7 @@ public struct ProviderRouter: Sendable {
         self.upstream = upstream
         self.legacyUpstream = legacyUpstream
         self.activeModelProvider = activeModelProvider
+        self.modelMetadataProvider = modelMetadataProvider
         self.roleAssignmentsProvider = roleAssignmentsProvider
         self.defaultEndpointProvider = defaultEndpointProvider
         self.roleEndpointProvider = roleEndpointProvider
@@ -385,6 +392,18 @@ public struct ProviderRouter: Sendable {
         advertisedModels().contains(model)
     }
 
+    private func androidStudioV0AdvertisedModels() -> [String] {
+        modelMetadataProvider().keys.sorted().reduce(into: advertisedModels()) { models, model in
+            if !models.contains(model) {
+                models.append(model)
+            }
+        }
+    }
+
+    private func isAndroidStudioV0AdvertisedModel(_ model: String) -> Bool {
+        androidStudioV0AdvertisedModels().contains(model)
+    }
+
     private func aliasResolution(for selectedModel: String?) -> String? {
         guard let selectedModel,
               Self.modeAliases.contains(selectedModel),
@@ -431,7 +450,7 @@ public struct ProviderRouter: Sendable {
     }
 
     private func androidStudioV0ModelsResponse() -> ProviderResponse {
-        let models = advertisedModels()
+        let models = androidStudioV0AdvertisedModels()
         guard !models.isEmpty else {
             return json(status: 200, #"{"object":"list","data":[]}"#)
         }
@@ -444,7 +463,7 @@ public struct ProviderRouter: Sendable {
     }
 
     private func androidStudioV0ModelResponse(for requestedModel: String) -> ProviderResponse {
-        guard isAdvertisedModel(requestedModel) else {
+        guard isAndroidStudioV0AdvertisedModel(requestedModel) else {
             return json(status: 404, #"{"error":"not found"}"#)
         }
 
@@ -452,17 +471,28 @@ public struct ProviderRouter: Sendable {
     }
 
     private func androidStudioV0ModelPayload(_ model: String) -> [String: Any] {
-        [
+        let metadata = modelMetadata(for: model)
+        var payload: [String: Any] = [
             "id": model,
             "object": "model",
             "type": "llm",
             "publisher": publisher(for: model),
             "arch": architecture(for: model),
             "compatibility_type": "mlx",
+            "generation_type": metadata.generationType.rawValue,
+            "model_family": metadata.modelFamily.rawValue,
             "quantization": quantization(for: model),
-            "state": "loaded",
+            "state": metadata.state.rawValue,
             "max_context_length": 32768
         ]
+        if let unsupportedReason = metadata.unsupportedReason, metadata.state == .unsupported {
+            payload["unsupported_reason"] = unsupportedReason
+        }
+        return payload
+    }
+
+    private func modelMetadata(for model: String) -> ProviderModelMetadata {
+        modelMetadataProvider()[model] ?? .inferred(modelID: model)
     }
 
     private func publisher(for model: String) -> String {

@@ -116,6 +116,21 @@ private final class ProviderUpstreamEndpointState: @unchecked Sendable {
     }
 }
 
+private final class ProviderModelMetadataState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedMetadata: [String: ProviderModelMetadata] = [:]
+
+    var metadata: [String: ProviderModelMetadata] {
+        lock.withLock { storedMetadata }
+    }
+
+    func update(_ metadata: [String: ProviderModelMetadata]) {
+        lock.withLock {
+            storedMetadata = metadata
+        }
+    }
+}
+
 @MainActor
 final class DashboardViewModel: ObservableObject {
     @Published var settings: DashboardSettings
@@ -155,6 +170,7 @@ final class DashboardViewModel: ObservableObject {
     private let providerDebugCaptureState: ProviderDebugCaptureState
     private let providerRoleAssignmentState: ProviderRoleAssignmentState
     private let providerUpstreamEndpointState: ProviderUpstreamEndpointState
+    private let providerModelMetadataState: ProviderModelMetadataState
     private var serverPoolControllerCancellable: AnyCancellable?
     private var providerServer: NIOProviderServer?
     private var activeInstallTask: Task<Void, Never>?
@@ -197,10 +213,12 @@ final class DashboardViewModel: ObservableObject {
         self.providerDebugCaptureState = ProviderDebugCaptureState(enabled: loadedSettings.providerDebugCaptureEnabled)
         self.providerRoleAssignmentState = ProviderRoleAssignmentState(assignments: loadedSettings.providerRoleAssignments)
         self.providerUpstreamEndpointState = ProviderUpstreamEndpointState()
+        self.providerModelMetadataState = ProviderModelMetadataState()
         self.roleServerStatuses = serverPoolController.roleStatuses
         try? registry.load()
         let compatibilityChanged = refreshRuntimeCompatibilityForInstalledRecords()
         self.installedModels = Self.visibleInstalledModels(from: registry.records)
+        refreshProviderModelMetadataState()
         let settingsChanged = syncRuntimeSelectionsWithRunnableModels()
         if compatibilityChanged {
             try? registry.save()
@@ -453,6 +471,9 @@ final class DashboardViewModel: ObservableObject {
         let router = ProviderRouter(
             upstream: upstream,
             activeModelProvider: { [activeModelSelection] in activeModelSelection.model },
+            modelMetadataProvider: { [providerModelMetadataState] in
+                providerModelMetadataState.metadata
+            },
             roleAssignmentsProvider: { [providerRoleAssignmentState] in providerRoleAssignmentState.assignments },
             defaultEndpointProvider: { [providerUpstreamEndpointState] in
                 providerUpstreamEndpointState.defaultEndpoint
@@ -517,6 +538,7 @@ final class DashboardViewModel: ObservableObject {
             }
             try registry.save()
             installedModels = Self.visibleInstalledModels(from: registry.records)
+            refreshProviderModelMetadataState()
             rebuildSearchResultFamilies()
             if syncRuntimeSelectionsWithRunnableModels() {
                 try? settingsStore.save(settings)
@@ -772,6 +794,7 @@ final class DashboardViewModel: ObservableObject {
             registry.upsert(record)
             try registry.save()
             installedModels = Self.visibleInstalledModels(from: registry.records)
+            refreshProviderModelMetadataState()
             rebuildSearchResultFamilies()
             scanModelCache()
             if record.status == .installed {
@@ -788,6 +811,7 @@ final class DashboardViewModel: ObservableObject {
             let message = friendlyInstallMessage(for: error)
             updateInstallProgress(.failed, modelID: model.id, detail: "Install failed for \(model.id): \(message)")
             registry.upsert(ModelRecord(id: model.id, status: .failed, message: message))
+            refreshProviderModelMetadataState()
             try? registry.save()
             installedModels = Self.visibleInstalledModels(from: registry.records)
             rebuildSearchResultFamilies()
@@ -949,6 +973,7 @@ final class DashboardViewModel: ObservableObject {
             registry.markRemoved(id: record.id)
             try registry.save()
             installedModels = Self.visibleInstalledModels(from: registry.records)
+            refreshProviderModelMetadataState()
             rebuildSearchResultFamilies()
             self.selectedInstalledModelID = nil
             if settings.activeModel == record.id {
@@ -1196,6 +1221,24 @@ final class DashboardViewModel: ObservableObject {
         case .unsupported(_, let reason):
             return ModelRecord(id: id, status: .failed, localPath: localPath, message: reason)
         }
+    }
+
+    private func refreshProviderModelMetadataState() {
+        let metadata = registry.records.reduce(into: [String: ProviderModelMetadata]()) { result, record in
+            guard record.status == .installed || record.localPath != nil else { return }
+            switch runtimeCompatibilityChecker.compatibility(localPath: record.localPath) {
+            case .runnable(let modelType):
+                result[record.id] = .inferred(modelID: record.id, modelType: modelType)
+            case .unsupported(let modelType, let reason):
+                result[record.id] = .inferred(
+                    modelID: record.id,
+                    modelType: modelType,
+                    state: .unsupported,
+                    unsupportedReason: reason
+                )
+            }
+        }
+        providerModelMetadataState.update(metadata)
     }
 
     @discardableResult
