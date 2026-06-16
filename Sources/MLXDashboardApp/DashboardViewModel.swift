@@ -76,6 +76,25 @@ private final class ProviderRoleAssignmentState: @unchecked Sendable {
     }
 }
 
+private final class ProviderGenerationDefaultsState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedDefaults: ProviderRoleGenerationDefaults
+
+    init(defaults: ProviderRoleGenerationDefaults) {
+        self.storedDefaults = defaults
+    }
+
+    var defaults: ProviderRoleGenerationDefaults {
+        lock.withLock { storedDefaults }
+    }
+
+    func update(_ defaults: ProviderRoleGenerationDefaults) {
+        lock.withLock {
+            storedDefaults = defaults
+        }
+    }
+}
+
 private final class ProviderUpstreamEndpointState: @unchecked Sendable {
     private let lock = NSLock()
     private var defaultEndpointValue: ProviderUpstreamEndpoint?
@@ -144,6 +163,9 @@ final class DashboardViewModel: ObservableObject {
     @Published var modelInstallMessage: String?
     @Published var huggingFaceAuthMessage = "Hugging Face: Not checked"
     @Published var shouldOfferPythonPackageInstall = false
+    @Published var runtimePackageUpgradeStatus = PythonPackageUpgradeReport()
+    @Published var isCheckingRuntimePackageUpgrades = false
+    @Published var isUpgradingRuntimePackages = false
     @Published var selectedSearchModelID: String?
     @Published var selectedSearchFamilyID: String?
     @Published var selectedInstalledModelID: String?
@@ -161,7 +183,7 @@ final class DashboardViewModel: ObservableObject {
     private let registry: ModelRegistry
     private let environmentManager: PythonEnvironmentManager
     private let cacheManager: MLXModelCacheManager
-    private let runtimeCompatibilityChecker: MLXModelRuntimeCompatibilityChecker
+    private var runtimeCompatibilityChecker: MLXModelRuntimeCompatibilityChecker
     private let modelSearcher: HuggingFaceModelSearcher
     private let modelInstaller: HuggingFaceModelInstaller
     private let authChecker: HuggingFaceAuthChecker
@@ -169,6 +191,7 @@ final class DashboardViewModel: ObservableObject {
     private let activeModelSelection: ActiveModelSelection
     private let providerDebugCaptureState: ProviderDebugCaptureState
     private let providerRoleAssignmentState: ProviderRoleAssignmentState
+    private let providerGenerationDefaultsState: ProviderGenerationDefaultsState
     private let providerUpstreamEndpointState: ProviderUpstreamEndpointState
     private let providerModelMetadataState: ProviderModelMetadataState
     private var serverPoolControllerCancellable: AnyCancellable?
@@ -212,6 +235,7 @@ final class DashboardViewModel: ObservableObject {
         self.activeModelSelection = ActiveModelSelection(model: loadedSettings.activeModel)
         self.providerDebugCaptureState = ProviderDebugCaptureState(enabled: loadedSettings.providerDebugCaptureEnabled)
         self.providerRoleAssignmentState = ProviderRoleAssignmentState(assignments: loadedSettings.providerRoleAssignments)
+        self.providerGenerationDefaultsState = ProviderGenerationDefaultsState(defaults: loadedSettings.providerGenerationDefaults)
         self.providerUpstreamEndpointState = ProviderUpstreamEndpointState()
         self.providerModelMetadataState = ProviderModelMetadataState()
         self.roleServerStatuses = serverPoolController.roleStatuses
@@ -328,6 +352,33 @@ final class DashboardViewModel: ObservableObject {
         canContinueSelectedInstalledModelInstall
     }
 
+    var canUpgradeRuntimePackages: Bool {
+        runtimePackageUpgradeStatus.hasAvailableUpgrades
+            && !isCheckingRuntimePackageUpgrades
+            && !isUpgradingRuntimePackages
+            && !canStopServer
+    }
+
+    var runtimePackageUpgradeSummary: String {
+        guard !runtimePackageUpgradeStatus.statuses.isEmpty else {
+            return "Runtime updates: not checked"
+        }
+        let upgrades = runtimePackageUpgradeStatus.statuses.filter { $0.state == .upgradeAvailable }
+        if !upgrades.isEmpty {
+            let details = upgrades.map { status in
+                "\(status.packageName) \(status.installedVersion ?? "?") -> \(status.latestVersion ?? "?")"
+            }
+            return "Updates: \(details.joined(separator: ", "))"
+        }
+        if runtimePackageUpgradeStatus.statuses.contains(where: { $0.state == .unknown }) {
+            return "Runtime updates: unable to check"
+        }
+        if runtimePackageUpgradeStatus.statuses.contains(where: { $0.state == .missing }) {
+            return "Runtime updates: install packages first"
+        }
+        return "Runtime packages are current"
+    }
+
     var canSetSelectedInstalledModelActive: Bool {
         selectedInstalledModelIsInstalled
     }
@@ -341,6 +392,7 @@ final class DashboardViewModel: ObservableObject {
             activeModelSelection.update(settings.activeModel)
             providerDebugCaptureState.update(settings.providerDebugCaptureEnabled)
             providerRoleAssignmentState.update(settings.providerRoleAssignments)
+            providerGenerationDefaultsState.update(settings.providerGenerationDefaults)
             refreshProviderModelMetadataState()
             try settingsStore.save(settings)
             telemetry.appendLog("Saved settings")
@@ -361,6 +413,12 @@ final class DashboardViewModel: ObservableObject {
         saveSettings()
     }
 
+    func updateGenerationSettings(_ generationSettings: ProviderGenerationSettings, for role: ProviderModelRole) {
+        settings.providerGenerationDefaults.setSettings(generationSettings, for: role)
+        providerGenerationDefaultsState.update(settings.providerGenerationDefaults)
+        saveSettings()
+    }
+
     func requestModelDownloadSettingsNavigation() {
         modelDownloadSettingsNavigationRequestID += 1
     }
@@ -369,8 +427,15 @@ final class DashboardViewModel: ObservableObject {
         do {
             let status = try await environmentManager.status()
             pythonStatus = status.isReady ? "Ready: \(status.pythonExecutable.path)" : "Missing: \(status.packageReport.missingInstallNames.joined(separator: ", "))"
+            if status.isReady {
+                await refreshRuntimeCapabilities(pythonExecutable: status.pythonExecutable)
+                await refreshRuntimePackageUpgradeStatus(pythonExecutable: status.pythonExecutable)
+            } else {
+                runtimePackageUpgradeStatus = PythonPackageUpgradeReport()
+            }
         } catch {
             pythonStatus = "Error: \(error)"
+            runtimePackageUpgradeStatus = PythonPackageUpgradeReport()
         }
     }
 
@@ -380,6 +445,10 @@ final class DashboardViewModel: ObservableObject {
             pythonStatus = "Ready"
             shouldOfferPythonPackageInstall = false
             modelSearchMessage = "Python packages installed. Search is ready."
+            if let python = try? await environmentManager.ensureVenv() {
+                await refreshRuntimeCapabilities(pythonExecutable: python)
+                await refreshRuntimePackageUpgradeStatus(pythonExecutable: python)
+            }
             telemetry.appendLog("Installed Python packages")
         } catch {
             pythonStatus = "Error: \(error)"
@@ -388,12 +457,52 @@ final class DashboardViewModel: ObservableObject {
         }
     }
 
+    func checkRuntimePackageUpgrades() async {
+        do {
+            let python = try await environmentManager.ensureVenv()
+            await refreshRuntimePackageUpgradeStatus(pythonExecutable: python)
+        } catch {
+            runtimePackageUpgradeStatus = PythonPackageUpgradeReport(statuses: [
+                PythonPackageVersionStatus(
+                    packageName: "mlx",
+                    state: .unknown,
+                    message: "Unable to check latest version: \(error)"
+                ),
+                PythonPackageVersionStatus(
+                    packageName: "mlx-lm",
+                    state: .unknown,
+                    message: "Unable to check latest version: \(error)"
+                )
+            ])
+            telemetry.appendLog("Runtime package upgrade check failed: \(error)")
+        }
+    }
+
+    func upgradeRuntimePackages() async {
+        do {
+            isUpgradingRuntimePackages = true
+            defer { isUpgradingRuntimePackages = false }
+            let python = try await environmentManager.ensureVenv()
+            try await environmentManager.upgradeRuntimePackages(pythonExecutable: python)
+            pythonStatus = "Ready"
+            shouldOfferPythonPackageInstall = false
+            modelSearchMessage = "Runtime packages upgraded. Search is ready."
+            await refreshRuntimeCapabilities(pythonExecutable: python)
+            await refreshRuntimePackageUpgradeStatus(pythonExecutable: python)
+            telemetry.appendLog("Upgraded MLX runtime packages")
+        } catch {
+            modelSearchMessage = "Runtime package upgrade failed: \(error)"
+            telemetry.appendLog("Runtime package upgrade failed: \(error)")
+        }
+    }
+
     func startServer() async {
         do {
+            let python = try await environmentManager.ensureVenv()
+            await refreshRuntimeCapabilities(pythonExecutable: python)
             if syncRuntimeSelectionsWithRunnableModels() {
                 try? settingsStore.save(settings)
             }
-            let python = try await environmentManager.ensureVenv()
             try serverPoolController.start(settings: settings, pythonExecutable: python)
             roleServerStatuses = serverPoolController.roleStatuses
             updateProviderEndpointState()
@@ -424,10 +533,11 @@ final class DashboardViewModel: ObservableObject {
 
     func restartServer() async {
         do {
+            let python = try await environmentManager.ensureVenv()
+            await refreshRuntimeCapabilities(pythonExecutable: python)
             if syncRuntimeSelectionsWithRunnableModels() {
                 try? settingsStore.save(settings)
             }
-            let python = try await environmentManager.ensureVenv()
             serverPoolController.stopAll()
             roleServerStatuses = serverPoolController.roleStatuses
             clearProviderEndpointState()
@@ -447,6 +557,7 @@ final class DashboardViewModel: ObservableObject {
     func restartRoleServer(_ role: ProviderModelRole) async {
         do {
             let python = try await environmentManager.ensureVenv()
+            await refreshRuntimeCapabilities(pythonExecutable: python)
             try serverPoolController.restart(role: role, settings: settings, pythonExecutable: python)
             roleServerStatuses = serverPoolController.roleStatuses
             updateProviderEndpointState()
@@ -476,6 +587,7 @@ final class DashboardViewModel: ObservableObject {
                 providerModelMetadataState.metadata
             },
             roleAssignmentsProvider: { [providerRoleAssignmentState] in providerRoleAssignmentState.assignments },
+            generationDefaultsProvider: { [providerGenerationDefaultsState] in providerGenerationDefaultsState.defaults },
             defaultEndpointProvider: { [providerUpstreamEndpointState] in
                 providerUpstreamEndpointState.defaultEndpoint
             },
@@ -598,14 +710,19 @@ final class DashboardViewModel: ObservableObject {
             }
 
             shouldOfferPythonPackageInstall = false
+            await refreshRuntimeCapabilities(pythonExecutable: status.pythonExecutable)
             let rawResults = try await modelSearcher.search(query: modelQuery, pythonExecutable: status.pythonExecutable, limit: limit)
-            let filteredResults = runnableSearchResults(from: rawResults)
+            let classifiedResults = searchResultClassifications(from: rawResults)
+            let filteredResults = classifiedResults.runnable
             searchResults = filteredResults
             rebuildSearchResultFamilies()
             rawModelSearchResultCount = rawResults.count
             modelSearchLimit = limit
-            let unsupportedCount = rawResults.count - filteredResults.count
-            modelSearchMessage = searchResultStatusText(count: searchResultFamilies.count, unsupportedCount: unsupportedCount)
+            modelSearchMessage = searchResultStatusText(
+                count: searchResultFamilies.count,
+                unsupportedCount: classifiedResults.unsupportedCount,
+                unknownCount: classifiedResults.unknownCount
+            )
             let logPrefix = defaultSearch ? "Loaded default" : "Found"
             telemetry.appendLog("\(logPrefix) \(searchResultFamilies.count) mlx-community model families for \(modelQuery)")
         } catch is CancellationError {
@@ -662,22 +779,40 @@ final class DashboardViewModel: ObservableObject {
     }
 
     private func searchResultStatusText(count: Int) -> String {
-        searchResultStatusText(count: count, unsupportedCount: 0)
+        searchResultStatusText(count: count, unsupportedCount: 0, unknownCount: 0)
     }
 
-    private func searchResultStatusText(count: Int, unsupportedCount: Int) -> String {
+    private func searchResultStatusText(count: Int, unsupportedCount: Int, unknownCount: Int) -> String {
         let noun = count == 1 ? "result" : "results"
         let base = "Showing \(count) mlx-community \(noun) sorted by downloads"
-        guard unsupportedCount > 0 else {
+        let filteredParts = [
+            unsupportedCount > 0 ? "\(unsupportedCount) unsupported" : nil,
+            unknownCount > 0 ? "\(unknownCount) unknown" : nil
+        ].compactMap { $0 }
+        guard !filteredParts.isEmpty else {
             return "\(base)."
         }
-        return "\(base); filtered \(unsupportedCount) unsupported by current mlx-lm."
+        return "\(base); filtered \(filteredParts.joined(separator: " and ")) by current mlx-lm."
     }
 
-    private func runnableSearchResults(from results: [HuggingFaceModelSummary]) -> [HuggingFaceModelSummary] {
-        results.filter { model in
-            runtimeCompatibilityChecker.compatibility(modelType: model.modelType).isRunnable
+    private func searchResultClassifications(
+        from results: [HuggingFaceModelSummary]
+    ) -> (runnable: [HuggingFaceModelSummary], unsupportedCount: Int, unknownCount: Int) {
+        var runnable: [HuggingFaceModelSummary] = []
+        var unsupportedCount = 0
+        var unknownCount = 0
+
+        for model in results {
+            switch runtimeCompatibilityChecker.compatibility(discoveredModelType: model.modelType) {
+            case .runnable:
+                runnable.append(model)
+            case .unsupported:
+                unsupportedCount += 1
+            case .unknown:
+                unknownCount += 1
+            }
         }
+        return (runnable, unsupportedCount, unknownCount)
     }
 
     private func rebuildSearchResultFamilies() {
@@ -686,7 +821,7 @@ final class DashboardViewModel: ObservableObject {
             searchResults,
             installedModels: installedModels,
             selectedVariants: selectedVariants,
-            installingModelID: modelInstallProgress?.modelID
+            installingModelID: activeInstallingModelID
         )
         guard !searchResultFamilies.isEmpty else {
             selectedSearchFamilyID = nil
@@ -740,6 +875,7 @@ final class DashboardViewModel: ObservableObject {
                 return
             }
             shouldOfferPythonPackageInstall = false
+            await refreshRuntimeCapabilities(pythonExecutable: status.pythonExecutable)
 
             updateInstallProgress(.checkingLogin, modelID: model.id, detail: "Checking Hugging Face login for \(model.id).")
             let authStatus = try await authChecker.status(pythonExecutable: status.pythonExecutable)
@@ -791,6 +927,7 @@ final class DashboardViewModel: ObservableObject {
             await Task.yield()
             try Task.checkCancellation()
             updateInstallProgress(.finalizing, modelID: model.id, detail: "Finalizing cache record for \(model.id).")
+            await refreshRuntimeCapabilities(pythonExecutable: status.pythonExecutable)
             let record = runtimeCheckedRecord(id: model.id, localPath: result.localPath)
             registry.upsert(record)
             try registry.save()
@@ -931,14 +1068,14 @@ final class DashboardViewModel: ObservableObject {
         guard let selectedInstalledModelID,
               selectedInstalledModelIsInstalled
         else {
-            modelInstallMessage = "Select an installed model before setting it active."
+            modelInstallMessage = "Select an installed model before setting it as default."
             return
         }
 
         settings.activeModel = selectedInstalledModelID
         activeModelSelection.update(selectedInstalledModelID)
         saveSettings()
-        modelInstallMessage = "Selected \(selectedInstalledModelID) as the active model."
+        modelInstallMessage = "Set \(selectedInstalledModelID) as the default model."
     }
 
     func assignSelectedInstalledModel(to role: ProviderModelRole) {
@@ -1221,6 +1358,46 @@ final class DashboardViewModel: ObservableObject {
             return ModelRecord(id: id, status: .installed, localPath: localPath, message: "Installed")
         case .unsupported(_, let reason):
             return ModelRecord(id: id, status: .failed, localPath: localPath, message: reason)
+        case .unknown(let reason):
+            return ModelRecord(id: id, status: .failed, localPath: localPath, message: reason)
+        }
+    }
+
+    private func refreshRuntimeCapabilities(pythonExecutable: URL) async {
+        do {
+            let capabilities = try await environmentManager.mlxLMRuntimeCapabilities(pythonExecutable: pythonExecutable)
+            runtimeCompatibilityChecker = MLXModelRuntimeCompatibilityChecker(runtimeCapabilities: capabilities)
+            if refreshRuntimeCompatibilityForInstalledRecords() {
+                try? registry.save()
+                installedModels = Self.visibleInstalledModels(from: registry.records)
+            }
+            refreshProviderModelMetadataState()
+        } catch {
+            telemetry.appendLog("Runtime capability inspection failed: \(error)")
+        }
+    }
+
+    private func refreshRuntimePackageUpgradeStatus(pythonExecutable: URL) async {
+        isCheckingRuntimePackageUpgrades = true
+        defer { isCheckingRuntimePackageUpgrades = false }
+        do {
+            runtimePackageUpgradeStatus = try await environmentManager.runtimePackageUpgradeReport(
+                pythonExecutable: pythonExecutable
+            )
+        } catch {
+            runtimePackageUpgradeStatus = PythonPackageUpgradeReport(statuses: [
+                PythonPackageVersionStatus(
+                    packageName: "mlx",
+                    state: .unknown,
+                    message: "Unable to check latest version: \(error)"
+                ),
+                PythonPackageVersionStatus(
+                    packageName: "mlx-lm",
+                    state: .unknown,
+                    message: "Unable to check latest version: \(error)"
+                )
+            ])
+            telemetry.appendLog("Runtime package upgrade check failed: \(error)")
         }
     }
 
@@ -1234,6 +1411,12 @@ final class DashboardViewModel: ObservableObject {
                 result[record.id] = .inferred(
                     modelID: record.id,
                     modelType: modelType,
+                    state: .unsupported,
+                    unsupportedReason: reason
+                )
+            case .unknown(let reason):
+                result[record.id] = .inferred(
+                    modelID: record.id,
                     state: .unsupported,
                     unsupportedReason: reason
                 )
@@ -1316,11 +1499,19 @@ final class DashboardViewModel: ObservableObject {
         return installedModelIDs.contains(selectedSearchModelID)
     }
 
+    private var activeInstallingModelID: String? {
+        guard isInstallingModel,
+              let progress = modelInstallProgress,
+              !progress.phase.isTerminalInstallPhase
+        else { return nil }
+        return progress.modelID
+    }
+
     func searchResultAction(for modelID: String) -> ModelSearchResultAction {
         ModelDiscoveryPolicy.searchResultAction(
             modelID: modelID,
             installedModelIDs: installedModelIDs,
-            installingModelID: modelInstallProgress?.modelID,
+            installingModelID: activeInstallingModelID,
             isInstalling: isInstallingModel
         )
     }
@@ -1371,7 +1562,7 @@ private extension ProviderModelRole {
         case .plan:
             "Plan"
         case .coding:
-            "Fast/Coding"
+            "Coding"
         }
     }
 }

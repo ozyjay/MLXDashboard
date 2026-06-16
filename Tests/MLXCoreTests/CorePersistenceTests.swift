@@ -17,6 +17,11 @@ final class CorePersistenceTests: XCTestCase {
                 ask: "mlx-community/Ask",
                 plan: "mlx-community/Plan",
                 coding: "mlx-community/Coder"
+            ),
+            providerGenerationDefaults: ProviderRoleGenerationDefaults(
+                ask: ProviderGenerationSettings(temperature: 0.31, topP: 0.91, maxTokens: 1024),
+                plan: ProviderGenerationSettings(temperature: 0.21, topP: 0.96, maxTokens: 4096),
+                coding: ProviderGenerationSettings(temperature: 0.01, topP: 1.0, maxTokens: 2048)
             )
         )
 
@@ -31,6 +36,15 @@ final class CorePersistenceTests: XCTestCase {
         XCTAssertEqual(reloaded.providerRoleAssignments.ask, "mlx-community/Ask")
         XCTAssertEqual(reloaded.providerRoleAssignments.plan, "mlx-community/Plan")
         XCTAssertEqual(reloaded.providerRoleAssignments.coding, "mlx-community/Coder")
+        XCTAssertEqual(reloaded.providerGenerationDefaults.ask.temperature, 0.31)
+        XCTAssertEqual(reloaded.providerGenerationDefaults.ask.topP, 0.91)
+        XCTAssertEqual(reloaded.providerGenerationDefaults.ask.maxTokens, 1024)
+        XCTAssertEqual(reloaded.providerGenerationDefaults.plan.temperature, 0.21)
+        XCTAssertEqual(reloaded.providerGenerationDefaults.plan.topP, 0.96)
+        XCTAssertEqual(reloaded.providerGenerationDefaults.plan.maxTokens, 4096)
+        XCTAssertEqual(reloaded.providerGenerationDefaults.coding.temperature, 0.01)
+        XCTAssertEqual(reloaded.providerGenerationDefaults.coding.topP, 1.0)
+        XCTAssertEqual(reloaded.providerGenerationDefaults.coding.maxTokens, 2048)
     }
 
     func testSettingsStorePersistsDownloadSettings() throws {
@@ -83,6 +97,18 @@ final class CorePersistenceTests: XCTestCase {
         let settings = try JSONDecoder().decode(DashboardSettings.self, from: json)
 
         XCTAssertEqual(settings.downloadSettings, .standardDefault)
+    }
+
+    func testDashboardSettingsDefaultsProviderGenerationSettingsWhenMissing() throws {
+        let json = Data(
+            #"{"activeModel":"mlx-community/Tiny","mlxHost":"127.0.0.1","mlxPort":8080,"providerHost":"127.0.0.1","providerPort":8123,"serverFlags":[],"providerDebugCaptureEnabled":true,"providerRoleAssignments":{}}"#.utf8
+        )
+
+        let settings = try JSONDecoder().decode(DashboardSettings.self, from: json)
+
+        XCTAssertEqual(settings.providerGenerationDefaults.ask, ProviderGenerationSettings(temperature: 0.3, topP: 0.9, maxTokens: 2048))
+        XCTAssertEqual(settings.providerGenerationDefaults.plan, ProviderGenerationSettings(temperature: 0.2, topP: 0.95, maxTokens: 4096))
+        XCTAssertEqual(settings.providerGenerationDefaults.coding, ProviderGenerationSettings(temperature: 0.0, topP: 1.0, maxTokens: 2048))
     }
 
     func testDashboardSettingsDefaultsPartialDownloadSettingsFields() throws {

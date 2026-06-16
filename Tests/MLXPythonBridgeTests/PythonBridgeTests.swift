@@ -95,6 +95,182 @@ final class PythonBridgeTests: XCTestCase {
         XCTAssertEqual(compatibility, .runnable(modelType: "diffusion_gemma"))
     }
 
+    func testRuntimeCapabilitiesDetectInstalledModelModulesFromPackageRoot() throws {
+        let root = try temporaryDirectory()
+        let models = root.appending(path: "mlx_lm/models", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: models, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: models.appending(path: "nemotron_labs_diffusion.py").path, contents: Data())
+
+        let capabilities = MLXModelRuntimeCapabilities.inspectingInstalledPackage(
+            sitePackagesURL: root,
+            mlxLMVersion: "0.31.3"
+        )
+
+        XCTAssertEqual(capabilities.mlxLMVersion, "0.31.3")
+        XCTAssertTrue(capabilities.supports(modelType: "nemotron_labs_diffusion"))
+    }
+
+    func testRuntimeCompatibilityRejectsNemotronDiffusionWhenRuntimeModuleIsMissing() throws {
+        let compatibility = MLXModelRuntimeCompatibilityChecker(
+            runtimeCapabilities: MLXModelRuntimeCapabilities(mlxLMVersion: "0.31.3")
+        ).compatibility(modelType: "nemotron_labs_diffusion")
+
+        XCTAssertEqual(
+            compatibility,
+            .unsupported(
+                modelType: "nemotron_labs_diffusion",
+                reason: "Installed mlx-lm 0.31.3 does not support model_type nemotron_labs_diffusion"
+            )
+        )
+    }
+
+    func testPythonEnvironmentManagerInspectsMLXLMRuntimeCapabilitiesWithoutImportingMLXLM() async throws {
+        let root = try temporaryDirectory()
+        let models = root.appending(path: "mlx_lm/models", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: models, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: models.appending(path: "nemotron_labs_diffusion.py").path, contents: Data())
+        let runner = FakeCommandRunner(results: [
+            "runtime-capabilities": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"site_packages": "\#(root.path)", "version": "0.31.3"}"#,
+                standardError: ""
+            )
+        ])
+        let manager = PythonEnvironmentManager(runner: runner)
+
+        let capabilities = try await manager.mlxLMRuntimeCapabilities(
+            pythonExecutable: URL(filePath: "/tmp/python")
+        )
+
+        XCTAssertEqual(capabilities.mlxLMVersion, "0.31.3")
+        XCTAssertTrue(capabilities.supports(modelType: "nemotron_labs_diffusion"))
+    }
+
+    func testRuntimePackageUpgradeReportShowsCurrentPackagesWhenNothingIsOutdated() async throws {
+        let runner = FakeCommandRunner(results: [
+            "runtime-package-versions": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"mlx":"0.29.0","mlx-lm":"0.31.3"}"#,
+                standardError: ""
+            ),
+            "pip-outdated": CommandResult(exitCode: 0, standardOutput: #"[]"#, standardError: "")
+        ])
+        let manager = PythonEnvironmentManager(runner: runner)
+
+        let report = try await manager.runtimePackageUpgradeReport(
+            pythonExecutable: URL(filePath: "/tmp/python")
+        )
+
+        XCTAssertFalse(report.hasAvailableUpgrades)
+        XCTAssertEqual(report.status(for: "mlx")?.state, .current)
+        XCTAssertEqual(report.status(for: "mlx")?.installedVersion, "0.29.0")
+        XCTAssertEqual(report.status(for: "mlx")?.latestVersion, "0.29.0")
+        XCTAssertEqual(report.status(for: "mlx-lm")?.state, .current)
+    }
+
+    func testRuntimePackageUpgradeReportShowsAvailableUpgradesFromPipOutdatedJSON() async throws {
+        let runner = FakeCommandRunner(results: [
+            "runtime-package-versions": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"mlx":"0.29.0","mlx-lm":"0.31.3"}"#,
+                standardError: ""
+            ),
+            "pip-outdated": CommandResult(
+                exitCode: 0,
+                standardOutput: #"[{"name":"mlx","version":"0.29.0","latest_version":"0.30.0"},{"name":"mlx-lm","version":"0.31.3","latest_version":"0.32.0"},{"name":"huggingface_hub","version":"0.1","latest_version":"0.2"}]"#,
+                standardError: ""
+            )
+        ])
+        let manager = PythonEnvironmentManager(runner: runner)
+
+        let report = try await manager.runtimePackageUpgradeReport(
+            pythonExecutable: URL(filePath: "/tmp/python")
+        )
+
+        XCTAssertTrue(report.hasAvailableUpgrades)
+        XCTAssertEqual(report.status(for: "mlx")?.state, .upgradeAvailable)
+        XCTAssertEqual(report.status(for: "mlx")?.latestVersion, "0.30.0")
+        XCTAssertEqual(report.status(for: "mlx-lm")?.state, .upgradeAvailable)
+        XCTAssertEqual(report.status(for: "mlx-lm")?.latestVersion, "0.32.0")
+        XCTAssertNil(report.status(for: "huggingface_hub"))
+    }
+
+    func testRuntimePackageUpgradeReportMarksMissingPackageFromVersionMetadata() async throws {
+        let runner = FakeCommandRunner(results: [
+            "runtime-package-versions": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"mlx":"0.29.0","mlx-lm":null}"#,
+                standardError: ""
+            ),
+            "pip-outdated": CommandResult(exitCode: 0, standardOutput: #"[]"#, standardError: "")
+        ])
+        let manager = PythonEnvironmentManager(runner: runner)
+
+        let report = try await manager.runtimePackageUpgradeReport(
+            pythonExecutable: URL(filePath: "/tmp/python")
+        )
+
+        XCTAssertEqual(report.status(for: "mlx")?.state, .current)
+        XCTAssertEqual(report.status(for: "mlx-lm")?.state, .missing)
+        XCTAssertNil(report.status(for: "mlx-lm")?.installedVersion)
+        XCTAssertFalse(report.hasAvailableUpgrades)
+    }
+
+    func testRuntimePackageUpgradeReportKeepsInstalledVersionsWhenPipOutdatedFails() async throws {
+        let runner = FakeCommandRunner(results: [
+            "runtime-package-versions": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"mlx":"0.29.0","mlx-lm":"0.31.3"}"#,
+                standardError: ""
+            ),
+            "pip-outdated": CommandResult(exitCode: 1, standardOutput: "", standardError: "network unavailable")
+        ])
+        let manager = PythonEnvironmentManager(runner: runner)
+
+        let report = try await manager.runtimePackageUpgradeReport(
+            pythonExecutable: URL(filePath: "/tmp/python")
+        )
+
+        XCTAssertFalse(report.hasAvailableUpgrades)
+        XCTAssertEqual(report.status(for: "mlx")?.state, .unknown)
+        XCTAssertEqual(report.status(for: "mlx")?.installedVersion, "0.29.0")
+        XCTAssertEqual(report.status(for: "mlx")?.message, "Unable to check latest version: network unavailable")
+        XCTAssertEqual(report.status(for: "mlx-lm")?.state, .unknown)
+        XCTAssertEqual(report.status(for: "mlx-lm")?.installedVersion, "0.31.3")
+    }
+
+    func testRuntimePackageUpgradeReportKeepsInstalledVersionsWhenPipOutdatedJSONIsMalformed() async throws {
+        let runner = FakeCommandRunner(results: [
+            "runtime-package-versions": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"mlx":"0.29.0","mlx-lm":"0.31.3"}"#,
+                standardError: ""
+            ),
+            "pip-outdated": CommandResult(exitCode: 0, standardOutput: #"not json"#, standardError: "")
+        ])
+        let manager = PythonEnvironmentManager(runner: runner)
+
+        let report = try await manager.runtimePackageUpgradeReport(
+            pythonExecutable: URL(filePath: "/tmp/python")
+        )
+
+        XCTAssertEqual(report.status(for: "mlx")?.state, .unknown)
+        XCTAssertEqual(report.status(for: "mlx")?.installedVersion, "0.29.0")
+        XCTAssertEqual(report.status(for: "mlx-lm")?.state, .unknown)
+    }
+
+    func testPythonEnvironmentManagerUpgradesRuntimePackagesWithPip() async throws {
+        let runner = RecordingCommandRunner(result: CommandResult(exitCode: 0, standardOutput: "", standardError: ""))
+        let manager = PythonEnvironmentManager(runner: runner)
+
+        try await manager.upgradeRuntimePackages(pythonExecutable: URL(filePath: "/tmp/python"))
+
+        XCTAssertEqual(
+            runner.commands.map(\.arguments),
+            [["-m", "pip", "install", "--upgrade", "mlx", "mlx-lm"]]
+        )
+    }
+
     func testCacheManagerDeletesWholeRepoCacheFolderForModel() throws {
         let root = try temporaryDirectory()
         let snapshot = root.appending(path: "models--mlx-community--Tiny/snapshots/abc123", directoryHint: .isDirectory)
@@ -587,6 +763,14 @@ private struct FakeCommandRunner: CommandRunning {
             key = "install"
         } else if script.contains("whoami") {
             key = "whoami"
+        } else if script.contains("MLXDashboard runtime package versions") {
+            key = "runtime-package-versions"
+        } else if script.contains("metadata.distribution(\"mlx-lm\")") {
+            key = "runtime-capabilities"
+        } else if command.arguments == ["-m", "pip", "list", "--outdated", "--format=json"] {
+            key = "pip-outdated"
+        } else if command.arguments == ["-m", "pip", "install", "--upgrade", "mlx", "mlx-lm"] {
+            key = "runtime-upgrade"
         } else {
             key = script
         }

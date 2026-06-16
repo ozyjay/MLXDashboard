@@ -2,13 +2,16 @@ import Foundation
 import MLXCore
 
 public struct ProviderRouter: Sendable {
-    private static let modeAliases = ["mlx-ask", "mlx-plan", "mlx-fast"]
+    private static let modeAliases = ["mlx-ask", "mlx-plan", "mlx-coding"]
+    private static let legacyModeAliases = ["mlx-fast"]
+    private static let acceptedModeAliases = modeAliases + legacyModeAliases
 
     private let upstream: any ProviderUpstreamProxyClient
     private let legacyUpstream: (any ProviderUpstreamClient)?
     private let activeModelProvider: @Sendable () -> String?
     private let modelMetadataProvider: @Sendable () -> [String: ProviderModelMetadata]
     private let roleAssignmentsProvider: @Sendable () -> ProviderRoleAssignments
+    private let generationDefaultsProvider: @Sendable () -> ProviderRoleGenerationDefaults
     private let defaultEndpointProvider: @Sendable () -> ProviderUpstreamEndpoint?
     private let roleEndpointProvider: @Sendable (ProviderModelRole) -> ProviderUpstreamEndpoint?
     private let eventLogger: @Sendable (String) -> Void
@@ -34,6 +37,7 @@ public struct ProviderRouter: Sendable {
         activeModelProvider: @escaping @Sendable () -> String? = { nil },
         modelMetadataProvider: @escaping @Sendable () -> [String: ProviderModelMetadata] = { [:] },
         roleAssignmentsProvider: @escaping @Sendable () -> ProviderRoleAssignments = { ProviderRoleAssignments() },
+        generationDefaultsProvider: @escaping @Sendable () -> ProviderRoleGenerationDefaults = { .recommendedDefault },
         defaultEndpointProvider: @escaping @Sendable () -> ProviderUpstreamEndpoint?,
         roleEndpointProvider: @escaping @Sendable (ProviderModelRole) -> ProviderUpstreamEndpoint?,
         eventLogger: @escaping @Sendable (String) -> Void = { _ in },
@@ -45,6 +49,7 @@ public struct ProviderRouter: Sendable {
             activeModelProvider: activeModelProvider,
             modelMetadataProvider: modelMetadataProvider,
             roleAssignmentsProvider: roleAssignmentsProvider,
+            generationDefaultsProvider: generationDefaultsProvider,
             defaultEndpointProvider: defaultEndpointProvider,
             roleEndpointProvider: roleEndpointProvider,
             eventLogger: eventLogger,
@@ -57,6 +62,7 @@ public struct ProviderRouter: Sendable {
         activeModelProvider: @escaping @Sendable () -> String? = { nil },
         modelMetadataProvider: @escaping @Sendable () -> [String: ProviderModelMetadata] = { [:] },
         roleAssignmentsProvider: @escaping @Sendable () -> ProviderRoleAssignments = { ProviderRoleAssignments() },
+        generationDefaultsProvider: @escaping @Sendable () -> ProviderRoleGenerationDefaults = { .recommendedDefault },
         eventLogger: @escaping @Sendable (String) -> Void = { _ in },
         debugRecorder: ProviderDebugRecorder? = nil
     ) {
@@ -66,6 +72,7 @@ public struct ProviderRouter: Sendable {
             activeModelProvider: activeModelProvider,
             modelMetadataProvider: modelMetadataProvider,
             roleAssignmentsProvider: roleAssignmentsProvider,
+            generationDefaultsProvider: generationDefaultsProvider,
             defaultEndpointProvider: { nil },
             roleEndpointProvider: { _ in nil },
             eventLogger: eventLogger,
@@ -79,6 +86,7 @@ public struct ProviderRouter: Sendable {
         activeModelProvider: @escaping @Sendable () -> String?,
         modelMetadataProvider: @escaping @Sendable () -> [String: ProviderModelMetadata],
         roleAssignmentsProvider: @escaping @Sendable () -> ProviderRoleAssignments,
+        generationDefaultsProvider: @escaping @Sendable () -> ProviderRoleGenerationDefaults,
         defaultEndpointProvider: @escaping @Sendable () -> ProviderUpstreamEndpoint?,
         roleEndpointProvider: @escaping @Sendable (ProviderModelRole) -> ProviderUpstreamEndpoint?,
         eventLogger: @escaping @Sendable (String) -> Void,
@@ -89,6 +97,7 @@ public struct ProviderRouter: Sendable {
         self.activeModelProvider = activeModelProvider
         self.modelMetadataProvider = modelMetadataProvider
         self.roleAssignmentsProvider = roleAssignmentsProvider
+        self.generationDefaultsProvider = generationDefaultsProvider
         self.defaultEndpointProvider = defaultEndpointProvider
         self.roleEndpointProvider = roleEndpointProvider
         self.eventLogger = eventLogger
@@ -410,7 +419,7 @@ public struct ProviderRouter: Sendable {
     }
 
     private func isAdvertisedModel(_ model: String) -> Bool {
-        advertisedModels().contains(model)
+        Self.acceptedModeAliases.contains(model) || advertisedModels().contains(model)
     }
 
     private func androidStudioV0AdvertisedModels() -> [String] {
@@ -425,12 +434,12 @@ public struct ProviderRouter: Sendable {
     }
 
     private func isAndroidStudioV0AdvertisedModel(_ model: String) -> Bool {
-        androidStudioV0AdvertisedModels().contains(model)
+        Self.acceptedModeAliases.contains(model) || androidStudioV0AdvertisedModels().contains(model)
     }
 
     private func aliasResolution(for selectedModel: String?) -> String? {
         guard let selectedModel,
-              Self.modeAliases.contains(selectedModel),
+              Self.acceptedModeAliases.contains(selectedModel),
               let activeModel = activeModel()
         else { return nil }
         return "\(selectedModel) -> \(activeModel)"
@@ -524,12 +533,12 @@ public struct ProviderRouter: Sendable {
     }
 
     private func modelMetadata(for model: String) -> ProviderModelMetadata {
-        if Self.modeAliases.contains(model),
+        if Self.acceptedModeAliases.contains(model),
            let role = role(forAlias: model),
            let roleModel = roleAssignmentsProvider().model(for: role) {
             return modelMetadataProvider()[roleModel] ?? .inferred(modelID: roleModel)
         }
-        if Self.modeAliases.contains(model), let activeModel = activeModel() {
+        if Self.acceptedModeAliases.contains(model), let activeModel = activeModel() {
             return modelMetadataProvider()[activeModel] ?? .inferred(modelID: activeModel)
         }
         return modelMetadataProvider()[model] ?? .inferred(modelID: model)
@@ -894,7 +903,7 @@ public struct ProviderRouter: Sendable {
         let upstreamEndpoint = routingDecision.upstreamEndpoint
         debugContext.routingDecision = routingDecision
         if let selectedModel,
-           Self.modeAliases.contains(selectedModel) {
+           Self.acceptedModeAliases.contains(selectedModel) {
             debugContext.aliasResolution = "\(selectedModel) -> \(routingDecision.upstreamModel)"
             if routingDecision.upstreamModel == activeModel {
                 eventLogger("Provider resolved model alias \(selectedModel) to active model \(routingDecision.upstreamModel)")
@@ -914,6 +923,9 @@ public struct ProviderRouter: Sendable {
         }
         if let rewrittenModel = routingDecision.rewrittenModel {
             payload["model"] = rewrittenModel
+        }
+        if let inferredRole = routingDecision.inferredRole {
+            applyGenerationDefaults(for: inferredRole, to: &payload)
         }
         if routingDecision.shouldInjectMetadata,
            debugRecorder?.isEnabledNow == true {
@@ -955,6 +967,19 @@ public struct ProviderRouter: Sendable {
         )
     }
 
+    private func applyGenerationDefaults(for role: ProviderModelRole, to payload: inout [String: Any]) {
+        let settings = generationDefaultsProvider().settings(for: role).validated()
+        if payload["temperature"] == nil {
+            payload["temperature"] = settings.temperature
+        }
+        if payload["top_p"] == nil {
+            payload["top_p"] = settings.topP
+        }
+        if payload["max_tokens"] == nil {
+            payload["max_tokens"] = settings.maxTokens
+        }
+    }
+
     private func routingDecision(
         selectedModel: String?,
         payload: [String: Any],
@@ -972,7 +997,7 @@ public struct ProviderRouter: Sendable {
             return "role server unavailable; using default endpoint"
         }
 
-        let selectedAlias = selectedModel.flatMap { Self.modeAliases.contains($0) ? $0 : nil }
+        let selectedAlias = selectedModel.flatMap { Self.acceptedModeAliases.contains($0) ? $0 : nil }
         let aliasRole = selectedAlias.flatMap(role(forAlias:))
         let inferredRole: ProviderModelRole?
         if containsPlanningModePrompt(in: payload["messages"]) {
@@ -1069,7 +1094,7 @@ public struct ProviderRouter: Sendable {
             .ask
         case "mlx-plan":
             .plan
-        case "mlx-fast":
+        case "mlx-coding", "mlx-fast":
             .coding
         default:
             nil

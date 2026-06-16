@@ -163,9 +163,6 @@ enum ModelSearchGrouping {
         installedRecords: [String: ModelRecord],
         installingModelID: String?
     ) -> ModelVariantInstallState {
-        if modelID == installingModelID {
-            return .installing
-        }
         switch installedRecords[modelID]?.status {
         case .installed:
             return .installed
@@ -175,8 +172,10 @@ enum ModelSearchGrouping {
             return .paused
         case .installing:
             return .installing
-        case .removed, nil:
+        case .removed:
             return .notInstalled
+        case nil:
+            return modelID == installingModelID ? .installing : .notInstalled
         }
     }
 }

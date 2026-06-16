@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a local multi-model role server pool so `mlx-ask`, `mlx-plan`, and `mlx-fast` can route to different assigned MLX models while duplicate assignments share one process.
+**Goal:** Add a local multi-model role server pool so `mlx-ask`, `mlx-plan`, and `mlx-coding` can route to different assigned MLX models while duplicate assignments share one process.
 
 **Architecture:** Introduce a focused role-pool controller in `MLXServerControl` that plans one `mlx_lm.server` per unique model, always bound to `127.0.0.1`. Refactor provider upstream proxying so `ProviderRouter` selects a per-request upstream endpoint from the pool and falls back to the default active endpoint when a role endpoint is missing or stopped. Surface compact role-server status rows in the existing dashboard controls.
 
@@ -1579,10 +1579,10 @@ Run the app and perform:
 6. Confirm role status rows show Ask shared, Coding shared, Plan running.
 7. Send a request with model mlx-plan.
 8. Confirm logs route mlx-plan to Devstral on the plan port.
-9. Send a request with model mlx-fast.
-10. Confirm logs route mlx-fast to Gemma on the shared port.
+9. Send a request with model mlx-coding.
+10. Confirm logs route mlx-coding to Gemma on the shared port.
 11. Stop the Gemma role row.
-12. Confirm mlx-fast falls back to the active/default model and logs the fallback.
+12. Confirm mlx-coding falls back to the active/default model and logs the fallback.
 ```
 
 Expected: the app stays local-only, starts two MLX server processes for Gemma plus Devstral when Gemma is also the active/default model, and provider fallback is visible in logs.

@@ -3,6 +3,7 @@ import Foundation
 public enum MLXModelRuntimeCompatibility: Equatable, Sendable {
     case runnable(modelType: String?)
     case unsupported(modelType: String, reason: String)
+    case unknown(reason: String)
 
     public var isRunnable: Bool {
         if case .runnable = self {
@@ -15,6 +16,9 @@ public enum MLXModelRuntimeCompatibility: Equatable, Sendable {
         if case .unsupported(_, let reason) = self {
             return reason
         }
+        if case .unknown(let reason) = self {
+            return reason
+        }
         return nil
     }
 }
@@ -24,7 +28,8 @@ public struct MLXModelRuntimeCompatibilityChecker: Sendable {
         "gemma4_unified"
     ]
     private static let capabilityGatedModelTypes: Set<String> = [
-        "diffusion_gemma"
+        "diffusion_gemma",
+        "nemotron_labs_diffusion"
     ]
 
     private let runtimeCapabilities: MLXModelRuntimeCapabilities
@@ -40,9 +45,19 @@ public struct MLXModelRuntimeCompatibilityChecker: Sendable {
 
         if Self.unsupportedModelTypes.contains(modelType)
             || Self.capabilityGatedModelTypes.contains(modelType) && !runtimeCapabilities.supports(modelType: modelType) {
-            return .unsupported(modelType: modelType, reason: "Unsupported by installed mlx-lm: \(modelType)")
+            return .unsupported(
+                modelType: modelType,
+                reason: runtimeCapabilities.unsupportedReason(modelType: modelType)
+            )
         }
         return .runnable(modelType: modelType)
+    }
+
+    public func compatibility(discoveredModelType modelType: String?) -> MLXModelRuntimeCompatibility {
+        guard let modelType, !modelType.isEmpty else {
+            return .unknown(reason: "Model config metadata was unavailable before download.")
+        }
+        return compatibility(modelType: modelType)
     }
 
     public func compatibility(localPath: String?) -> MLXModelRuntimeCompatibility {
@@ -65,12 +80,39 @@ public struct MLXModelRuntimeCompatibilityChecker: Sendable {
 
 public struct MLXModelRuntimeCapabilities: Equatable, Sendable {
     private let supportedModelTypes: Set<String>
+    public var mlxLMVersion: String?
 
-    public init(supportedModelTypes: Set<String> = []) {
+    public init(supportedModelTypes: Set<String> = [], mlxLMVersion: String? = nil) {
         self.supportedModelTypes = Set(supportedModelTypes.map { $0.lowercased() })
+        self.mlxLMVersion = mlxLMVersion
     }
 
     public func supports(modelType: String) -> Bool {
         supportedModelTypes.contains(modelType.lowercased())
+    }
+
+    public func unsupportedReason(modelType: String) -> String {
+        if let mlxLMVersion, !mlxLMVersion.isEmpty {
+            return "Installed mlx-lm \(mlxLMVersion) does not support model_type \(modelType)"
+        }
+        return "Unsupported by installed mlx-lm: \(modelType)"
+    }
+
+    public static func inspectingInstalledPackage(sitePackagesURL: URL, mlxLMVersion: String? = nil) -> Self {
+        let modelsURL = sitePackagesURL.appending(path: "mlx_lm/models", directoryHint: .isDirectory)
+        let contents = (try? FileManager.default.contentsOfDirectory(
+            at: modelsURL,
+            includingPropertiesForKeys: nil
+        )) ?? []
+        let modelTypes = contents.compactMap { url -> String? in
+            guard url.pathExtension == "py" else { return nil }
+            let name = url.deletingPathExtension().lastPathComponent
+            guard name != "__init__" else { return nil }
+            return name
+        }
+        return MLXModelRuntimeCapabilities(
+            supportedModelTypes: Set(modelTypes),
+            mlxLMVersion: mlxLMVersion
+        )
     }
 }

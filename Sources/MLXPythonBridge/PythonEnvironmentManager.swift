@@ -10,6 +10,52 @@ public struct PythonEnvironmentStatus: Sendable, Equatable {
     }
 }
 
+public enum PythonPackageVersionState: String, Codable, Equatable, Sendable {
+    case missing
+    case current
+    case upgradeAvailable
+    case unknown
+}
+
+public struct PythonPackageVersionStatus: Codable, Equatable, Identifiable, Sendable {
+    public var id: String { packageName }
+    public var packageName: String
+    public var installedVersion: String?
+    public var latestVersion: String?
+    public var state: PythonPackageVersionState
+    public var message: String?
+
+    public init(
+        packageName: String,
+        installedVersion: String? = nil,
+        latestVersion: String? = nil,
+        state: PythonPackageVersionState,
+        message: String? = nil
+    ) {
+        self.packageName = packageName
+        self.installedVersion = installedVersion
+        self.latestVersion = latestVersion
+        self.state = state
+        self.message = message
+    }
+}
+
+public struct PythonPackageUpgradeReport: Codable, Equatable, Sendable {
+    public var statuses: [PythonPackageVersionStatus]
+
+    public var hasAvailableUpgrades: Bool {
+        statuses.contains { $0.state == .upgradeAvailable }
+    }
+
+    public init(statuses: [PythonPackageVersionStatus] = []) {
+        self.statuses = statuses
+    }
+
+    public func status(for packageName: String) -> PythonPackageVersionStatus? {
+        statuses.first { $0.packageName == packageName }
+    }
+}
+
 public struct PythonEnvironmentManager: Sendable {
     public let paths: AppPaths
     private let runner: any CommandRunning
@@ -62,7 +108,7 @@ public struct PythonEnvironmentManager: Sendable {
         let result = try await runner.run(
             Command(
                 executableURL: python,
-                arguments: ["-m", "pip", "install", "--upgrade", "mlx-lm", "huggingface_hub"]
+                arguments: ["-m", "pip", "install", "--upgrade", "mlx", "mlx-lm", "huggingface_hub"]
             )
         )
         guard result.exitCode == 0 else {
@@ -75,11 +121,183 @@ public struct PythonEnvironmentManager: Sendable {
         let report = try await checker.checkPackages(
             pythonExecutable: python,
             packages: [
+                PythonPackage(importName: "mlx", installName: "mlx"),
                 PythonPackage(importName: "mlx_lm", installName: "mlx-lm"),
                 PythonPackage(importName: "huggingface_hub", installName: "huggingface_hub")
             ]
         )
         return PythonEnvironmentStatus(pythonExecutable: python, packageReport: report)
+    }
+
+    public func runtimePackageUpgradeReport() async throws -> PythonPackageUpgradeReport {
+        let python = try await ensureVenv()
+        return try await runtimePackageUpgradeReport(pythonExecutable: python)
+    }
+
+    public func runtimePackageUpgradeReport(pythonExecutable: URL) async throws -> PythonPackageUpgradeReport {
+        let packageNames = ["mlx", "mlx-lm"]
+        let installedVersions = try await runtimePackageVersions(
+            pythonExecutable: pythonExecutable,
+            packageNames: packageNames
+        )
+        let outdatedResult = try await runner.run(Command(
+            executableURL: pythonExecutable,
+            arguments: ["-m", "pip", "list", "--outdated", "--format=json"]
+        ))
+
+        guard outdatedResult.exitCode == 0 else {
+            let message = "Unable to check latest version: \(cleaned(outdatedResult.standardError))"
+            return PythonPackageUpgradeReport(statuses: packageNames.map { packageName in
+                statusWhenLatestUnknown(
+                    packageName: packageName,
+                    installedVersion: installedVersions[packageName] ?? nil,
+                    message: message
+                )
+            })
+        }
+
+        guard let outdatedPackages = parseOutdatedPackages(from: outdatedResult.standardOutput) else {
+            return PythonPackageUpgradeReport(statuses: packageNames.map { packageName in
+                statusWhenLatestUnknown(
+                    packageName: packageName,
+                    installedVersion: installedVersions[packageName] ?? nil,
+                    message: "Unable to parse latest version information."
+                )
+            })
+        }
+
+        return PythonPackageUpgradeReport(statuses: packageNames.map { packageName in
+            let installedVersion = installedVersions[packageName] ?? nil
+            guard let installedVersion else {
+                return PythonPackageVersionStatus(packageName: packageName, state: .missing)
+            }
+            if let latestVersion = outdatedPackages[packageName], latestVersion != installedVersion {
+                return PythonPackageVersionStatus(
+                    packageName: packageName,
+                    installedVersion: installedVersion,
+                    latestVersion: latestVersion,
+                    state: .upgradeAvailable
+                )
+            }
+            return PythonPackageVersionStatus(
+                packageName: packageName,
+                installedVersion: installedVersion,
+                latestVersion: installedVersion,
+                state: .current
+            )
+        })
+    }
+
+    public func upgradeRuntimePackages(pythonExecutable: URL) async throws {
+        let result = try await runner.run(Command(
+            executableURL: pythonExecutable,
+            arguments: ["-m", "pip", "install", "--upgrade", "mlx", "mlx-lm"]
+        ))
+        guard result.exitCode == 0 else {
+            throw PythonEnvironmentError.packageInstallFailed(result.standardError)
+        }
+    }
+
+    public func mlxLMRuntimeCapabilities(pythonExecutable: URL) async throws -> MLXModelRuntimeCapabilities {
+        let script = """
+import importlib.metadata as metadata
+import json
+
+try:
+    dist = metadata.distribution("mlx-lm")
+    print(json.dumps({
+        "site_packages": str(dist.locate_file("")),
+        "version": metadata.version("mlx-lm"),
+    }))
+except Exception as exc:
+    raise SystemExit(str(exc))
+"""
+        let result = try await runner.run(
+            Command(executableURL: pythonExecutable, arguments: ["-c", script])
+        )
+        guard result.exitCode == 0 else {
+            throw PythonEnvironmentError.runtimeCapabilityInspectionFailed(result.standardError)
+        }
+        guard let data = result.standardOutput.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sitePackagesPath = object["site_packages"] as? String,
+              !sitePackagesPath.isEmpty
+        else {
+            throw PythonEnvironmentError.runtimeCapabilityInspectionFailed(result.standardOutput)
+        }
+        return MLXModelRuntimeCapabilities.inspectingInstalledPackage(
+            sitePackagesURL: URL(filePath: sitePackagesPath),
+            mlxLMVersion: object["version"] as? String
+        )
+    }
+
+    private func runtimePackageVersions(
+        pythonExecutable: URL,
+        packageNames: [String]
+    ) async throws -> [String: String?] {
+        let script = """
+import importlib.metadata as metadata
+import json
+import sys
+
+packages = sys.argv[1:]
+versions = {}
+for package in packages:
+    try:
+        versions[package] = metadata.version(package)
+    except Exception:
+        versions[package] = None
+print(json.dumps(versions))
+# MLXDashboard runtime package versions
+"""
+        let result = try await runner.run(Command(
+            executableURL: pythonExecutable,
+            arguments: ["-c", script] + packageNames
+        ))
+        guard result.exitCode == 0 else {
+            return Dictionary(uniqueKeysWithValues: packageNames.map { ($0, nil) })
+        }
+        guard let data = result.standardOutput.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return Dictionary(uniqueKeysWithValues: packageNames.map { ($0, nil) })
+        }
+        return Dictionary(uniqueKeysWithValues: packageNames.map { packageName in
+            (packageName, object[packageName] as? String)
+        })
+    }
+
+    private func parseOutdatedPackages(from output: String) -> [String: String]? {
+        guard let data = output.data(using: .utf8),
+              let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return nil }
+        return Dictionary(uniqueKeysWithValues: array.compactMap { package -> (String, String)? in
+            guard let name = package["name"] as? String,
+                  let latestVersion = package["latest_version"] as? String
+            else { return nil }
+            return (name, latestVersion)
+        })
+    }
+
+    private func statusWhenLatestUnknown(
+        packageName: String,
+        installedVersion: String?,
+        message: String
+    ) -> PythonPackageVersionStatus {
+        guard let installedVersion else {
+            return PythonPackageVersionStatus(packageName: packageName, state: .missing)
+        }
+        return PythonPackageVersionStatus(
+            packageName: packageName,
+            installedVersion: installedVersion,
+            state: .unknown,
+            message: message
+        )
+    }
+
+    private func cleaned(_ message: String) -> String {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "unknown error" : trimmed
     }
 }
 
@@ -87,6 +305,7 @@ public enum PythonEnvironmentError: Error, Equatable, CustomStringConvertible {
     case pythonNotFound(String)
     case venvCreationFailed(String)
     case packageInstallFailed(String)
+    case runtimeCapabilityInspectionFailed(String)
 
     public var description: String {
         switch self {
@@ -96,6 +315,8 @@ public enum PythonEnvironmentError: Error, Equatable, CustomStringConvertible {
             return "Virtual environment creation failed: \(message)"
         case .packageInstallFailed(let message):
             return "Package installation failed: \(message)"
+        case .runtimeCapabilityInspectionFailed(let message):
+            return "Runtime capability inspection failed: \(message)"
         }
     }
 }

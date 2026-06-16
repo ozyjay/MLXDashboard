@@ -75,12 +75,12 @@ final class ProviderRouterTests: XCTestCase {
             ProviderRequest(method: "GET", path: "/api/tags", headers: [:], body: Data())
         )
 
-        XCTAssertEqual(try modelIDs(in: models.body), ["mlx-ask", "mlx-plan", "mlx-fast", "mlx-community/Tiny"])
-        XCTAssertEqual(try modelIDs(in: v0Models.body), ["mlx-ask", "mlx-plan", "mlx-fast", "mlx-community/Tiny"])
+        XCTAssertEqual(try modelIDs(in: models.body), ["mlx-ask", "mlx-plan", "mlx-coding", "mlx-community/Tiny"])
+        XCTAssertEqual(try modelIDs(in: v0Models.body), ["mlx-ask", "mlx-plan", "mlx-coding", "mlx-community/Tiny"])
 
         let tagsJSON = try JSONSerialization.jsonObject(with: tags.body) as? [String: Any]
         let tagModels = try XCTUnwrap(tagsJSON?["models"] as? [[String: Any]])
-        XCTAssertEqual(tagModels.compactMap { $0["name"] as? String }, ["mlx-ask", "mlx-plan", "mlx-fast", "mlx-community/Tiny"])
+        XCTAssertEqual(tagModels.compactMap { $0["name"] as? String }, ["mlx-ask", "mlx-plan", "mlx-coding", "mlx-community/Tiny"])
         XCTAssertEqual(upstream.requests, [])
     }
 
@@ -92,25 +92,25 @@ final class ProviderRouterTests: XCTestCase {
         )
 
         let metadata = try await router.handle(
-            ProviderRequest(method: "GET", path: "/api/v0/models/mlx-fast", headers: [:], body: Data())
+            ProviderRequest(method: "GET", path: "/api/v0/models/mlx-coding", headers: [:], body: Data())
         )
         let show = try await router.handle(
             ProviderRequest(
                 method: "POST",
                 path: "/api/show",
                 headers: [:],
-                body: Data(#"{"model":"mlx-fast"}"#.utf8)
+                body: Data(#"{"model":"mlx-coding"}"#.utf8)
             )
         )
 
         XCTAssertEqual(metadata.status, 200)
         let metadataJSON = try JSONSerialization.jsonObject(with: metadata.body) as? [String: Any]
-        XCTAssertEqual(metadataJSON?["id"] as? String, "mlx-fast")
+        XCTAssertEqual(metadataJSON?["id"] as? String, "mlx-coding")
         XCTAssertEqual(metadataJSON?["compatibility_type"] as? String, "mlx")
 
         XCTAssertEqual(show.status, 200)
         let showJSON = try JSONSerialization.jsonObject(with: show.body) as? [String: Any]
-        XCTAssertEqual(showJSON?["model"] as? String, "mlx-fast")
+        XCTAssertEqual(showJSON?["model"] as? String, "mlx-coding")
         XCTAssertEqual(upstream.requests, [])
     }
 
@@ -236,12 +236,12 @@ final class ProviderRouterTests: XCTestCase {
         let data = try XCTUnwrap(json?["data"] as? [[String: Any]])
         let ask = try XCTUnwrap(data.first { $0["id"] as? String == "mlx-ask" })
         let plan = try XCTUnwrap(data.first { $0["id"] as? String == "mlx-plan" })
-        let fast = try XCTUnwrap(data.first { $0["id"] as? String == "mlx-fast" })
+        let coding = try XCTUnwrap(data.first { $0["id"] as? String == "mlx-coding" })
         XCTAssertEqual(ask["generation_type"] as? String, "text")
         XCTAssertEqual(ask["model_family"] as? String, "diffusion_text")
         XCTAssertEqual(ask["state"] as? String, "loaded")
         XCTAssertEqual(plan["model_family"] as? String, "chat")
-        XCTAssertEqual(fast["model_family"] as? String, "chat")
+        XCTAssertEqual(coding["model_family"] as? String, "chat")
         XCTAssertEqual(upstream.requests, [])
     }
 
@@ -294,11 +294,11 @@ final class ProviderRouterTests: XCTestCase {
             ProviderRequest(method: "GET", path: "/api/v0/models", headers: [:], body: Data())
         )
 
-        XCTAssertEqual(try modelIDs(in: v1Models.body), ["mlx-ask", "mlx-plan", "mlx-fast", "mlx-community/Tiny"])
+        XCTAssertEqual(try modelIDs(in: v1Models.body), ["mlx-ask", "mlx-plan", "mlx-coding", "mlx-community/Tiny"])
 
         let json = try JSONSerialization.jsonObject(with: v0Models.body) as? [String: Any]
         let data = try XCTUnwrap(json?["data"] as? [[String: Any]])
-        XCTAssertEqual(data.compactMap { $0["id"] as? String }, ["mlx-ask", "mlx-plan", "mlx-fast", "mlx-community/Tiny", "mlx-community/Diffusion-Gemma"])
+        XCTAssertEqual(data.compactMap { $0["id"] as? String }, ["mlx-ask", "mlx-plan", "mlx-coding", "mlx-community/Tiny", "mlx-community/Diffusion-Gemma"])
         let unsupported = try XCTUnwrap(data.first { $0["id"] as? String == "mlx-community/Diffusion-Gemma" })
         XCTAssertEqual(unsupported["generation_type"] as? String, "text")
         XCTAssertEqual(unsupported["model_family"] as? String, "diffusion_text")
@@ -333,7 +333,7 @@ final class ProviderRouterTests: XCTestCase {
         let data = try XCTUnwrap(json?["data"] as? [[String: Any]])
         XCTAssertEqual(
             data.compactMap { $0["id"] as? String },
-            ["mlx-ask", "mlx-plan", "mlx-fast", "mlx-community/Tiny", "mlx-community/Diffusion-Gemma"]
+            ["mlx-ask", "mlx-plan", "mlx-coding", "mlx-community/Tiny", "mlx-community/Diffusion-Gemma"]
         )
         XCTAssertNil(data.first { $0["id"] as? String == "mlx-community/Other-Installed" })
         let unsupported = try XCTUnwrap(data.first { $0["id"] as? String == "mlx-community/Diffusion-Gemma" })
@@ -393,7 +393,7 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(response.status, 200)
         let json = try JSONSerialization.jsonObject(with: response.body) as? [String: Any]
         let data = try XCTUnwrap(json?["data"] as? [[String: Any]])
-        XCTAssertEqual(data.compactMap { $0["id"] as? String }, ["mlx-ask", "mlx-plan", "mlx-fast", "mlx-community/Missing"])
+        XCTAssertEqual(data.compactMap { $0["id"] as? String }, ["mlx-ask", "mlx-plan", "mlx-coding", "mlx-community/Missing"])
         for model in data {
             XCTAssertEqual(model["state"] as? String, "not_installed")
             XCTAssertEqual(model["reason"] as? String, "Model is not installed in the local Hugging Face cache.")
@@ -713,7 +713,7 @@ final class ProviderRouterTests: XCTestCase {
             activeModelProvider: { "mlx-community/Tiny" },
             eventLogger: logger.log
         )
-        let body = Data(#"{"model":"mlx-fast","messages":[{"role":"user","content":"hi"}],"stream":false}"#.utf8)
+        let body = Data(#"{"model":"mlx-coding","messages":[{"role":"user","content":"hi"}],"stream":false}"#.utf8)
 
         let chat = try await router.handle(
             ProviderRequest(method: "POST", path: "/v1/chat/completions", headers: [:], body: body)
@@ -724,8 +724,30 @@ final class ProviderRouterTests: XCTestCase {
         let json = try JSONSerialization.jsonObject(with: proxied.body) as? [String: Any]
         XCTAssertEqual(json?["model"] as? String, "mlx-community/Tiny")
         XCTAssertTrue(logger.messages.contains {
-            $0 == "Provider resolved model alias mlx-fast to active model mlx-community/Tiny"
+            $0 == "Provider resolved model alias mlx-coding to active model mlx-community/Tiny"
         })
+    }
+
+    func testProviderAcceptsLegacyFastAliasForChatCompletion() async throws {
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Tiny" }
+        )
+        let body = Data(#"{"model":"mlx-fast","messages":[{"role":"user","content":"hi"}],"stream":false}"#.utf8)
+
+        let chat = try await router.handle(
+            ProviderRequest(method: "POST", path: "/v1/chat/completions", headers: [:], body: body)
+        )
+        let metadata = try await router.handle(
+            ProviderRequest(method: "GET", path: "/api/v0/models/mlx-fast", headers: [:], body: Data())
+        )
+
+        XCTAssertEqual(chat.status, 200)
+        XCTAssertEqual(metadata.status, 200)
+        let proxied = try XCTUnwrap(upstream.requests.last)
+        let json = try JSONSerialization.jsonObject(with: proxied.body) as? [String: Any]
+        XCTAssertEqual(json?["model"] as? String, "mlx-community/Tiny")
     }
 
     func testProviderInjectsSelectedModelMetadataWhenDebugCaptureIsEnabled() async throws {
@@ -737,7 +759,7 @@ final class ProviderRouterTests: XCTestCase {
             activeModelProvider: { "mlx-community/Tiny" },
             debugRecorder: ProviderDebugRecorder(fileURL: debugFile, isEnabled: { true })
         )
-        let body = Data(#"{"model":"mlx-fast","messages":[{"role":"user","content":"hi"}],"stream":false}"#.utf8)
+        let body = Data(#"{"model":"mlx-coding","messages":[{"role":"user","content":"hi"}],"stream":false}"#.utf8)
 
         let chat = try await router.handle(
             ProviderRequest(method: "POST", path: "/v1/chat/completions", headers: [:], body: body)
@@ -749,7 +771,7 @@ final class ProviderRouterTests: XCTestCase {
         let messages = try XCTUnwrap(json?["messages"] as? [[String: Any]])
         XCTAssertEqual(messages.first?["role"] as? String, "system")
         let systemText = try XCTUnwrap(messages.first?["content"] as? String)
-        XCTAssertTrue(systemText.contains("Provider selected model alias: mlx-fast."))
+        XCTAssertTrue(systemText.contains("Provider selected model alias: mlx-coding."))
         XCTAssertTrue(systemText.contains("Provider inferred role: coding."))
         XCTAssertTrue(systemText.contains("Actual upstream MLX model: mlx-community/Tiny."))
         XCTAssertEqual(messages.last?["role"] as? String, "user")
@@ -765,7 +787,7 @@ final class ProviderRouterTests: XCTestCase {
             activeModelProvider: { "mlx-community/Tiny" },
             debugRecorder: ProviderDebugRecorder(fileURL: debugFile, isEnabled: { false })
         )
-        let body = Data(#"{"model":"mlx-fast","messages":[{"role":"user","content":"hi"}],"stream":false}"#.utf8)
+        let body = Data(#"{"model":"mlx-coding","messages":[{"role":"user","content":"hi"}],"stream":false}"#.utf8)
 
         let chat = try await router.handle(
             ProviderRequest(method: "POST", path: "/v1/chat/completions", headers: [:], body: body)
@@ -836,7 +858,7 @@ final class ProviderRouterTests: XCTestCase {
                 method: "POST",
                 path: "/v1/chat/completions",
                 headers: [:],
-                body: Data(#"{"model":"mlx-fast","messages":[{"role":"user","content":"hi"}],"stream":false,"tools":[{"type":"function","function":{"name":"write_file"}},{"type":"function","function":{"name":"gradle_build"}}]}"#.utf8)
+                body: Data(#"{"model":"mlx-coding","messages":[{"role":"user","content":"hi"}],"stream":false,"tools":[{"type":"function","function":{"name":"write_file"}},{"type":"function","function":{"name":"gradle_build"}}]}"#.utf8)
             )
         )
 
@@ -851,11 +873,11 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(decision["upstream_model"] as? String, "mlx-community/Loaded")
         XCTAssertEqual(decision["fallback_reason"] as? String, "role server unavailable; using active model")
         XCTAssertTrue(logger.messages.contains {
-            $0 == "Provider routing fallback for mlx-fast: role server unavailable; using active model"
+            $0 == "Provider routing fallback for mlx-coding: role server unavailable; using active model"
         })
     }
 
-    func testProviderRoutingDecisionPlanningPromptOverridesFastAliasRole() async throws {
+    func testProviderRoutingDecisionPlanningPromptOverridesCodingAliasRole() async throws {
         let root = try temporaryDirectory()
         let debugFile = root.appending(path: "provider-debug.jsonl")
         let router = ProviderRouter(
@@ -872,16 +894,80 @@ final class ProviderRouterTests: XCTestCase {
                 method: "POST",
                 path: "/v1/chat/completions",
                 headers: [:],
-                body: Data(#"{"model":"mlx-fast","messages":[{"role":"developer","content":"You are in PLANNING mode. Think first."},{"role":"user","content":"hi"}],"stream":false,"tools":[{"type":"function","function":{"name":"write_file"}}]}"#.utf8)
+                body: Data(#"{"model":"mlx-coding","messages":[{"role":"developer","content":"You are in PLANNING mode. Think first."},{"role":"user","content":"hi"}],"stream":false,"tools":[{"type":"function","function":{"name":"write_file"}}]}"#.utf8)
             )
         )
 
         let record = try lastDebugRecord(in: debugFile)
         let decision = try XCTUnwrap(record["routing_decision"] as? [String: Any])
-        XCTAssertEqual(decision["selected_alias"] as? String, "mlx-fast")
+        XCTAssertEqual(decision["selected_alias"] as? String, "mlx-coding")
         XCTAssertEqual(decision["inferred_role"] as? String, "plan")
         XCTAssertEqual(decision["desired_role_model"] as? String, "mlx-community/Plan")
         XCTAssertEqual(decision["upstream_model"] as? String, "mlx-community/Loaded")
+    }
+
+    func testProviderAppliesRoleGenerationDefaultsToAliasRequests() async throws {
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Plan" },
+            roleAssignmentsProvider: {
+                ProviderRoleAssignments(plan: "mlx-community/Plan")
+            },
+            generationDefaultsProvider: {
+                ProviderRoleGenerationDefaults(
+                    plan: ProviderGenerationSettings(temperature: 0.2, topP: 0.95, maxTokens: 4096)
+                )
+            }
+        )
+
+        _ = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/v1/chat/completions",
+                headers: [:],
+                body: Data(#"{"model":"mlx-plan","messages":[{"role":"user","content":"plan this"}],"stream":false}"#.utf8)
+            )
+        )
+
+        let proxied = try XCTUnwrap(upstream.requests.last)
+        let proxiedJSON = try JSONSerialization.jsonObject(with: proxied.body) as? [String: Any]
+        XCTAssertEqual(proxiedJSON?["model"] as? String, "mlx-community/Plan")
+        XCTAssertEqual(proxiedJSON?["temperature"] as? Double, 0.2)
+        XCTAssertEqual(proxiedJSON?["top_p"] as? Double, 0.95)
+        XCTAssertEqual(proxiedJSON?["max_tokens"] as? Int, 4096)
+    }
+
+    func testProviderRoleGenerationDefaultsDoNotOverrideClientParameters() async throws {
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Coder" },
+            roleAssignmentsProvider: {
+                ProviderRoleAssignments(coding: "mlx-community/Coder")
+            },
+            generationDefaultsProvider: {
+                ProviderRoleGenerationDefaults(
+                    coding: ProviderGenerationSettings(temperature: 0.0, topP: 1.0, maxTokens: 2048)
+                )
+            }
+        )
+
+        _ = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/v1/chat/completions",
+                headers: [:],
+                body: Data(#"{"model":"mlx-coding","messages":[{"role":"user","content":"code this"}],"stream":false,"temperature":0.7,"max_tokens":128}"#.utf8)
+            )
+        )
+
+        let proxied = try XCTUnwrap(upstream.requests.last)
+        let proxiedJSON = try JSONSerialization.jsonObject(with: proxied.body) as? [String: Any]
+        XCTAssertEqual(proxiedJSON?["model"] as? String, "mlx-community/Coder")
+        XCTAssertEqual(proxiedJSON?["temperature"] as? Double, 0.7)
+        XCTAssertEqual(proxiedJSON?["top_p"] as? Double, 1.0)
+        XCTAssertEqual(proxiedJSON?["max_tokens"] as? Int, 128)
     }
 
     func testRoleAliasRoutesToAssignedUpstreamEndpoint() async throws {
@@ -1155,7 +1241,7 @@ final class ProviderRouterTests: XCTestCase {
                 method: "POST",
                 path: "/v1/chat/completions",
                 headers: [:],
-                body: Data(#"{"model":"mlx-fast","messages":[{"role":"user","content":"hi"}],"stream":false}"#.utf8)
+                body: Data(#"{"model":"mlx-coding","messages":[{"role":"user","content":"hi"}],"stream":false}"#.utf8)
             )
         )
 
@@ -1163,7 +1249,7 @@ final class ProviderRouterTests: XCTestCase {
         let proxiedJSON = try JSONSerialization.jsonObject(with: proxied.body) as? [String: Any]
         let messages = try XCTUnwrap(proxiedJSON?["messages"] as? [[String: Any]])
         let systemText = try XCTUnwrap(messages.first?["content"] as? String)
-        XCTAssertTrue(systemText.contains("Provider selected model alias: mlx-fast."))
+        XCTAssertTrue(systemText.contains("Provider selected model alias: mlx-coding."))
         XCTAssertTrue(systemText.contains("Provider inferred role: coding."))
         XCTAssertTrue(systemText.contains("Desired role model: mlx-community/Coder."))
         XCTAssertTrue(systemText.contains("Actual upstream MLX model: mlx-community/Loaded."))
@@ -1179,7 +1265,7 @@ final class ProviderRouterTests: XCTestCase {
             activeModelProvider: { "mlx-community/Tiny" },
             debugRecorder: ProviderDebugRecorder(fileURL: debugFile, isEnabled: { true })
         )
-        let body = Data(#"{"model":"mlx-fast","messages":[{"role":"user","content":"secret prompt"}],"stream":false}"#.utf8)
+        let body = Data(#"{"model":"mlx-coding","messages":[{"role":"user","content":"secret prompt"}],"stream":false}"#.utf8)
 
         let response = try await router.handle(
             ProviderRequest(
@@ -1195,9 +1281,9 @@ final class ProviderRouterTests: XCTestCase {
         let record = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
         XCTAssertEqual(record["method"] as? String, "POST")
         XCTAssertEqual(record["path"] as? String, "/v1/chat/completions")
-        XCTAssertEqual(record["selected_model"] as? String, "mlx-fast")
+        XCTAssertEqual(record["selected_model"] as? String, "mlx-coding")
         XCTAssertEqual(record["response_status"] as? Int, 200)
-        XCTAssertEqual(record["alias_resolution"] as? String, "mlx-fast -> mlx-community/Tiny")
+        XCTAssertEqual(record["alias_resolution"] as? String, "mlx-coding -> mlx-community/Tiny")
         XCTAssertTrue((record["request_body_text"] as? String)?.contains("secret prompt") == true)
         XCTAssertTrue((record["response_body_text"] as? String)?.contains("Hello from chat.") == true)
         XCTAssertEqual(record["top_level_keys"] as? [String], ["messages", "model", "stream"])
@@ -1221,7 +1307,7 @@ final class ProviderRouterTests: XCTestCase {
                 method: "POST",
                 path: "/v1/chat/completions",
                 headers: [:],
-                body: Data(#"{"model":"mlx-fast","messages":[{"role":"user","content":"hi"}],"stream":false}"#.utf8)
+                body: Data(#"{"model":"mlx-coding","messages":[{"role":"user","content":"hi"}],"stream":false}"#.utf8)
             )
         )
 
@@ -1296,7 +1382,7 @@ final class ProviderRouterTests: XCTestCase {
             $0 == "Provider upstream request failed for POST /v1/chat/completions: diffusion server returned 502: model timed out"
         })
         XCTAssertTrue(logger.messages.contains {
-            $0 == "Provider upstream request summary for POST /v1/chat/completions: keys=[messages,model,stream], model=mlx-community/Nemotron-Labs-Diffusion-3B-4bit, stream=false, message_count=1"
+            $0 == "Provider upstream request summary for POST /v1/chat/completions: keys=[max_tokens,messages,model,stream,temperature,top_p], model=mlx-community/Nemotron-Labs-Diffusion-3B-4bit, stream=false, message_count=1"
         })
         XCTAssertFalse(logger.messages.contains { $0.contains("secret prompt") })
     }
@@ -1750,7 +1836,7 @@ final class ProviderRouterTests: XCTestCase {
     }
 
     private func expectedModels(active: String) -> [String] {
-        ["mlx-ask", "mlx-plan", "mlx-fast", active]
+        ["mlx-ask", "mlx-plan", "mlx-coding", active]
     }
 
     private func outputText(in data: Data) throws -> String? {

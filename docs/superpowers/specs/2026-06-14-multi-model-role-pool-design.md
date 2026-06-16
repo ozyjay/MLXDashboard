@@ -60,14 +60,15 @@ The advertised models remain:
 
 - `mlx-ask`
 - `mlx-plan`
-- `mlx-fast`
+- `mlx-coding`
 - active model ID
 
 For chat/completion requests, the provider keeps its current role inference rules:
 
 - `mlx-ask` maps to ask
 - `mlx-plan` maps to plan
-- `mlx-fast` maps to coding
+- `mlx-coding` maps to coding
+- `mlx-fast` is accepted as a legacy alias for coding but is not advertised
 - planning-mode system/developer prompts override alias role to plan
 
 After inferring the role, the provider chooses an upstream:
@@ -119,8 +120,8 @@ Examples:
 
 ```text
 Provider routed mlx-plan role=plan upstream=mlx-community/Devstral... port=8081
-Provider routed mlx-fast role=coding upstream=mlx-community/gemma... port=8082 shared=true
-Provider routing fallback for mlx-fast: role server failed; using active model mlx-community/Devstral...
+Provider routed mlx-coding role=coding upstream=mlx-community/gemma... port=8082 shared=true
+Provider routing fallback for mlx-coding: role server failed; using active model mlx-community/Devstral...
 ```
 
 Debug records should include:
@@ -190,10 +191,10 @@ Manual verification should include:
 2. Assign plan to Devstral.
 3. Start servers and provider.
 4. Confirm the role status table shows Gemma shared by ask/coding and Devstral for plan.
-5. Send Android Studio requests through `mlx-fast` and `mlx-plan`.
-6. Confirm logs show `mlx-fast` routed to Gemma and `mlx-plan` routed to Devstral.
+5. Send Android Studio requests through `mlx-coding` and `mlx-plan`.
+6. Confirm logs show `mlx-coding` routed to Gemma and `mlx-plan` routed to Devstral.
 7. Stop the Gemma role server.
-8. Confirm `mlx-fast` falls back to the active/default model and logs the fallback.
+8. Confirm `mlx-coding` falls back to the active/default model and logs the fallback.
 
 ## Open Decisions Deferred
 

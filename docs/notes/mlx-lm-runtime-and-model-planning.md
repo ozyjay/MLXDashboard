@@ -123,6 +123,16 @@ MLXDashboard should therefore treat context management primarily as a client-sid
 
 Do not assume that `mlx_lm.server` provides a direct equivalent to Ollama's `num_ctx` unless the installed version explicitly documents it.
 
+MLXDashboard applies persisted per-role generation defaults for local provider aliases:
+
+| Alias | Role | Temperature | Top P | Max tokens |
+| --- | --- | --- | --- | --- |
+| `mlx-ask` | Ask | 0.3 | 0.9 | 2048 |
+| `mlx-plan` | Plan | 0.2 | 0.95 | 4096 |
+| `mlx-coding` | Coding | 0.0 | 1.0 | 2048 |
+
+These defaults fill in missing request parameters only. If a client sends `temperature`, `top_p`, or `max_tokens`, the client value wins.
+
 Recommended diagnostic:
 
 ```bash
@@ -541,7 +551,7 @@ mlx_lm.server \
   --port 8083
 ```
 
-MLXDashboard should not automatically start all of these simultaneously on a 64GB system. Prefer one active model server at a time, or at most one primary model plus a lightweight helper model.
+MLXDashboard should not automatically start all of these simultaneously on a 64GB system. Prefer one default model server at a time, or at most one primary model plus a lightweight helper model.
 
 ## How Many Models Should Run at Once?
 

@@ -54,6 +54,18 @@ final class ModelDiscoveryPolicyTests: XCTestCase {
         XCTAssertEqual(families[0].variants.map(\.installState), [.installed, .failed])
     }
 
+    func testTerminalRegistryStateWinsOverStaleInstallingModelID() {
+        let families = ModelSearchGrouping.group([
+            .init(id: "mlx-community/Foo-4bit", downloads: 300),
+            .init(id: "mlx-community/Foo-6bit", downloads: 200)
+        ], installedModels: [
+            ModelRecord(id: "mlx-community/Foo-4bit", status: .installed),
+            ModelRecord(id: "mlx-community/Foo-6bit", status: .failed, message: "download failed")
+        ], installingModelID: "mlx-community/Foo-6bit")
+
+        XCTAssertEqual(families[0].variants.map(\.installState), [.installed, .failed])
+    }
+
     func testDefaultSearchRunsOnlyWhenPackagesAreReadyAndResultsAreEmpty() {
         XCTAssertTrue(ModelDiscoveryPolicy.shouldRunDefaultSearch(isReady: true, hasResults: false))
         XCTAssertFalse(ModelDiscoveryPolicy.shouldRunDefaultSearch(isReady: false, hasResults: false))

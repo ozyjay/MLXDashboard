@@ -53,6 +53,92 @@ public struct ProviderRoleAssignments: Codable, Equatable, Sendable {
     }
 }
 
+public struct ProviderGenerationSettings: Codable, Equatable, Sendable {
+    public var temperature: Double
+    public var topP: Double
+    public var maxTokens: Int
+
+    public init(temperature: Double, topP: Double, maxTokens: Int) {
+        self.temperature = temperature
+        self.topP = topP
+        self.maxTokens = maxTokens
+    }
+
+    public func validated() -> ProviderGenerationSettings {
+        ProviderGenerationSettings(
+            temperature: Self.clamp(temperature, lower: 0, upper: 2),
+            topP: Self.clamp(topP, lower: 0.01, upper: 1),
+            maxTokens: Self.clamp(maxTokens, lower: 1, upper: 32_768)
+        )
+    }
+
+    private static func clamp(_ value: Double, lower: Double, upper: Double) -> Double {
+        min(max(value, lower), upper)
+    }
+
+    private static func clamp(_ value: Int, lower: Int, upper: Int) -> Int {
+        min(max(value, lower), upper)
+    }
+}
+
+public struct ProviderRoleGenerationDefaults: Codable, Equatable, Sendable {
+    public static let recommendedDefault = ProviderRoleGenerationDefaults()
+
+    public var ask: ProviderGenerationSettings
+    public var plan: ProviderGenerationSettings
+    public var coding: ProviderGenerationSettings
+
+    public init(
+        ask: ProviderGenerationSettings = ProviderGenerationSettings(temperature: 0.3, topP: 0.9, maxTokens: 2048),
+        plan: ProviderGenerationSettings = ProviderGenerationSettings(temperature: 0.2, topP: 0.95, maxTokens: 4096),
+        coding: ProviderGenerationSettings = ProviderGenerationSettings(temperature: 0.0, topP: 1.0, maxTokens: 2048)
+    ) {
+        self.ask = ask.validated()
+        self.plan = plan.validated()
+        self.coding = coding.validated()
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case ask
+        case plan
+        case coding
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            ask: try container.decodeIfPresent(ProviderGenerationSettings.self, forKey: .ask)
+                ?? Self.recommendedDefault.ask,
+            plan: try container.decodeIfPresent(ProviderGenerationSettings.self, forKey: .plan)
+                ?? Self.recommendedDefault.plan,
+            coding: try container.decodeIfPresent(ProviderGenerationSettings.self, forKey: .coding)
+                ?? Self.recommendedDefault.coding
+        )
+    }
+
+    public func settings(for role: ProviderModelRole) -> ProviderGenerationSettings {
+        switch role {
+        case .ask:
+            ask
+        case .plan:
+            plan
+        case .coding:
+            coding
+        }
+    }
+
+    public mutating func setSettings(_ settings: ProviderGenerationSettings, for role: ProviderModelRole) {
+        switch role {
+        case .ask:
+            ask = settings.validated()
+        case .plan:
+            plan = settings.validated()
+        case .coding:
+            coding = settings.validated()
+        }
+    }
+}
+
 public enum HuggingFaceDownloadMode: String, Codable, CaseIterable, Equatable, Sendable {
     case standard
     case xetConservative
@@ -163,6 +249,7 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
     public var serverFlags: [String]
     public var providerDebugCaptureEnabled: Bool
     public var providerRoleAssignments: ProviderRoleAssignments
+    public var providerGenerationDefaults: ProviderRoleGenerationDefaults
     public var downloadSettings: HuggingFaceDownloadSettings
 
     public init(
@@ -174,6 +261,7 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
         serverFlags: [String] = [],
         providerDebugCaptureEnabled: Bool = true,
         providerRoleAssignments: ProviderRoleAssignments = ProviderRoleAssignments(),
+        providerGenerationDefaults: ProviderRoleGenerationDefaults = .recommendedDefault,
         downloadSettings: HuggingFaceDownloadSettings = .standardDefault
     ) {
         self.activeModel = activeModel
@@ -184,7 +272,33 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
         self.serverFlags = serverFlags
         self.providerDebugCaptureEnabled = providerDebugCaptureEnabled
         self.providerRoleAssignments = providerRoleAssignments
+        self.providerGenerationDefaults = providerGenerationDefaults
         self.downloadSettings = downloadSettings.validated()
+    }
+
+    public init(
+        activeModel: String? = nil,
+        mlxHost: String = "127.0.0.1",
+        mlxPort: Int = 8080,
+        providerHost: String = "127.0.0.1",
+        providerPort: Int = 8123,
+        serverFlags: [String] = [],
+        providerDebugCaptureEnabled: Bool = true,
+        providerRoleAssignments: ProviderRoleAssignments = ProviderRoleAssignments(),
+        downloadSettings: HuggingFaceDownloadSettings
+    ) {
+        self.init(
+            activeModel: activeModel,
+            mlxHost: mlxHost,
+            mlxPort: mlxPort,
+            providerHost: providerHost,
+            providerPort: providerPort,
+            serverFlags: serverFlags,
+            providerDebugCaptureEnabled: providerDebugCaptureEnabled,
+            providerRoleAssignments: providerRoleAssignments,
+            providerGenerationDefaults: .recommendedDefault,
+            downloadSettings: downloadSettings
+        )
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -196,6 +310,7 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
         case serverFlags
         case providerDebugCaptureEnabled
         case providerRoleAssignments
+        case providerGenerationDefaults
         case downloadSettings
     }
 
@@ -209,6 +324,7 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
         self.serverFlags = try container.decodeIfPresent([String].self, forKey: .serverFlags) ?? []
         self.providerDebugCaptureEnabled = try container.decodeIfPresent(Bool.self, forKey: .providerDebugCaptureEnabled) ?? true
         self.providerRoleAssignments = try container.decodeIfPresent(ProviderRoleAssignments.self, forKey: .providerRoleAssignments) ?? ProviderRoleAssignments()
+        self.providerGenerationDefaults = try container.decodeIfPresent(ProviderRoleGenerationDefaults.self, forKey: .providerGenerationDefaults) ?? .recommendedDefault
         self.downloadSettings = (try container.decodeIfPresent(HuggingFaceDownloadSettings.self, forKey: .downloadSettings) ?? .standardDefault).validated()
     }
 

@@ -1,5 +1,6 @@
 import SwiftUI
 import MLXCore
+import MLXPythonBridge
 import MLXServerControl
 
 enum DashboardSection: String, CaseIterable, Identifiable {
@@ -116,9 +117,12 @@ private struct AppHeader: View {
                     .font(.headline)
                 HStack(spacing: 10) {
                     Text("Python: \(viewModel.pythonStatus)")
+                    if viewModel.runtimePackageUpgradeStatus.hasAvailableUpgrades {
+                        Text(viewModel.runtimePackageUpgradeSummary)
+                    }
                     Text("Provider: \(viewModel.providerStatus)")
                     if let activeModel = viewModel.settings.activeModel {
-                        Text("Active: \(activeModel)")
+                        Text("Default: \(activeModel)")
                     }
                 }
                 .font(.caption)
@@ -172,7 +176,7 @@ private struct ControllerTab: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Server Controller").font(.title2.bold())
-            TextField("Active model", text: Binding(
+            TextField("Default model", text: Binding(
                 get: { viewModel.settings.activeModel ?? "" },
                 set: { viewModel.settings.activeModel = $0.isEmpty ? nil : $0 }
             ))
@@ -195,16 +199,99 @@ private struct ControllerTab: View {
             }
             Text("Python: \(viewModel.pythonStatus)")
                 .foregroundStyle(.secondary)
+            RuntimePackageUpdatesView()
             RoleServerStatusTable()
             HStack {
                 Button("Check Python") { Task { await viewModel.refreshPythonStatus() } }
                 Button("Install Packages") { Task { await viewModel.installPythonPackages() } }
                     .disabled(!viewModel.shouldOfferPythonPackageInstall)
+                Button("Check Upgrades") { Task { await viewModel.checkRuntimePackageUpgrades() } }
+                    .disabled(viewModel.isCheckingRuntimePackageUpgrades || viewModel.isUpgradingRuntimePackages)
+                Button("Upgrade Runtime") { Task { await viewModel.upgradeRuntimePackages() } }
+                    .disabled(!viewModel.canUpgradeRuntimePackages)
+                if viewModel.isCheckingRuntimePackageUpgrades || viewModel.isUpgradingRuntimePackages {
+                    ProgressView()
+                        .controlSize(.small)
+                }
             }
             Divider()
             ModelDownloadsSettingsView()
             Spacer()
         }
+    }
+}
+
+private struct RuntimePackageUpdatesView: View {
+    @EnvironmentObject private var viewModel: DashboardViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(viewModel.runtimePackageUpgradeSummary)
+                .font(.subheadline.weight(.semibold))
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
+                GridRow {
+                    headerText("Package")
+                        .frame(width: 70, alignment: .leading)
+                    headerText("Installed")
+                        .frame(width: 90, alignment: .leading)
+                    headerText("Latest")
+                        .frame(width: 90, alignment: .leading)
+                    headerText("Status")
+                        .frame(minWidth: 180, maxWidth: .infinity, alignment: .leading)
+                }
+                ForEach(viewModel.runtimePackageUpgradeStatus.statuses) { status in
+                    GridRow {
+                        Text(status.packageName)
+                            .frame(width: 70, alignment: .leading)
+                        Text(status.installedVersion ?? "-")
+                            .monospacedDigit()
+                            .frame(width: 90, alignment: .leading)
+                        Text(status.latestVersion ?? "-")
+                            .monospacedDigit()
+                            .frame(width: 90, alignment: .leading)
+                        Text(statusText(for: status))
+                            .foregroundStyle(statusColor(for: status.state))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(minWidth: 180, maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .font(.caption)
+        }
+    }
+
+    private func statusText(for status: PythonPackageVersionStatus) -> String {
+        if let message = status.message {
+            return message
+        }
+        switch status.state {
+        case .missing:
+            return "Missing"
+        case .current:
+            return "Current"
+        case .upgradeAvailable:
+            return "Upgrade available"
+        case .unknown:
+            return "Unable to check"
+        }
+    }
+
+    private func statusColor(for state: PythonPackageVersionState) -> Color {
+        switch state {
+        case .current:
+            return .green
+        case .upgradeAvailable:
+            return .orange
+        case .missing, .unknown:
+            return .secondary
+        }
+    }
+
+    private func headerText(_ text: String) -> some View {
+        Text(text)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
     }
 }
 
@@ -633,13 +720,13 @@ private struct InstalledModelsView: View {
                     viewModel.startRetrySelectedInstalledModelInstallWithoutXet()
                 }
                 .disabled(!viewModel.canRetrySelectedInstalledModelInstallWithoutXet)
-                Button("Set Active") { viewModel.setSelectedInstalledModelActive() }
+                Button("Set Default") { viewModel.setSelectedInstalledModelActive() }
                     .disabled(!viewModel.canSetSelectedInstalledModelActive)
                 Button("Set Ask") { viewModel.assignSelectedInstalledModel(to: .ask) }
                     .disabled(!viewModel.canAssignSelectedInstalledModelToProviderRole)
                 Button("Set Plan") { viewModel.assignSelectedInstalledModel(to: .plan) }
                     .disabled(!viewModel.canAssignSelectedInstalledModelToProviderRole)
-                Button("Set Fast") { viewModel.assignSelectedInstalledModel(to: .coding) }
+                Button("Set Coding") { viewModel.assignSelectedInstalledModel(to: .coding) }
                     .disabled(!viewModel.canAssignSelectedInstalledModelToProviderRole)
                 Button("Delete from Cache", role: .destructive) {
                     isConfirmingCacheDelete = true
@@ -869,7 +956,25 @@ private struct ProviderTab: View {
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
                     roleRow("Ask", viewModel.settings.providerRoleAssignments.ask)
                     roleRow("Plan", viewModel.settings.providerRoleAssignments.plan)
-                    roleRow("Fast/Coding", viewModel.settings.providerRoleAssignments.coding)
+                    roleRow("Coding", viewModel.settings.providerRoleAssignments.coding)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            GroupBox("Generation defaults") {
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
+                    GridRow {
+                        generationHeader("Role")
+                            .frame(width: 64, alignment: .leading)
+                        generationHeader("Temp")
+                            .frame(width: 64, alignment: .leading)
+                        generationHeader("Top P")
+                            .frame(width: 64, alignment: .leading)
+                        generationHeader("Max tokens")
+                            .frame(width: 86, alignment: .leading)
+                    }
+                    generationRow(.ask)
+                    generationRow(.plan)
+                    generationRow(.coding)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -920,6 +1025,71 @@ private struct ProviderTab: View {
                 .truncationMode(.middle)
                 .textSelection(.enabled)
         }
+    }
+
+    private func generationRow(_ role: ProviderModelRole) -> some View {
+        GridRow {
+            Text(role.displayName)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 64, alignment: .leading)
+            TextField(
+                "Temp",
+                value: generationDoubleBinding(role: role, keyPath: \.temperature),
+                format: .number.precision(.fractionLength(0...2))
+            )
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 64)
+            TextField(
+                "Top P",
+                value: generationDoubleBinding(role: role, keyPath: \.topP),
+                format: .number.precision(.fractionLength(0...2))
+            )
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 64)
+            TextField(
+                "Max",
+                value: generationMaxTokensBinding(role: role),
+                format: .number
+            )
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 86)
+        }
+    }
+
+    private func generationHeader(_ text: String) -> some View {
+        Text(text)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+    }
+
+    private func generationDoubleBinding(
+        role: ProviderModelRole,
+        keyPath: WritableKeyPath<ProviderGenerationSettings, Double>
+    ) -> Binding<Double> {
+        Binding(
+            get: {
+                viewModel.settings.providerGenerationDefaults.settings(for: role)[keyPath: keyPath]
+            },
+            set: { value in
+                var settings = viewModel.settings.providerGenerationDefaults.settings(for: role)
+                settings[keyPath: keyPath] = value
+                viewModel.updateGenerationSettings(settings, for: role)
+            }
+        )
+    }
+
+    private func generationMaxTokensBinding(role: ProviderModelRole) -> Binding<Int> {
+        Binding(
+            get: {
+                viewModel.settings.providerGenerationDefaults.settings(for: role).maxTokens
+            },
+            set: { value in
+                var settings = viewModel.settings.providerGenerationDefaults.settings(for: role)
+                settings.maxTokens = value
+                viewModel.updateGenerationSettings(settings, for: role)
+            }
+        )
     }
 }
 

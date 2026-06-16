@@ -469,7 +469,66 @@ final class DashboardViewModelTests: XCTestCase {
         let (data, response) = try await URLSession.shared.data(from: url)
 
         XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
-        XCTAssertEqual(try Self.modelIDs(in: data), ["mlx-ask", "mlx-plan", "mlx-fast", "mlx-community/Tiny"])
+        XCTAssertEqual(try Self.modelIDs(in: data), ["mlx-ask", "mlx-plan", "mlx-coding", "mlx-community/Tiny"])
+    }
+
+    func testRuntimeCapabilityInspectionMarksNemotronDiffusionUnsupportedInProviderMetadata() async throws {
+        let paths = try temporaryAppPaths()
+        let ports = try availableTestPorts()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+        let sitePackages = try temporaryDirectory()
+        let cacheRoot = try temporaryDirectory()
+        let snapshot = cacheRoot.appending(
+            path: "models--mlx-community--Nemotron-Labs-Diffusion-3B-4bit/snapshots/abc",
+            directoryHint: .isDirectory
+        )
+        try createCachedModelSnapshot(at: snapshot, config: #"{"model_type":"nemotron_labs_diffusion"}"#)
+        let registry = ModelRegistry(fileURL: paths.modelRegistryFile)
+        registry.upsert(ModelRecord(
+            id: "mlx-community/Nemotron-Labs-Diffusion-3B-4bit",
+            status: .installed,
+            localPath: snapshot.path
+        ))
+        try registry.save()
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: registry,
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [
+                "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+                "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+                "runtime-capabilities": CommandResult(
+                    exitCode: 0,
+                    standardOutput: #"{"site_packages":"\#(sitePackages.path)","version":"0.31.3"}"#,
+                    standardError: ""
+                )
+            ])),
+            huggingFaceCacheRoot: cacheRoot
+        )
+        viewModel.settings.providerPort = ports.providerPort
+
+        await viewModel.refreshPythonStatus()
+        do {
+            try viewModel.startProvider()
+        } catch {
+            throw XCTSkip("Loopback listener unavailable in this sandbox: \(error)")
+        }
+        defer { viewModel.stopProvider() }
+
+        let url = URL(string: "http://127.0.0.1:\(ports.providerPort)/provider/v1/models")!
+        let (data, response) = try await URLSession.shared.data(from: url)
+        let models = try Self.models(in: data)
+        let nemotron = try XCTUnwrap(models.first { $0["id"] as? String == "mlx-community/Nemotron-Labs-Diffusion-3B-4bit" })
+
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(nemotron["generation_type"] as? String, "text")
+        XCTAssertEqual(nemotron["model_family"] as? String, "diffusion_text")
+        XCTAssertEqual(nemotron["state"] as? String, "unsupported")
+        XCTAssertEqual(
+            nemotron["unsupported_reason"] as? String,
+            "Installed mlx-lm 0.31.3 does not support model_type nemotron_labs_diffusion"
+        )
     }
 
     func testRunningProviderUsesActiveModelSavedAfterProviderStart() async throws {
@@ -652,7 +711,7 @@ final class DashboardViewModelTests: XCTestCase {
             "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
             "search": CommandResult(
                 exitCode: 0,
-                standardOutput: #"[{"id":"lmstudio-community/Devstral-Small-2505-MLX-4bit","downloads":10036,"likes":7}]"#,
+                standardOutput: #"[{"id":"lmstudio-community/Devstral-Small-2505-MLX-4bit","downloads":10036,"likes":7,"model_type":"mistral"}]"#,
                 standardError: ""
             )
         ])
@@ -727,8 +786,11 @@ final class DashboardViewModelTests: XCTestCase {
 
         await viewModel.searchModels()
 
-        XCTAssertEqual(viewModel.searchResults.map(\.id), ["mlx-community/Runnable", "mlx-community/Unknown"])
-        XCTAssertEqual(viewModel.modelSearchMessage, "Showing 2 mlx-community results sorted by downloads; filtered 1 unsupported by current mlx-lm.")
+        XCTAssertEqual(viewModel.searchResults.map(\.id), ["mlx-community/Runnable"])
+        XCTAssertEqual(
+            viewModel.modelSearchMessage,
+            "Showing 1 mlx-community result sorted by downloads; filtered 1 unsupported and 1 unknown by current mlx-lm."
+        )
     }
 
     func testSearchModelsGroupsVariantsAndInstallsSelectedVariant() async throws {
@@ -1001,7 +1063,7 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.searchResults, [])
         XCTAssertEqual(viewModel.modelSearchMessage, "Python packages are required before searching: mlx-lm, huggingface_hub.")
         XCTAssertTrue(viewModel.shouldOfferPythonPackageInstall)
-        XCTAssertEqual(runner.commands.count, 2)
+        XCTAssertEqual(runner.commands.count, 3)
     }
 
     func testInstallPythonPackagesInstallsRequiredPackagesWhenPrompted() async throws {
@@ -1026,12 +1088,136 @@ final class DashboardViewModelTests: XCTestCase {
 
         await viewModel.installPythonPackages()
 
-        XCTAssertEqual(runner.commands.map(\.arguments), [
-            ["-m", "pip", "install", "--upgrade", "mlx-lm", "huggingface_hub"]
-        ])
+        XCTAssertTrue(runner.commands.contains {
+            $0.arguments == ["-m", "pip", "install", "--upgrade", "mlx", "mlx-lm", "huggingface_hub"]
+        })
+        XCTAssertTrue(runner.commands.contains {
+            $0.pythonScript?.contains("metadata.distribution(\"mlx-lm\")") == true
+        })
         XCTAssertEqual(viewModel.pythonStatus, "Ready")
         XCTAssertFalse(viewModel.shouldOfferPythonPackageInstall)
         XCTAssertEqual(viewModel.modelSearchMessage, "Python packages installed. Search is ready.")
+    }
+
+    func testRefreshPythonStatusChecksRuntimePackageUpgradesWhenReady() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(
+            at: python.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+        let sitePackages = try temporaryDirectory()
+
+        let runner = FakeCommandRunner(results: [
+            "import mlx": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "runtime-capabilities": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"site_packages":"\#(sitePackages.path)","version":"0.31.3"}"#,
+                standardError: ""
+            ),
+            "runtime-package-versions": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"mlx":"0.29.0","mlx-lm":"0.31.3"}"#,
+                standardError: ""
+            ),
+            "pip-outdated": CommandResult(
+                exitCode: 0,
+                standardOutput: #"[{"name":"mlx-lm","version":"0.31.3","latest_version":"0.32.0"}]"#,
+                standardError: ""
+            )
+        ])
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner)
+        )
+
+        await viewModel.refreshPythonStatus()
+
+        XCTAssertEqual(viewModel.runtimePackageUpgradeSummary, "Updates: mlx-lm 0.31.3 -> 0.32.0")
+        XCTAssertTrue(viewModel.canUpgradeRuntimePackages)
+        XCTAssertTrue(runner.commands.contains { $0.arguments == ["-m", "pip", "list", "--outdated", "--format=json"] })
+    }
+
+    func testRefreshPythonStatusLeavesUpgradeStatusUncheckedWhenPackagesAreMissing() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(
+            at: python.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = FakeCommandRunner(results: [
+            "import mlx": CommandResult(exitCode: 1, standardOutput: "", standardError: "No module named mlx"),
+            "import mlx_lm": CommandResult(exitCode: 1, standardOutput: "", standardError: "No module named mlx_lm"),
+            "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: "")
+        ])
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner)
+        )
+
+        await viewModel.refreshPythonStatus()
+
+        XCTAssertEqual(viewModel.pythonStatus, "Missing: mlx, mlx-lm")
+        XCTAssertEqual(viewModel.runtimePackageUpgradeSummary, "Runtime updates: not checked")
+        XCTAssertFalse(viewModel.canUpgradeRuntimePackages)
+        XCTAssertFalse(runner.commands.contains { $0.arguments == ["-m", "pip", "list", "--outdated", "--format=json"] })
+    }
+
+    func testUpgradeRuntimePackagesRunsUpgradeAndRefreshesUpgradeStatus() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(
+            at: python.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+        let sitePackages = try temporaryDirectory()
+
+        let runner = FakeCommandRunner(results: [
+            "runtime-upgrade": CommandResult(exitCode: 0, standardOutput: "upgraded", standardError: ""),
+            "runtime-capabilities": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"site_packages":"\#(sitePackages.path)","version":"0.32.0"}"#,
+                standardError: ""
+            ),
+            "runtime-package-versions": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"mlx":"0.30.0","mlx-lm":"0.32.0"}"#,
+                standardError: ""
+            ),
+            "pip-outdated": CommandResult(exitCode: 0, standardOutput: #"[]"#, standardError: "")
+        ])
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner)
+        )
+        viewModel.runtimePackageUpgradeStatus = PythonPackageUpgradeReport(statuses: [
+            PythonPackageVersionStatus(
+                packageName: "mlx-lm",
+                installedVersion: "0.31.3",
+                latestVersion: "0.32.0",
+                state: .upgradeAvailable
+            )
+        ])
+
+        await viewModel.upgradeRuntimePackages()
+
+        XCTAssertTrue(runner.commands.contains {
+            $0.arguments == ["-m", "pip", "install", "--upgrade", "mlx", "mlx-lm"]
+        })
+        XCTAssertEqual(viewModel.runtimePackageUpgradeSummary, "Runtime packages are current")
+        XCTAssertFalse(viewModel.canUpgradeRuntimePackages)
+        XCTAssertEqual(viewModel.modelSearchMessage, "Runtime packages upgraded. Search is ready.")
+        let logText = try String(contentsOf: paths.logsDirectory.appending(path: "mlxdashboard.log"), encoding: .utf8)
+        XCTAssertTrue(logText.contains("Upgraded MLX runtime packages"))
     }
 
     func testInstallSelectedModelWithMissingPythonPackagesPromptsInstallInsteadOfStartingDownload() async throws {
@@ -1265,6 +1451,8 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.modelInstallProgress?.phase, .installed)
         XCTAssertEqual(viewModel.modelInstallProgress?.fractionCompleted, 1.0)
         XCTAssertEqual(viewModel.modelInstallProgress?.stepText, "Step 5 of 5")
+        XCTAssertEqual(viewModel.searchResultAction(for: "mlx-community/Tiny"), .alreadyInstalled)
+        XCTAssertEqual(viewModel.searchResultFamilies.first?.selectedVariant?.installState, .installed)
     }
 
     func testInstallProgressIsStoredByModelIDAndExposedForSelectedInstalledModel() async throws {
@@ -1624,6 +1812,8 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.modelInstallProgress?.phase, .failed)
         XCTAssertEqual(viewModel.modelInstallProgress?.fractionCompleted, 1.0)
         XCTAssertTrue(viewModel.modelInstallProgress?.detail.contains("download failed") == true)
+        XCTAssertEqual(viewModel.searchResultAction(for: "mlx-community/Tiny"), .install)
+        XCTAssertEqual(viewModel.searchResultFamilies.first?.selectedVariant?.installState, .failed)
     }
 
     func testContinueLastModelInstallRetriesFailedModelID() async throws {
@@ -1885,6 +2075,7 @@ final class DashboardViewModelTests: XCTestCase {
 
         XCTAssertEqual(viewModel.settings.activeModel, "mlx-community/Tiny")
         XCTAssertEqual(try SettingsStore(fileURL: paths.settingsFile).load().activeModel, "mlx-community/Tiny")
+        XCTAssertEqual(viewModel.modelInstallMessage, "Set mlx-community/Tiny as the default model.")
     }
 
     func testSetSelectedInstalledModelActiveDoesNotClearInstallProgressHistory() throws {
@@ -1933,7 +2124,7 @@ final class DashboardViewModelTests: XCTestCase {
 
         XCTAssertNil(viewModel.settings.activeModel)
         XCTAssertEqual(viewModel.modelInstallProgress, progress)
-        XCTAssertEqual(viewModel.modelInstallMessage, "Select an installed model before setting it active.")
+        XCTAssertEqual(viewModel.modelInstallMessage, "Select an installed model before setting it as default.")
     }
 
     func testAssignSelectedInstalledModelToProviderRolePersistsSettings() throws {
@@ -1952,7 +2143,29 @@ final class DashboardViewModelTests: XCTestCase {
 
         XCTAssertEqual(viewModel.settings.providerRoleAssignments.coding, "mlx-community/Tiny")
         XCTAssertEqual(try SettingsStore(fileURL: paths.settingsFile).load().providerRoleAssignments.coding, "mlx-community/Tiny")
-        XCTAssertEqual(viewModel.modelInstallMessage, "Assigned mlx-community/Tiny to Fast/Coding.")
+        XCTAssertEqual(viewModel.modelInstallMessage, "Assigned mlx-community/Tiny to Coding.")
+    }
+
+    func testUpdateGenerationSettingsPersistsRoleDefaults() throws {
+        let paths = try temporaryAppPaths()
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+        )
+
+        viewModel.updateGenerationSettings(
+            ProviderGenerationSettings(temperature: 0.42, topP: 0.88, maxTokens: 1234),
+            for: .coding
+        )
+
+        let reloaded = try SettingsStore(fileURL: paths.settingsFile).load()
+        XCTAssertEqual(viewModel.settings.providerGenerationDefaults.coding.temperature, 0.42)
+        XCTAssertEqual(viewModel.settings.providerGenerationDefaults.coding.topP, 0.88)
+        XCTAssertEqual(viewModel.settings.providerGenerationDefaults.coding.maxTokens, 1234)
+        XCTAssertEqual(reloaded.providerGenerationDefaults.coding.temperature, 0.42)
+        XCTAssertEqual(reloaded.providerGenerationDefaults.coding.topP, 0.88)
+        XCTAssertEqual(reloaded.providerGenerationDefaults.coding.maxTokens, 1234)
     }
 
     func testAssignSelectedInstalledModelToRoleDoesNotClearInstallProgressHistory() throws {
@@ -2295,6 +2508,14 @@ private final class FakeCommandRunner: CommandRunning, @unchecked Sendable {
             key = "install"
         } else if script.contains("whoami") {
             key = "whoami"
+        } else if script.contains("MLXDashboard runtime package versions") {
+            key = "runtime-package-versions"
+        } else if script.contains("metadata.distribution(\"mlx-lm\")") {
+            key = "runtime-capabilities"
+        } else if command.arguments == ["-m", "pip", "list", "--outdated", "--format=json"] {
+            key = "pip-outdated"
+        } else if command.arguments == ["-m", "pip", "install", "--upgrade", "mlx", "mlx-lm"] {
+            key = "runtime-upgrade"
         } else if script.contains("list_models") {
             if command.arguments.last == "50", results["search-limit-50"] != nil {
                 key = "search-limit-50"
@@ -2308,6 +2529,9 @@ private final class FakeCommandRunner: CommandRunning, @unchecked Sendable {
         }
         if let error = thrownErrors[key] {
             throw error
+        }
+        if script.hasPrefix("import ") {
+            return results[key] ?? CommandResult(exitCode: 0, standardOutput: "", standardError: "")
         }
         return results[key] ?? CommandResult(exitCode: 127, standardOutput: "", standardError: "unexpected command \(key)")
     }
