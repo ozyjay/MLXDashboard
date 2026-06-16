@@ -245,6 +245,61 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(upstream.requests, [])
     }
 
+    func testOpenAIModelsExposeAliasMetadataFromAssignedRoleModels() async throws {
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/gpt-oss-20b-MXFP4-Q8" },
+            modelMetadataProvider: {
+                [
+                    "mlx-community/gpt-oss-20b-MXFP4-Q8": .inferred(modelID: "mlx-community/gpt-oss-20b-MXFP4-Q8"),
+                    "mlx-community/Qwen3.6-35B-A3B-4bit": .inferred(modelID: "mlx-community/Qwen3.6-35B-A3B-4bit"),
+                    "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit": .inferred(modelID: "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit")
+                ]
+            },
+            roleAssignmentsProvider: {
+                ProviderRoleAssignments(
+                    ask: "mlx-community/gpt-oss-20b-MXFP4-Q8",
+                    plan: "mlx-community/Qwen3.6-35B-A3B-4bit",
+                    coding: "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit"
+                )
+            }
+        )
+
+        let response = try await router.handle(
+            ProviderRequest(method: "GET", path: "/v1/models", headers: [:], body: Data())
+        )
+        let askResponse = try await router.handle(
+            ProviderRequest(method: "GET", path: "/v1/models/mlx-ask", headers: [:], body: Data())
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let json = try JSONSerialization.jsonObject(with: response.body) as? [String: Any]
+        let data = try XCTUnwrap(json?["data"] as? [[String: Any]])
+        let ask = try XCTUnwrap(data.first { $0["id"] as? String == "mlx-ask" })
+        let plan = try XCTUnwrap(data.first { $0["id"] as? String == "mlx-plan" })
+        let coding = try XCTUnwrap(data.first { $0["id"] as? String == "mlx-coding" })
+        XCTAssertEqual(ask["object"] as? String, "model")
+        XCTAssertEqual(ask["owned_by"] as? String, "mlx-community")
+        XCTAssertEqual(ask["publisher"] as? String, "mlx-community")
+        XCTAssertEqual(ask["arch"] as? String, "gpt-oss")
+        XCTAssertEqual(ask["quantization"] as? String, "MXFP4-Q8")
+        XCTAssertEqual(ask["resolved_model"] as? String, "mlx-community/gpt-oss-20b-MXFP4-Q8")
+        XCTAssertEqual(ask["role"] as? String, "ask")
+        XCTAssertEqual(plan["arch"] as? String, "qwen")
+        XCTAssertEqual(plan["quantization"] as? String, "4bit")
+        XCTAssertEqual(plan["resolved_model"] as? String, "mlx-community/Qwen3.6-35B-A3B-4bit")
+        XCTAssertEqual(coding["arch"] as? String, "devstral")
+        XCTAssertEqual(coding["resolved_model"] as? String, "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit")
+
+        XCTAssertEqual(askResponse.status, 200)
+        let askDetail = try JSONSerialization.jsonObject(with: askResponse.body) as? [String: Any]
+        XCTAssertEqual(askDetail?["id"] as? String, "mlx-ask")
+        XCTAssertEqual(askDetail?["resolved_model"] as? String, "mlx-community/gpt-oss-20b-MXFP4-Q8")
+        XCTAssertEqual(askDetail?["arch"] as? String, "gpt-oss")
+        XCTAssertEqual(upstream.requests, [])
+    }
+
     func testProviderServesTextDiffusionMetadataWhenRunnable() async throws {
         let upstream = FakeUpstream()
         let router = ProviderRouter(
@@ -1011,6 +1066,224 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(endpoint.port, 8081)
         let proxiedJSON = try JSONSerialization.jsonObject(with: proxied.body) as? [String: Any]
         XCTAssertEqual(proxiedJSON?["model"] as? String, "mlx-community/Devstral")
+    }
+
+    func testModeAdviceUsesAskRoleEndpointAndReturnsParsedPlanAdvice() async throws {
+        let upstream = FakeUpstream(
+            chatCompletionBody: Data(
+                #"{"id":"chat","choices":[{"message":{"role":"assistant","content":"{\"mode\":\"plan\",\"confidence\":0.86,\"reason\":\"The prompt asks for implementation planning.\"}"}}]}"#.utf8
+            )
+        )
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Ask" },
+            roleAssignmentsProvider: { ProviderRoleAssignments(ask: "mlx-community/Ask") },
+            defaultEndpointProvider: {
+                ProviderUpstreamEndpoint(
+                    modelID: "mlx-community/Ask",
+                    baseURL: URL(string: "http://127.0.0.1:8080")!,
+                    port: 8080
+                )
+            },
+            roleEndpointProvider: { role in
+                guard role == .ask else { return nil }
+                return ProviderUpstreamEndpoint(
+                    modelID: "mlx-community/Ask",
+                    baseURL: URL(string: "http://127.0.0.1:8080")!,
+                    port: 8080
+                )
+            }
+        )
+
+        let response = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/provider/v1/mode-advice",
+                headers: [:],
+                body: Data(#"{"input":"plan how to create a python script","selected_model":"mlx-ask"}"#.utf8)
+            )
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let advice = try jsonObject(in: response.body)
+        XCTAssertEqual(advice["suggested_mode"] as? String, "plan")
+        XCTAssertEqual(advice["current_mode"] as? String, "ask")
+        XCTAssertEqual(advice["confidence"] as? Double, 0.86)
+        XCTAssertEqual(advice["should_suggest_switch"] as? Bool, true)
+        XCTAssertEqual(advice["reason"] as? String, "The prompt asks for implementation planning.")
+        let endpoint = try XCTUnwrap(upstream.endpoints.last)
+        XCTAssertEqual(endpoint.modelID, "mlx-community/Ask")
+        let classifierRequest = try XCTUnwrap(upstream.requests.last)
+        let classifierJSON = try jsonObject(in: classifierRequest.body)
+        XCTAssertEqual(classifierJSON["model"] as? String, "mlx-community/Ask")
+        XCTAssertEqual(classifierJSON["temperature"] as? Int, 0)
+        XCTAssertEqual(classifierJSON["max_tokens"] as? Int, 64)
+        XCTAssertEqual(classifierJSON["stream"] as? Bool, false)
+    }
+
+    func testModeAdviceDoesNotSuggestSwitchWhenAdviceMatchesSelectedMode() async throws {
+        let upstream = FakeUpstream(
+            chatCompletionBody: Data(
+                #"{"choices":[{"message":{"content":"{\"mode\":\"plan\",\"confidence\":0.91,\"reason\":\"Planning request.\"}"}}]}"#.utf8
+            )
+        )
+        let router = modeAdviceRouter(upstream: upstream)
+
+        let response = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/provider/v1/mode-advice",
+                headers: [:],
+                body: Data(#"{"input":"plan this","selected_model":"mlx-plan"}"#.utf8)
+            )
+        )
+
+        let advice = try jsonObject(in: response.body)
+        XCTAssertEqual(advice["suggested_mode"] as? String, "plan")
+        XCTAssertEqual(advice["current_mode"] as? String, "plan")
+        XCTAssertEqual(advice["should_suggest_switch"] as? Bool, false)
+    }
+
+    func testModeAdviceDoesNotSuggestSwitchForLowConfidenceAdvice() async throws {
+        let upstream = FakeUpstream(
+            chatCompletionBody: Data(
+                #"{"choices":[{"message":{"content":"{\"mode\":\"coding\",\"confidence\":0.4,\"reason\":\"Maybe code.\"}"}}]}"#.utf8
+            )
+        )
+        let router = modeAdviceRouter(upstream: upstream)
+
+        let response = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/provider/v1/mode-advice",
+                headers: [:],
+                body: Data(#"{"input":"maybe implement this","selected_model":"mlx-ask"}"#.utf8)
+            )
+        )
+
+        let advice = try jsonObject(in: response.body)
+        XCTAssertEqual(advice["suggested_mode"] as? String, "coding")
+        XCTAssertEqual(advice["confidence"] as? Double, 0.4)
+        XCTAssertEqual(advice["should_suggest_switch"] as? Bool, false)
+    }
+
+    func testModeAdviceReturnsUnknownWhenClassifierJSONIsMalformed() async throws {
+        let upstream = FakeUpstream(
+            chatCompletionBody: Data(
+                #"{"choices":[{"message":{"content":"not json"}}]}"#.utf8
+            )
+        )
+        let router = modeAdviceRouter(upstream: upstream)
+
+        let response = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/provider/v1/mode-advice",
+                headers: [:],
+                body: Data(#"{"input":"plan this","selected_model":"mlx-ask"}"#.utf8)
+            )
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let advice = try jsonObject(in: response.body)
+        XCTAssertEqual(advice["suggested_mode"] as? String, "unknown")
+        XCTAssertEqual(advice["confidence"] as? Double, 0)
+        XCTAssertEqual(advice["should_suggest_switch"] as? Bool, false)
+    }
+
+    func testModeAdviceReturnsUnknownWhenAskEndpointIsMissing() async throws {
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Default" },
+            roleAssignmentsProvider: { ProviderRoleAssignments(ask: "mlx-community/Ask") },
+            defaultEndpointProvider: {
+                ProviderUpstreamEndpoint(
+                    modelID: "mlx-community/Default",
+                    baseURL: URL(string: "http://127.0.0.1:8080")!,
+                    port: 8080
+                )
+            },
+            roleEndpointProvider: { _ in nil }
+        )
+
+        let response = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/provider/v1/mode-advice",
+                headers: [:],
+                body: Data(#"{"input":"plan this","selected_model":"mlx-ask"}"#.utf8)
+            )
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let advice = try jsonObject(in: response.body)
+        XCTAssertEqual(advice["suggested_mode"] as? String, "unknown")
+        XCTAssertEqual(advice["confidence"] as? Double, 0)
+        XCTAssertEqual(advice["should_suggest_switch"] as? Bool, false)
+        XCTAssertEqual(upstream.requests.count, 0)
+    }
+
+    func testModeAdviceWritesDebugMetadataWhenCaptureIsEnabled() async throws {
+        let root = try temporaryDirectory()
+        let debugFile = root.appending(path: "provider-debug.jsonl")
+        let upstream = FakeUpstream(
+            chatCompletionBody: Data(
+                #"{"choices":[{"message":{"content":"{\"mode\":\"coding\",\"confidence\":0.8,\"reason\":\"The prompt asks to write code.\"}"}}]}"#.utf8
+            )
+        )
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Ask" },
+            roleAssignmentsProvider: { ProviderRoleAssignments(ask: "mlx-community/Ask") },
+            defaultEndpointProvider: {
+                ProviderUpstreamEndpoint(
+                    modelID: "mlx-community/Ask",
+                    baseURL: URL(string: "http://127.0.0.1:8080")!,
+                    port: 8080
+                )
+            },
+            roleEndpointProvider: { _ in nil },
+            debugRecorder: ProviderDebugRecorder(fileURL: debugFile, isEnabled: { true })
+        )
+
+        _ = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/provider/v1/mode-advice",
+                headers: [:],
+                body: Data(#"{"input":"write a function","selected_model":"mlx-ask"}"#.utf8)
+            )
+        )
+
+        let record = try lastDebugRecord(in: debugFile)
+        let advice = try XCTUnwrap(record["mode_advice"] as? [String: Any])
+        XCTAssertEqual(advice["suggested_mode"] as? String, "coding")
+        XCTAssertEqual(advice["should_suggest_switch"] as? Bool, true)
+    }
+
+    func testModeAdviceRejectsInvalidRequests() async throws {
+        let router = modeAdviceRouter(upstream: FakeUpstream())
+
+        let invalidJSON = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/provider/v1/mode-advice",
+                headers: [:],
+                body: Data("not json".utf8)
+            )
+        )
+        let missingInput = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/provider/v1/mode-advice",
+                headers: [:],
+                body: Data(#"{"selected_model":"mlx-ask"}"#.utf8)
+            )
+        )
+
+        XCTAssertEqual(invalidJSON.status, 400)
+        XCTAssertEqual(missingInput.status, 400)
     }
 
     func testRoleAliasFallsBackToDefaultEndpointWhenRoleEndpointMissing() async throws {
@@ -1847,6 +2120,33 @@ final class ProviderRouterTests: XCTestCase {
         return content?.first?["text"] as? String
     }
 
+    private func jsonObject(in data: Data) throws -> [String: Any] {
+        try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    private func modeAdviceRouter(upstream: FakeUpstream) -> ProviderRouter {
+        ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Ask" },
+            roleAssignmentsProvider: { ProviderRoleAssignments(ask: "mlx-community/Ask") },
+            defaultEndpointProvider: {
+                ProviderUpstreamEndpoint(
+                    modelID: "mlx-community/Ask",
+                    baseURL: URL(string: "http://127.0.0.1:8080")!,
+                    port: 8080
+                )
+            },
+            roleEndpointProvider: { role in
+                guard role == .ask else { return nil }
+                return ProviderUpstreamEndpoint(
+                    modelID: "mlx-community/Ask",
+                    baseURL: URL(string: "http://127.0.0.1:8080")!,
+                    port: 8080
+                )
+            }
+        )
+    }
+
     private func lastDebugRecord(in fileURL: URL) throws -> [String: Any] {
         let line = try XCTUnwrap(String(contentsOf: fileURL, encoding: .utf8).split(separator: "\n").last)
         return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
@@ -1880,9 +2180,19 @@ private final class FakeUpstream: ProviderUpstreamClient, ProviderUpstreamProxyC
     private var storedRequests: [ProviderRequest] = []
     private var storedEndpoints: [ProviderUpstreamEndpoint] = []
     private let notFoundBody: Data
+    private let chatCompletionBody: Data
+    private let chatCompletionStatus: Int
 
-    init(notFoundBody: Data = Data()) {
+    init(
+        notFoundBody: Data = Data(),
+        chatCompletionBody: Data = Data(
+            #"{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"mlx-community/Tiny","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"Hello from chat."}}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}"#.utf8
+        ),
+        chatCompletionStatus: Int = 200
+    ) {
         self.notFoundBody = notFoundBody
+        self.chatCompletionBody = chatCompletionBody
+        self.chatCompletionStatus = chatCompletionStatus
     }
 
     var requests: [ProviderRequest] {
@@ -1927,11 +2237,9 @@ private final class FakeUpstream: ProviderUpstreamClient, ProviderUpstreamProxyC
             if let object = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any],
                object["stream"] as? Bool == false || object["stream"] == nil {
                 return ProviderResponse(
-                    status: 200,
+                    status: chatCompletionStatus,
                     headers: ["content-type": "application/json"],
-                    body: Data(
-                        #"{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"mlx-community/Tiny","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"Hello from chat."}}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}"#.utf8
-                    )
+                    body: chatCompletionBody
                 )
             }
             let stream = """

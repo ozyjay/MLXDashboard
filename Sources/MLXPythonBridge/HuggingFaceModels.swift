@@ -344,12 +344,57 @@ public struct HuggingFaceModelInstaller: Sendable {
         let isXetDisabled = downloadEnvironment["HF_HUB_DISABLE_XET"] == "1"
         let script = """
         import json
+        import os
         import sys
+        from pathlib import Path
         from huggingface_hub import snapshot_download
+
+        MISTRAL_FAMILY_MODEL_TYPES = {
+            'mistral',
+            'mistral3',
+            'ministral',
+            'ministral3',
+            'pixtral',
+            'voxtral',
+        }
+
+        def model_needs_mistral_regex_fix(config):
+            model_type = config.get('model_type')
+            if isinstance(model_type, str) and model_type.lower() in MISTRAL_FAMILY_MODEL_TYPES:
+                return True
+            text_config = config.get('text_config')
+            text_model_type = text_config.get('model_type') if isinstance(text_config, dict) else None
+            if isinstance(text_model_type, str) and text_model_type.lower() in MISTRAL_FAMILY_MODEL_TYPES:
+                return True
+            return False
+
+        def repair_tokenizer_config(snapshot_path):
+            snapshot = Path(snapshot_path)
+            config_path = snapshot / 'config.json'
+            tokenizer_config_path = snapshot / 'tokenizer_config.json'
+            try:
+                with open(config_path, encoding='utf-8') as config_file:
+                    config = json.load(config_file)
+                if not model_needs_mistral_regex_fix(config):
+                    return
+                with open(tokenizer_config_path, encoding='utf-8') as tokenizer_config_file:
+                    tokenizer_config = json.load(tokenizer_config_file)
+                if tokenizer_config.get('fix_mistral_regex') is True:
+                    return
+                tokenizer_config['fix_mistral_regex'] = True
+                temporary_path = tokenizer_config_path.with_suffix(tokenizer_config_path.suffix + '.tmp')
+                with open(temporary_path, 'w', encoding='utf-8') as tokenizer_config_file:
+                    json.dump(tokenizer_config, tokenizer_config_file, indent=2, sort_keys=True)
+                    tokenizer_config_file.write('\\n')
+                os.replace(temporary_path, tokenizer_config_path)
+            except Exception as exc:
+                print(f'MLXDashboard: Unable to repair tokenizer config for {snapshot}: {exc}', file=sys.stderr, flush=True)
+
         model_id = sys.argv[1]
         suffix = ' with Xet disabled' if '\(isXetDisabled ? "1" : "0")' == '1' else ''
         print(f'MLXDashboard: Started Hugging Face snapshot download for {model_id}{suffix}', file=sys.stderr, flush=True)
         path = snapshot_download(repo_id=model_id)
+        repair_tokenizer_config(path)
         print(json.dumps({'local_path': path}))
         """
         let environment = downloadEnvironment

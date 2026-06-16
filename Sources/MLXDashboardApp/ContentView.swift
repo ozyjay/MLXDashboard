@@ -78,7 +78,8 @@ struct ContentView: View {
 struct DashboardLayoutPolicy {
     static let spacing: CGFloat = 16
     static let activeModelMinHeight: CGFloat = 240
-    static let recentLogsMinHeight: CGFloat = 240
+    static let recentLogsMinHeight: CGFloat = 360
+    static let recentLogsVisibleLimit = 24
 }
 
 struct RoleServerStatusTablePolicy {
@@ -1135,7 +1136,7 @@ private struct RecentLogsView: View {
             Text("Recent Logs").font(.headline)
             ScrollView {
                 VStack(alignment: .leading, spacing: 6) {
-                    ForEach(viewModel.telemetry.logs.suffix(12)) { entry in
+                    ForEach(viewModel.telemetry.logs.suffix(DashboardLayoutPolicy.recentLogsVisibleLimit)) { entry in
                         Text(entry.message)
                             .font(.system(.caption, design: .monospaced))
                             .frame(maxWidth: .infinity, alignment: .leading)

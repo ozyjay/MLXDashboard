@@ -40,6 +40,54 @@ final class PythonBridgeTests: XCTestCase {
         XCTAssertEqual(models.first?.localPath, good.path)
     }
 
+    func testTokenizerCompatibilityRepairAddsMistralRegexFlagForMistralFamilySnapshot() throws {
+        let root = try temporaryDirectory()
+        let snapshot = root.appending(path: "models--mlx-community--Devstral/snapshots/abc123", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try #"{"model_type":"mistral3"}"#
+            .write(to: snapshot.appending(path: "config.json"), atomically: true, encoding: .utf8)
+        try #"{"tokenizer_class":"TokenizersBackend"}"#
+            .write(to: snapshot.appending(path: "tokenizer_config.json"), atomically: true, encoding: .utf8)
+
+        let repaired = try MLXTokenizerCompatibilityRepairer().repairSnapshotIfNeeded(at: snapshot)
+
+        XCTAssertTrue(repaired)
+        let tokenizerConfig = try jsonObject(at: snapshot.appending(path: "tokenizer_config.json"))
+        XCTAssertEqual(tokenizerConfig["fix_mistral_regex"] as? Bool, true)
+    }
+
+    func testTokenizerCompatibilityRepairLeavesNonMistralSnapshotUnchanged() throws {
+        let root = try temporaryDirectory()
+        let snapshot = root.appending(path: "models--mlx-community--Tiny/snapshots/abc123", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try #"{"model_type":"llama"}"#
+            .write(to: snapshot.appending(path: "config.json"), atomically: true, encoding: .utf8)
+        try #"{"tokenizer_class":"TokenizersBackend"}"#
+            .write(to: snapshot.appending(path: "tokenizer_config.json"), atomically: true, encoding: .utf8)
+
+        let repaired = try MLXTokenizerCompatibilityRepairer().repairSnapshotIfNeeded(at: snapshot)
+
+        XCTAssertFalse(repaired)
+        let tokenizerConfig = try jsonObject(at: snapshot.appending(path: "tokenizer_config.json"))
+        XCTAssertNil(tokenizerConfig["fix_mistral_regex"])
+    }
+
+    func testCacheScannerRepairsMistralFamilyTokenizerConfig() throws {
+        let root = try temporaryDirectory()
+        let snapshot = root.appending(path: "models--mlx-community--Devstral/snapshots/abc123", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try #"{"model_type":"mistral3"}"#
+            .write(to: snapshot.appending(path: "config.json"), atomically: true, encoding: .utf8)
+        FileManager.default.createFile(atPath: snapshot.appending(path: "model.safetensors.index.json").path, contents: Data())
+        try #"{"tokenizer_class":"TokenizersBackend"}"#
+            .write(to: snapshot.appending(path: "tokenizer_config.json"), atomically: true, encoding: .utf8)
+
+        _ = try MLXModelCacheScanner().scan(cacheRoot: root)
+
+        let tokenizerConfig = try jsonObject(at: snapshot.appending(path: "tokenizer_config.json"))
+        XCTAssertEqual(tokenizerConfig["fix_mistral_regex"] as? Bool, true)
+    }
+
     func testRuntimeCompatibilityRejectsUnsupportedGemma4UnifiedModelType() throws {
         let root = try temporaryDirectory()
         let snapshot = root.appending(path: "models--mlx-community--Gemma4/snapshots/abc123", directoryHint: .isDirectory)
@@ -734,6 +782,11 @@ final class PythonBridgeTests: XCTestCase {
             .appending(path: "MLXPythonBridgeTests-\(UUID().uuidString)", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+
+    private func jsonObject(at url: URL) throws -> [String: Any] {
+        let data = try Data(contentsOf: url)
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 }
 

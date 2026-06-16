@@ -25,6 +25,7 @@ public struct ProviderRouter: Sendable {
         "/api/tags",
         "/api/v0/models",
         "/api/version",
+        "/provider/v1/mode-advice",
         "/provider/v1/models",
         "/v1/models",
         "/v1/chat/completions",
@@ -127,7 +128,8 @@ public struct ProviderRouter: Sendable {
                 response: response,
                 selectedModel: context.selectedModel,
                 aliasResolution: context.aliasResolution,
-                routingDecision: context.routingDecision?.debugPayload
+                routingDecision: context.routingDecision?.debugPayload,
+                modeAdvice: context.modeAdvice?.debugPayload
             )
             return .buffered(response)
         }
@@ -179,7 +181,8 @@ public struct ProviderRouter: Sendable {
                             response: ProviderResponse(status: response.status, headers: response.headers, body: body),
                             selectedModel: context.selectedModel,
                             aliasResolution: context.aliasResolution,
-                            routingDecision: context.routingDecision?.debugPayload
+                            routingDecision: context.routingDecision?.debugPayload,
+                            modeAdvice: context.modeAdvice?.debugPayload
                         )
                         continuation.finish()
                     } catch {
@@ -189,7 +192,8 @@ public struct ProviderRouter: Sendable {
                             response: ProviderResponse(status: response.status, headers: response.headers, body: body),
                             selectedModel: context.selectedModel,
                             aliasResolution: context.aliasResolution,
-                            routingDecision: context.routingDecision?.debugPayload
+                            routingDecision: context.routingDecision?.debugPayload,
+                            modeAdvice: context.modeAdvice?.debugPayload
                         )
                         continuation.finish(throwing: error)
                     }
@@ -238,6 +242,12 @@ public struct ProviderRouter: Sendable {
         if request.method == "GET", request.path == "/provider/v1/models" {
             eventLogger("Provider served GET /provider/v1/models")
             return finish(androidStudioV0ModelsResponse())
+        }
+
+        if request.method == "POST", request.path == "/provider/v1/mode-advice" {
+            eventLogger("Provider received POST /provider/v1/mode-advice")
+            let result = try await modeAdviceResponse(request)
+            return finish(result.response, context: result.debugContext)
         }
 
         if request.method == "GET", request.path == "/api/tags" {
@@ -471,15 +481,9 @@ public struct ProviderRouter: Sendable {
 
         let payload: [String: Any] = [
             "object": "list",
-            "data": models.map { model in
-                [
-                    "id": model,
-                    "object": "model"
-                ]
-            }
+            "data": models.map(modelPayload)
         ]
-        let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data(#"{"object":"list","data":[]}"#.utf8)
-        return ProviderResponse(status: 200, headers: ["content-type": "application/json"], body: data)
+        return jsonResponse(payload)
     }
 
     private func androidStudioV0ModelsResponse() -> ProviderResponse {
@@ -500,24 +504,39 @@ public struct ProviderRouter: Sendable {
             return json(status: 404, #"{"error":"not found"}"#)
         }
 
-        return jsonResponse(androidStudioV0ModelPayload(requestedModel))
+        return jsonResponse(modelPayload(requestedModel))
     }
 
     private func androidStudioV0ModelPayload(_ model: String) -> [String: Any] {
-        let metadata = modelMetadata(for: model)
+        modelPayload(model)
+    }
+
+    private func modelPayload(_ model: String) -> [String: Any] {
+        let details = modelDetails(for: model)
+        let metadata = details.metadata
+        let metadataModel = details.metadataModel
+        let owner = publisher(for: metadataModel)
         var payload: [String: Any] = [
             "id": model,
             "object": "model",
+            "created": 0,
+            "owned_by": owner,
             "type": "llm",
-            "publisher": publisher(for: model),
-            "arch": architecture(for: model),
+            "publisher": owner,
+            "arch": architecture(for: metadataModel),
             "compatibility_type": "mlx",
             "generation_type": metadata.generationType.rawValue,
             "model_family": metadata.modelFamily.rawValue,
-            "quantization": quantization(for: model),
+            "quantization": quantization(for: metadataModel),
             "state": metadata.state.rawValue,
             "max_context_length": 32768
         ]
+        if metadataModel != model {
+            payload["resolved_model"] = metadataModel
+        }
+        if let role = details.role {
+            payload["role"] = role.rawValue
+        }
         if metadata.state != .loaded, let reason = metadata.unavailableReason {
             payload["reason"] = reason
             switch metadata.state {
@@ -533,15 +552,31 @@ public struct ProviderRouter: Sendable {
     }
 
     private func modelMetadata(for model: String) -> ProviderModelMetadata {
+        modelDetails(for: model).metadata
+    }
+
+    private func modelDetails(for model: String) -> (
+        metadata: ProviderModelMetadata,
+        metadataModel: String,
+        role: ProviderModelRole?
+    ) {
         if Self.acceptedModeAliases.contains(model),
            let role = role(forAlias: model),
            let roleModel = roleAssignmentsProvider().model(for: role) {
-            return modelMetadataProvider()[roleModel] ?? .inferred(modelID: roleModel)
+            return (
+                modelMetadataProvider()[roleModel] ?? .inferred(modelID: roleModel),
+                roleModel,
+                role
+            )
         }
         if Self.acceptedModeAliases.contains(model), let activeModel = activeModel() {
-            return modelMetadataProvider()[activeModel] ?? .inferred(modelID: activeModel)
+            return (
+                modelMetadataProvider()[activeModel] ?? .inferred(modelID: activeModel),
+                activeModel,
+                role(forAlias: model)
+            )
         }
-        return modelMetadataProvider()[model] ?? .inferred(modelID: model)
+        return (modelMetadataProvider()[model] ?? .inferred(modelID: model), model, nil)
     }
 
     private func publisher(for model: String) -> String {
@@ -550,8 +585,10 @@ public struct ProviderRouter: Sendable {
 
     private func architecture(for model: String) -> String {
         let lowercased = model.lowercased()
+        if lowercased.contains("gpt-oss") { return "gpt-oss" }
         if lowercased.contains("devstral") { return "devstral" }
         if lowercased.contains("qwen") { return "qwen" }
+        if lowercased.contains("deepseek") { return "deepseek" }
         if lowercased.contains("llama") { return "llama" }
         if lowercased.contains("gemma") { return "gemma" }
         if lowercased.contains("mistral") { return "mistral" }
@@ -560,6 +597,9 @@ public struct ProviderRouter: Sendable {
 
     private func quantization(for model: String) -> String {
         let lowercased = model.lowercased()
+        if lowercased.contains("mxfp4-q8") { return "MXFP4-Q8" }
+        if lowercased.contains("mxfp4") { return "MXFP4" }
+        if lowercased.contains("q8") { return "Q8" }
         if lowercased.contains("4bit") { return "4bit" }
         if lowercased.contains("8bit") { return "8bit" }
         return ""
@@ -867,12 +907,7 @@ public struct ProviderRouter: Sendable {
             return json(status: 404, #"{"error":"not found"}"#)
         }
 
-        let payload: [String: Any] = [
-            "id": requestedModel,
-            "object": "model"
-        ]
-        let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data(#"{"object":"model"}"#.utf8)
-        return ProviderResponse(status: 200, headers: ["content-type": "application/json"], body: data)
+        return jsonResponse(modelPayload(requestedModel))
     }
 
     private func requestWithSelectedUpstreamIfAvailable(_ request: ProviderRequest) -> (
@@ -978,6 +1013,119 @@ public struct ProviderRouter: Sendable {
         if payload["max_tokens"] == nil {
             payload["max_tokens"] = settings.maxTokens
         }
+    }
+
+    private func modeAdviceResponse(_ request: ProviderRequest) async throws -> (
+        response: ProviderResponse,
+        debugContext: ProviderDebugContext
+    ) {
+        var debugContext = debugContext(for: request)
+        guard let object = decodedObject(from: request.body),
+              let input = object["input"] as? String,
+              !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return (json(status: 400, #"{"error":"input is required"}"#), debugContext)
+        }
+
+        let selectedModel = object["selected_model"] as? String
+        let currentMode = mode(forSelectedModel: selectedModel)
+        let advice = await classifyModeAdvice(input: input, currentMode: currentMode)
+        debugContext.selectedModel = selectedModel
+        debugContext.modeAdvice = advice
+        eventLogger(
+            "Provider mode advice: suggested=\(advice.suggestedMode.rawValue), confidence=\(advice.confidence), current=\(advice.currentMode ?? "none"), switch=\(advice.shouldSuggestSwitch)"
+        )
+        return (jsonResponse(advice.responsePayload), debugContext)
+    }
+
+    private func classifyModeAdvice(
+        input: String,
+        currentMode: String?
+    ) async -> ProviderModeAdvice {
+        guard let endpoint = modeAdviceAskEndpoint(),
+              let askModel = roleAssignmentsProvider().ask
+        else {
+            return ProviderModeAdvice.unknown(
+                currentMode: currentMode,
+                reason: "Ask role endpoint is unavailable."
+            )
+        }
+
+        let payload: [String: Any] = [
+            "model": askModel,
+            "temperature": 0,
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [
+                [
+                    "role": "system",
+                    "content": modeAdviceClassifierPrompt
+                ],
+                [
+                    "role": "user",
+                    "content": input
+                ]
+            ]
+        ]
+
+        do {
+            let body = try JSONSerialization.data(withJSONObject: payload)
+            let classifierRequest = ProviderRequest(method: "POST", path: "/v1/chat/completions", headers: [:], body: body)
+            let response = try await proxy(classifierRequest, to: endpoint)
+            guard response.status >= 200, response.status < 300 else {
+                return ProviderModeAdvice.unknown(
+                    currentMode: currentMode,
+                    reason: "Classifier upstream returned status \(response.status)."
+                )
+            }
+            let text = assistantText(fromChatCompletionBody: response.body)
+            guard let classified = ProviderModeAdvice.parse(
+                classifierOutput: text,
+                currentMode: currentMode
+            ) else {
+                return ProviderModeAdvice.unknown(
+                    currentMode: currentMode,
+                    reason: "Classifier response was not valid mode advice."
+                )
+            }
+            return classified
+        } catch {
+            return ProviderModeAdvice.unknown(
+                currentMode: currentMode,
+                reason: "Classifier request failed: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private var modeAdviceClassifierPrompt: String {
+        """
+        Classify the user's request for a local coding assistant UI.
+        Return JSON only with keys mode, confidence, reason.
+        mode must be one of ask, plan, coding, unknown.
+        Use plan for architecture, sequencing, task decomposition, risk analysis, or requests to plan.
+        Use coding for writing, editing, fixing, refactoring, or testing code.
+        Use ask for explanations, questions, summaries, and lightweight troubleshooting.
+        Use unknown when unsure.
+        """
+    }
+
+    private func modeAdviceAskEndpoint() -> ProviderUpstreamEndpoint? {
+        guard let askModel = roleAssignmentsProvider().ask else { return nil }
+        if let endpoint = roleEndpointProvider(.ask), endpoint.modelID == askModel {
+            return endpoint
+        }
+        if let defaultEndpoint = defaultUpstreamEndpoint(), defaultEndpoint.modelID == askModel {
+            return defaultEndpoint
+        }
+        return nil
+    }
+
+    private func mode(forSelectedModel selectedModel: String?) -> String? {
+        guard let selectedModel else { return nil }
+        if let role = role(forAlias: selectedModel) {
+            return role.rawValue
+        }
+        return nil
     }
 
     private func routingDecision(
@@ -1622,6 +1770,83 @@ private struct ProviderDebugContext {
     var selectedModel: String?
     var aliasResolution: String?
     var routingDecision: ProviderRoutingDecision?
+    var modeAdvice: ProviderModeAdvice?
+}
+
+private enum ProviderModeAdviceMode: String {
+    case ask
+    case plan
+    case coding
+    case unknown
+}
+
+private struct ProviderModeAdvice {
+    static let switchConfidenceThreshold = 0.75
+
+    var suggestedMode: ProviderModeAdviceMode
+    var confidence: Double
+    var shouldSuggestSwitch: Bool
+    var currentMode: String?
+    var reason: String
+
+    var responsePayload: [String: Any] {
+        var payload: [String: Any] = [
+            "suggested_mode": suggestedMode.rawValue,
+            "confidence": confidence,
+            "should_suggest_switch": shouldSuggestSwitch,
+            "reason": reason
+        ]
+        if let currentMode {
+            payload["current_mode"] = currentMode
+        }
+        return payload
+    }
+
+    var debugPayload: [String: Any] {
+        responsePayload
+    }
+
+    static func parse(classifierOutput: String, currentMode: String?) -> ProviderModeAdvice? {
+        let trimmed = classifierOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = trimmed.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rawMode = object["mode"] as? String,
+              let mode = ProviderModeAdviceMode(rawValue: rawMode)
+        else {
+            return nil
+        }
+        let rawConfidence = (object["confidence"] as? Double)
+            ?? (object["confidence"] as? NSNumber)?.doubleValue
+            ?? 0
+        let confidence = min(max(rawConfidence, 0), 1)
+        let reason = (object["reason"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayReason = if let reason, !reason.isEmpty {
+            reason
+        } else {
+            "Classifier did not provide a reason."
+        }
+        let shouldSuggestSwitch = confidence >= switchConfidenceThreshold
+            && mode != .unknown
+            && currentMode != nil
+            && currentMode != mode.rawValue
+        return ProviderModeAdvice(
+            suggestedMode: mode,
+            confidence: confidence,
+            shouldSuggestSwitch: shouldSuggestSwitch,
+            currentMode: currentMode,
+            reason: displayReason
+        )
+    }
+
+    static func unknown(currentMode: String?, reason: String) -> ProviderModeAdvice {
+        ProviderModeAdvice(
+            suggestedMode: .unknown,
+            confidence: 0,
+            shouldSuggestSwitch: false,
+            currentMode: currentMode,
+            reason: reason
+        )
+    }
 }
 
 private enum ProviderClientCapability: String {

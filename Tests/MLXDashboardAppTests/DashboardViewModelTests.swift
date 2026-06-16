@@ -14,9 +14,10 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertFalse(AppLaunchOptions(arguments: ["MLXDashboard"]).autostartProvider)
     }
 
-    func testDashboardLowerSectionsUseSharedMinimumHeight() {
-        XCTAssertEqual(DashboardLayoutPolicy.activeModelMinHeight, DashboardLayoutPolicy.recentLogsMinHeight)
+    func testDashboardRecentLogsUseExpandedMinimumHeight() {
         XCTAssertEqual(DashboardLayoutPolicy.activeModelMinHeight, 240)
+        XCTAssertEqual(DashboardLayoutPolicy.recentLogsMinHeight, 360)
+        XCTAssertEqual(DashboardLayoutPolicy.recentLogsVisibleLimit, 24)
     }
 
     func testDashboardSectionDefaultsToDashboardLandingView() {

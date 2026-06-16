@@ -35,6 +35,7 @@ public struct MLXModelCacheScanner: Sendable {
                   isDirectory.boolValue
             else { continue }
             guard isMLXModelDirectory(directory) else { continue }
+            _ = try? MLXTokenizerCompatibilityRepairer().repairSnapshotIfNeeded(at: directory)
             guard let id = repoID(fromSnapshotDirectory: directory, cacheRoot: cacheRoot) else { continue }
             models.append(CachedMLXModel(id: id, localPath: localPath(for: directory, cacheRoot: cacheRoot)))
         }
@@ -142,6 +143,59 @@ public struct MLXModelCacheManager: Sendable {
         let rootPath = root.standardizedFileURL.path
         let directoryPath = directory.standardizedFileURL.path
         return directoryPath == rootPath || directoryPath.hasPrefix(rootPath + "/")
+    }
+}
+
+public struct MLXTokenizerCompatibilityRepairer: Sendable {
+    private let mistralFamilyModelTypes: Set<String> = [
+        "mistral",
+        "mistral3",
+        "ministral",
+        "ministral3",
+        "pixtral",
+        "voxtral"
+    ]
+
+    public init() {}
+
+    @discardableResult
+    public func repairSnapshotIfNeeded(at snapshot: URL) throws -> Bool {
+        let configURL = snapshot.appending(path: "config.json")
+        let tokenizerConfigURL = snapshot.appending(path: "tokenizer_config.json")
+        guard needsMistralRegexFix(configURL: configURL),
+              var tokenizerConfig = jsonDictionary(at: tokenizerConfigURL),
+              tokenizerConfig["fix_mistral_regex"] as? Bool != true
+        else {
+            return false
+        }
+
+        tokenizerConfig["fix_mistral_regex"] = true
+        let data = try JSONSerialization.data(withJSONObject: tokenizerConfig, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: tokenizerConfigURL, options: .atomic)
+        return true
+    }
+
+    private func needsMistralRegexFix(configURL: URL) -> Bool {
+        guard let config = jsonDictionary(at: configURL) else { return false }
+        if let modelType = config["model_type"] as? String,
+           mistralFamilyModelTypes.contains(modelType.lowercased()) {
+            return true
+        }
+        if let textConfig = config["text_config"] as? [String: Any],
+           let textModelType = textConfig["model_type"] as? String,
+           mistralFamilyModelTypes.contains(textModelType.lowercased()) {
+            return true
+        }
+        return false
+    }
+
+    private func jsonDictionary(at url: URL) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: url),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return nil
+        }
+        return object
     }
 }
 

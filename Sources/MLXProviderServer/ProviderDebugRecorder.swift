@@ -19,7 +19,8 @@ public final class ProviderDebugRecorder: @unchecked Sendable {
         response: ProviderResponse,
         selectedModel: String?,
         aliasResolution: String?,
-        routingDecision: [String: Any]? = nil
+        routingDecision: [String: Any]? = nil,
+        modeAdvice: [String: Any]? = nil
     ) {
         guard isEnabled() else { return }
 
@@ -42,6 +43,9 @@ public final class ProviderDebugRecorder: @unchecked Sendable {
         }
         if let routingDecision {
             payload["routing_decision"] = routingDecision
+        }
+        if let modeAdvice {
+            payload["mode_advice"] = modeAdvice
         }
         if let requestText = String(data: request.body, encoding: .utf8) {
             payload["request_body_text"] = requestText
