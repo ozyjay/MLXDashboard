@@ -1100,6 +1100,42 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.modelSearchMessage, "Python packages installed. Search is ready.")
     }
 
+    func testRefreshPythonStatusLogsRuntimeCapabilityFailureWithoutDuplicatedPrefix() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(
+            at: python.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let runner = FakeCommandRunner(results: [
+            "import mlx": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+            "runtime-capabilities": CommandResult(exitCode: 2, standardOutput: "", standardError: ""),
+            "runtime-package-versions": CommandResult(
+                exitCode: 0,
+                standardOutput: #"{"mlx":"0.29.0","mlx-lm":"0.31.3"}"#,
+                standardError: ""
+            ),
+            "pip-outdated": CommandResult(exitCode: 0, standardOutput: #"[]"#, standardError: "")
+        ])
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner)
+        )
+
+        await viewModel.refreshPythonStatus()
+
+        let logText = try String(contentsOf: paths.logsDirectory.appending(path: "mlxdashboard.log"), encoding: .utf8)
+        XCTAssertTrue(
+            logText.contains("Runtime capability inspection failed: python exited with code 2 without diagnostic output")
+        )
+        XCTAssertFalse(logText.contains("Runtime capability inspection failed: Runtime capability inspection failed"))
+    }
+
     func testRefreshPythonStatusChecksRuntimePackageUpgradesWhenReady() async throws {
         let paths = try temporaryAppPaths()
         let python = paths.venvDirectory.appending(path: "bin/python")

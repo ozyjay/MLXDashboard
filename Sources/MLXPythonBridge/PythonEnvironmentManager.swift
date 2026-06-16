@@ -216,14 +216,18 @@ except Exception as exc:
             Command(executableURL: pythonExecutable, arguments: ["-c", script])
         )
         guard result.exitCode == 0 else {
-            throw PythonEnvironmentError.runtimeCapabilityInspectionFailed(result.standardError)
+            throw PythonEnvironmentError.runtimeCapabilityInspectionFailed(
+                runtimeCapabilityFailureMessage(from: result)
+            )
         }
         guard let data = result.standardOutput.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let sitePackagesPath = object["site_packages"] as? String,
               !sitePackagesPath.isEmpty
         else {
-            throw PythonEnvironmentError.runtimeCapabilityInspectionFailed(result.standardOutput)
+            throw PythonEnvironmentError.runtimeCapabilityInspectionFailed(
+                cleaned(result.standardOutput)
+            )
         }
         return MLXModelRuntimeCapabilities.inspectingInstalledPackage(
             sitePackagesURL: URL(filePath: sitePackagesPath),
@@ -299,6 +303,18 @@ print(json.dumps(versions))
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "unknown error" : trimmed
     }
+
+    private func runtimeCapabilityFailureMessage(from result: CommandResult) -> String {
+        let stderr = result.standardError.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !stderr.isEmpty {
+            return stderr
+        }
+        let stdout = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !stdout.isEmpty {
+            return stdout
+        }
+        return "python exited with code \(result.exitCode) without diagnostic output"
+    }
 }
 
 public enum PythonEnvironmentError: Error, Equatable, CustomStringConvertible {
@@ -316,7 +332,8 @@ public enum PythonEnvironmentError: Error, Equatable, CustomStringConvertible {
         case .packageInstallFailed(let message):
             return "Package installation failed: \(message)"
         case .runtimeCapabilityInspectionFailed(let message):
-            return "Runtime capability inspection failed: \(message)"
+            let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+            return "Runtime capability inspection failed: \(trimmed.isEmpty ? "unknown error" : trimmed)"
         }
     }
 }

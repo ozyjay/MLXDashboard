@@ -194,6 +194,23 @@ final class PythonBridgeTests: XCTestCase {
         XCTAssertTrue(capabilities.supports(modelType: "nemotron_labs_diffusion"))
     }
 
+    func testRuntimeCapabilityInspectionFailureIncludesFallbackReasonWhenOutputIsEmpty() async throws {
+        let runner = FakeCommandRunner(results: [
+            "runtime-capabilities": CommandResult(exitCode: 2, standardOutput: "", standardError: "")
+        ])
+        let manager = PythonEnvironmentManager(runner: runner)
+
+        do {
+            _ = try await manager.mlxLMRuntimeCapabilities(pythonExecutable: URL(filePath: "/tmp/python"))
+            XCTFail("Expected runtime capability inspection to fail")
+        } catch let error as PythonEnvironmentError {
+            XCTAssertEqual(
+                error.description,
+                "Runtime capability inspection failed: python exited with code 2 without diagnostic output"
+            )
+        }
+    }
+
     func testRuntimePackageUpgradeReportShowsCurrentPackagesWhenNothingIsOutdated() async throws {
         let runner = FakeCommandRunner(results: [
             "runtime-package-versions": CommandResult(

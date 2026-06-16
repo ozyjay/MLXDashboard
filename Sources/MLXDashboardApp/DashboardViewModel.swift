@@ -1373,8 +1373,16 @@ final class DashboardViewModel: ObservableObject {
             }
             refreshProviderModelMetadataState()
         } catch {
-            telemetry.appendLog("Runtime capability inspection failed: \(error)")
+            telemetry.appendLog(Self.runtimeCapabilityInspectionLogMessage(for: error))
         }
+    }
+
+    private static func runtimeCapabilityInspectionLogMessage(for error: Error) -> String {
+        if case PythonEnvironmentError.runtimeCapabilityInspectionFailed(let message) = error {
+            let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+            return "Runtime capability inspection failed: \(trimmed.isEmpty ? "unknown error" : trimmed)"
+        }
+        return "Runtime capability inspection failed: \(error)"
     }
 
     private func refreshRuntimePackageUpgradeStatus(pythonExecutable: URL) async {
