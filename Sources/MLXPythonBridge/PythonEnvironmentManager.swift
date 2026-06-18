@@ -71,6 +71,10 @@ public struct PythonEnvironmentManager: Sendable {
         paths.venvDirectory.appending(path: "bin/python")
     }
 
+    public var bundledTextDiffusionRuntimeURL: URL? {
+        Bundle.module.url(forResource: "TextDiffusionRuntime", withExtension: nil)
+    }
+
     public func discoverPyenvPython() async throws -> URL {
         let result = try await runner.run(
             Command(
@@ -105,10 +109,26 @@ public struct PythonEnvironmentManager: Sendable {
 
     public func installRequiredPackages() async throws {
         let python = try await ensureVenv()
-        let result = try await runner.run(
+        let baseResult = try await runner.run(
             Command(
                 executableURL: python,
                 arguments: ["-m", "pip", "install", "--upgrade", "mlx", "mlx-lm", "huggingface_hub"]
+            )
+        )
+        guard baseResult.exitCode == 0 else {
+            throw PythonEnvironmentError.packageInstallFailed(baseResult.standardError)
+        }
+        try await installBundledTextDiffusionRuntime(pythonExecutable: python)
+    }
+
+    public func installBundledTextDiffusionRuntime(pythonExecutable: URL) async throws {
+        guard let packageURL = bundledTextDiffusionRuntimeURL else {
+            throw PythonEnvironmentError.runtimePackageResourceMissing
+        }
+        let result = try await runner.run(
+            Command(
+                executableURL: pythonExecutable,
+                arguments: ["-m", "pip", "install", "--upgrade", packageURL.path]
             )
         )
         guard result.exitCode == 0 else {
@@ -123,7 +143,11 @@ public struct PythonEnvironmentManager: Sendable {
             packages: [
                 PythonPackage(importName: "mlx", installName: "mlx"),
                 PythonPackage(importName: "mlx_lm", installName: "mlx-lm"),
-                PythonPackage(importName: "huggingface_hub", installName: "huggingface_hub")
+                PythonPackage(importName: "huggingface_hub", installName: "huggingface_hub"),
+                PythonPackage(
+                    importName: "mlxdashboard_text_diffusion",
+                    installName: "mlxdashboard-text-diffusion"
+                )
             ]
         )
         return PythonEnvironmentStatus(pythonExecutable: python, packageReport: report)
@@ -196,6 +220,7 @@ public struct PythonEnvironmentManager: Sendable {
         guard result.exitCode == 0 else {
             throw PythonEnvironmentError.packageInstallFailed(result.standardError)
         }
+        try await installBundledTextDiffusionRuntime(pythonExecutable: pythonExecutable)
     }
 
     public func mlxLMRuntimeCapabilities(pythonExecutable: URL) async throws -> MLXModelRuntimeCapabilities {
@@ -252,7 +277,6 @@ for package in packages:
     except Exception:
         versions[package] = None
 print(json.dumps(versions))
-# MLXDashboard runtime package versions
 """
         let result = try await runner.run(Command(
             executableURL: pythonExecutable,
@@ -322,6 +346,7 @@ public enum PythonEnvironmentError: Error, Equatable, CustomStringConvertible {
     case venvCreationFailed(String)
     case packageInstallFailed(String)
     case runtimeCapabilityInspectionFailed(String)
+    case runtimePackageResourceMissing
 
     public var description: String {
         switch self {
@@ -334,6 +359,8 @@ public enum PythonEnvironmentError: Error, Equatable, CustomStringConvertible {
         case .runtimeCapabilityInspectionFailed(let message):
             let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
             return "Runtime capability inspection failed: \(trimmed.isEmpty ? "unknown error" : trimmed)"
+        case .runtimePackageResourceMissing:
+            return "Bundled text diffusion runtime package was not found in the application resources."
         }
     }
 }
