@@ -5,7 +5,6 @@ public struct ProviderRouter: Sendable {
     private static let modeAliases = ["mlx-ask", "mlx-plan", "mlx-coding"]
     private static let legacyModeAliases = ["mlx-fast"]
     private static let acceptedModeAliases = modeAliases + legacyModeAliases
-    private static let modeAdviceTimeoutNanoseconds: UInt64 = 2_000_000_000
 
     private let upstream: any ProviderUpstreamProxyClient
     private let legacyUpstream: (any ProviderUpstreamClient)?
@@ -15,6 +14,7 @@ public struct ProviderRouter: Sendable {
     private let generationDefaultsProvider: @Sendable () -> ProviderRoleGenerationDefaults
     private let defaultEndpointProvider: @Sendable () -> ProviderUpstreamEndpoint?
     private let roleEndpointProvider: @Sendable (ProviderModelRole) -> ProviderUpstreamEndpoint?
+    private let modeAdviceTimeoutNanoseconds: UInt64
     private let eventLogger: @Sendable (String) -> Void
     private let debugRecorder: ProviderDebugRecorder?
     // Local provider discovery paths complement the OpenAI-compatible chat routes.
@@ -42,6 +42,7 @@ public struct ProviderRouter: Sendable {
         generationDefaultsProvider: @escaping @Sendable () -> ProviderRoleGenerationDefaults = { .recommendedDefault },
         defaultEndpointProvider: @escaping @Sendable () -> ProviderUpstreamEndpoint?,
         roleEndpointProvider: @escaping @Sendable (ProviderModelRole) -> ProviderUpstreamEndpoint?,
+        modeAdviceTimeoutNanoseconds: UInt64 = 6_000_000_000,
         eventLogger: @escaping @Sendable (String) -> Void = { _ in },
         debugRecorder: ProviderDebugRecorder? = nil
     ) {
@@ -54,6 +55,7 @@ public struct ProviderRouter: Sendable {
             generationDefaultsProvider: generationDefaultsProvider,
             defaultEndpointProvider: defaultEndpointProvider,
             roleEndpointProvider: roleEndpointProvider,
+            modeAdviceTimeoutNanoseconds: modeAdviceTimeoutNanoseconds,
             eventLogger: eventLogger,
             debugRecorder: debugRecorder
         )
@@ -65,6 +67,7 @@ public struct ProviderRouter: Sendable {
         modelMetadataProvider: @escaping @Sendable () -> [String: ProviderModelMetadata] = { [:] },
         roleAssignmentsProvider: @escaping @Sendable () -> ProviderRoleAssignments = { ProviderRoleAssignments() },
         generationDefaultsProvider: @escaping @Sendable () -> ProviderRoleGenerationDefaults = { .recommendedDefault },
+        modeAdviceTimeoutNanoseconds: UInt64 = 6_000_000_000,
         eventLogger: @escaping @Sendable (String) -> Void = { _ in },
         debugRecorder: ProviderDebugRecorder? = nil
     ) {
@@ -77,6 +80,7 @@ public struct ProviderRouter: Sendable {
             generationDefaultsProvider: generationDefaultsProvider,
             defaultEndpointProvider: { nil },
             roleEndpointProvider: { _ in nil },
+            modeAdviceTimeoutNanoseconds: modeAdviceTimeoutNanoseconds,
             eventLogger: eventLogger,
             debugRecorder: debugRecorder
         )
@@ -91,6 +95,7 @@ public struct ProviderRouter: Sendable {
         generationDefaultsProvider: @escaping @Sendable () -> ProviderRoleGenerationDefaults,
         defaultEndpointProvider: @escaping @Sendable () -> ProviderUpstreamEndpoint?,
         roleEndpointProvider: @escaping @Sendable (ProviderModelRole) -> ProviderUpstreamEndpoint?,
+        modeAdviceTimeoutNanoseconds: UInt64,
         eventLogger: @escaping @Sendable (String) -> Void,
         debugRecorder: ProviderDebugRecorder?
     ) {
@@ -102,6 +107,7 @@ public struct ProviderRouter: Sendable {
         self.generationDefaultsProvider = generationDefaultsProvider
         self.defaultEndpointProvider = defaultEndpointProvider
         self.roleEndpointProvider = roleEndpointProvider
+        self.modeAdviceTimeoutNanoseconds = modeAdviceTimeoutNanoseconds
         self.eventLogger = eventLogger
         self.debugRecorder = debugRecorder
     }
@@ -299,7 +305,8 @@ public struct ProviderRouter: Sendable {
                 return finishStream(response, context: routed.debugContext, upstreamRequest: proxiedRequest)
             }
 
-            let response = try await proxy(proxiedRequest, to: upstreamEndpoint)
+            let upstreamResponse = try await proxy(proxiedRequest, to: upstreamEndpoint)
+            let response = normalizedChatCompletionResponseIfNeeded(upstreamResponse, for: proxiedRequest)
             eventLogger("Provider proxied \(request.method) \(request.path) to upstream with status \(response.status)")
             if response.status >= 400 {
                 eventLogger("Provider upstream error body for \(request.method) \(request.path) status \(response.status): \(sanitizedErrorBody(response.body))")
@@ -417,6 +424,52 @@ public struct ProviderRouter: Sendable {
                 continuation.finish()
             }
         )
+    }
+
+    private func normalizedChatCompletionResponseIfNeeded(
+        _ response: ProviderResponse,
+        for request: ProviderRequest
+    ) -> ProviderResponse {
+        guard request.path == "/v1/chat/completions",
+              response.status >= 200,
+              response.status < 300,
+              let body = normalizedChatCompletionBody(from: response.body)
+        else {
+            return response
+        }
+        return ProviderResponse(status: response.status, headers: response.headers, body: body)
+    }
+
+    private func normalizedChatCompletionBody(from body: Data) -> Data? {
+        guard var object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              var choices = object["choices"] as? [[String: Any]]
+        else { return nil }
+
+        var changed = false
+        for index in choices.indices {
+            guard var message = choices[index]["message"] as? [String: Any],
+                  let content = message["content"] as? String,
+                  let channelContent = normalizedChannelContent(from: content, isAssistant: true)
+            else {
+                continue
+            }
+
+            message["content"] = channelContent.content
+            if let thinking = channelContent.thinking, !thinking.isEmpty {
+                if let existingReasoning = message["reasoning"] as? String,
+                   !existingReasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    message["reasoning"] = "\(existingReasoning)\n\n\(thinking)"
+                } else {
+                    message["reasoning"] = thinking
+                }
+            }
+            choices[index]["message"] = message
+            changed = true
+        }
+
+        guard changed else { return nil }
+        object["choices"] = choices
+        return try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     }
 
     private func advertisedModels() -> [String] {
@@ -1090,7 +1143,7 @@ public struct ProviderRouter: Sendable {
                 await classifyModeAdvice(input: input, currentMode: currentMode)
             }
             group.addTask {
-                try? await Task.sleep(nanoseconds: Self.modeAdviceTimeoutNanoseconds)
+                try? await Task.sleep(nanoseconds: modeAdviceTimeoutNanoseconds)
                 return ProviderModeAdvice.unknown(
                     currentMode: currentMode,
                     reason: "Mode advice timed out."
@@ -1121,7 +1174,7 @@ public struct ProviderRouter: Sendable {
         let payload: [String: Any] = [
             "model": askModel,
             "temperature": 0,
-            "max_tokens": 64,
+            "max_tokens": 128,
             "stream": false,
             "messages": [
                 [
@@ -1520,6 +1573,8 @@ public struct ProviderRouter: Sendable {
 
     private func cleanedMarkerText(_ text: String) -> String {
         text
+            .replacingOccurrences(of: "<|start|>assistant", with: "")
+            .replacingOccurrences(of: "<|start|>", with: "")
             .replacingOccurrences(of: "<|channel|>", with: "")
             .replacingOccurrences(of: "<|message|>", with: "")
             .replacingOccurrences(of: "<|end|>", with: "\n\n")
@@ -1669,10 +1724,10 @@ public struct ProviderRouter: Sendable {
 
         if let message = firstChoice["message"] as? [String: Any],
            let content = message["content"] as? String {
-            return content
+            return normalizedChannelContent(from: content, isAssistant: true)?.content ?? content
         }
         if let text = firstChoice["text"] as? String {
-            return text
+            return normalizedChannelContent(from: text, isAssistant: true)?.content ?? text
         }
         return ""
     }

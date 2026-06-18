@@ -1149,7 +1149,7 @@ final class ProviderRouterTests: XCTestCase {
         let classifierJSON = try jsonObject(in: classifierRequest.body)
         XCTAssertEqual(classifierJSON["model"] as? String, "mlx-community/Ask")
         XCTAssertEqual(classifierJSON["temperature"] as? Int, 0)
-        XCTAssertEqual(classifierJSON["max_tokens"] as? Int, 64)
+        XCTAssertEqual(classifierJSON["max_tokens"] as? Int, 128)
         XCTAssertEqual(classifierJSON["stream"] as? Bool, false)
     }
 
@@ -1223,8 +1223,33 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(advice["should_suggest_switch"] as? Bool, false)
     }
 
+    func testModeAdviceParsesChannelMarkedFinalJSON() async throws {
+        let upstream = FakeUpstream(
+            chatCompletionBody: Data(
+                #"{"choices":[{"message":{"content":"<|channel|>analysis<|message|>Classify the request.<|end|><|channel|>final<|message|>{\"mode\":\"plan\",\"confidence\":0.84,\"reason\":\"The prompt asks for planning.\"}<|end|>"}}]}"#.utf8
+            )
+        )
+        let router = modeAdviceRouter(upstream: upstream)
+
+        let response = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/provider/v1/mode-advice",
+                headers: [:],
+                body: Data(#"{"input":"plan how to make a paper aeroplane","selected_model":"mlx-ask"}"#.utf8)
+            )
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let advice = try jsonObject(in: response.body)
+        XCTAssertEqual(advice["suggested_mode"] as? String, "plan")
+        XCTAssertEqual(advice["confidence"] as? Double, 0.84)
+        XCTAssertEqual(advice["reason"] as? String, "The prompt asks for planning.")
+        XCTAssertEqual(advice["should_suggest_switch"] as? Bool, true)
+    }
+
     func testModeAdviceReturnsUnknownWhenClassifierTimesOut() async throws {
-        let upstream = SlowModeAdviceUpstream(delayNanoseconds: 2_500_000_000)
+        let upstream = SlowModeAdviceUpstream(delayNanoseconds: 200_000_000)
         let logger = CapturingProviderLogger()
         let router = ProviderRouter(
             upstream: upstream,
@@ -1245,6 +1270,7 @@ final class ProviderRouterTests: XCTestCase {
                     port: 8080
                 )
             },
+            modeAdviceTimeoutNanoseconds: 50_000_000,
             eventLogger: logger.log
         )
 
@@ -1865,6 +1891,39 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertFalse(proxiedText.contains("<|channel|>"))
         XCTAssertFalse(proxiedText.contains("<|message|>"))
         XCTAssertFalse(proxiedText.contains("<|end|>"))
+    }
+
+    func testProviderNormalizesChannelMarkedAssistantChatCompletionResponse() async throws {
+        let upstream = FakeUpstream(
+            chatCompletionBody: Data(
+                #"{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"mlx-community/Tiny","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"<|channel|>analysis<|message|>Need to answer briefly.<|end|><|start|>assistant<|channel|>final<|message|>ok<|end|>"}}]}"#.utf8
+            )
+        )
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Tiny" }
+        )
+
+        let response = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/v1/chat/completions",
+                headers: [:],
+                body: Data(#"{"model":"mlx-community/Tiny","messages":[{"role":"user","content":"Say ok only."}],"stream":false}"#.utf8)
+            )
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let responseJSON = try jsonObject(in: response.body)
+        let choices = try XCTUnwrap(responseJSON["choices"] as? [[String: Any]])
+        let message = try XCTUnwrap(choices.first?["message"] as? [String: Any])
+        XCTAssertEqual(message["content"] as? String, "ok")
+        XCTAssertEqual(message["reasoning"] as? String, "Need to answer briefly.")
+        let responseText = String(data: response.body, encoding: .utf8) ?? ""
+        XCTAssertFalse(responseText.contains("<|channel|>"))
+        XCTAssertFalse(responseText.contains("<|message|>"))
+        XCTAssertFalse(responseText.contains("<|end|>"))
+        XCTAssertFalse(responseText.contains("<|start|>"))
     }
 
     func testProviderStripsChannelMarkersFromNonAssistantMessages() async throws {
