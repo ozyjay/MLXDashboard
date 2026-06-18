@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mlxdashboard-text-diffusion"
+version = "0.1.0"
+description = "Local OpenAI-compatible MLX text diffusion runtime for MLXDashboard"
+requires-python = ">=3.10"
+dependencies = [
+  "mlx",
+  "mlx-lm",
+  "huggingface_hub",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mlxdashboard_text_diffusion*"]
