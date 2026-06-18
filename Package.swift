@@ -24,7 +24,10 @@ let package = Package(
         ),
         .target(
             name: "MLXPythonBridge",
-            dependencies: ["MLXCore"]
+            dependencies: ["MLXCore"],
+            resources: [
+                .copy("Resources/TextDiffusionRuntime")
+            ]
         ),
         .target(
             name: "MLXServerControl",
