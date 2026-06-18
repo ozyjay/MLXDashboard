@@ -461,6 +461,8 @@ final class DashboardViewModel: ObservableObject {
         do {
             let python = try await environmentManager.ensureVenv()
             await refreshRuntimePackageUpgradeStatus(pythonExecutable: python)
+        } catch is CancellationError {
+            telemetry.appendLog("Runtime package upgrade check cancelled.")
         } catch {
             runtimePackageUpgradeStatus = PythonPackageUpgradeReport(statuses: [
                 PythonPackageVersionStatus(
@@ -1408,6 +1410,8 @@ final class DashboardViewModel: ObservableObject {
             runtimePackageUpgradeStatus = try await environmentManager.runtimePackageUpgradeReport(
                 pythonExecutable: pythonExecutable
             )
+        } catch is CancellationError {
+            telemetry.appendLog("Runtime package upgrade check cancelled.")
         } catch {
             runtimePackageUpgradeStatus = PythonPackageUpgradeReport(statuses: [
                 PythonPackageVersionStatus(

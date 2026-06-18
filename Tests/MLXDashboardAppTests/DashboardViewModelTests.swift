@@ -1223,6 +1223,46 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertFalse(runner.commands.contains { $0.arguments == ["-m", "pip", "list", "--outdated", "--format=json"] })
     }
 
+    func testRuntimePackageUpgradeCheckLogsCancellationWithoutFailure() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(
+            at: python.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+        let sitePackages = try temporaryDirectory()
+
+        let runner = FakeCommandRunner(
+            results: [
+                "runtime-capabilities": CommandResult(
+                    exitCode: 0,
+                    standardOutput: #"{"site_packages":"\#(sitePackages.path)","version":"0.31.3"}"#,
+                    standardError: ""
+                ),
+                "runtime-package-versions": CommandResult(
+                    exitCode: 0,
+                    standardOutput: #"{"mlx":"0.29.0","mlx-lm":"0.31.3"}"#,
+                    standardError: ""
+                )
+            ],
+            thrownErrors: [
+                "pip-outdated": CancellationError()
+            ]
+        )
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner)
+        )
+
+        await viewModel.checkRuntimePackageUpgrades()
+
+        let logText = try String(contentsOf: paths.logsDirectory.appending(path: "mlxdashboard.log"), encoding: .utf8)
+        XCTAssertTrue(logText.contains("Runtime package upgrade check cancelled."))
+        XCTAssertFalse(logText.contains("Runtime package upgrade check failed"))
+    }
+
     func testUpgradeRuntimePackagesRunsUpgradeAndRefreshesUpgradeStatus() async throws {
         let paths = try temporaryAppPaths()
         let python = paths.venvDirectory.appending(path: "bin/python")

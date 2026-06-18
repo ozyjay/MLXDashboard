@@ -5,6 +5,7 @@ public struct ProviderRouter: Sendable {
     private static let modeAliases = ["mlx-ask", "mlx-plan", "mlx-coding"]
     private static let legacyModeAliases = ["mlx-fast"]
     private static let acceptedModeAliases = modeAliases + legacyModeAliases
+    private static let modeAdviceTimeoutNanoseconds: UInt64 = 2_000_000_000
 
     private let upstream: any ProviderUpstreamProxyClient
     private let legacyUpstream: (any ProviderUpstreamClient)?
@@ -537,6 +538,16 @@ public struct ProviderRouter: Sendable {
         if let role = details.role {
             payload["role"] = role.rawValue
         }
+        if let routingMetadata = aliasRoutingMetadata(for: model) {
+            payload["effective_model"] = routingMetadata.decision.upstreamModel
+            payload["routing_state"] = routingMetadata.state
+            if let port = routingMetadata.decision.upstreamEndpoint?.port {
+                payload["effective_port"] = port
+            }
+            if let fallbackReason = routingMetadata.decision.fallbackReason {
+                payload["fallback_reason"] = fallbackReason
+            }
+        }
         if metadata.state != .loaded, let reason = metadata.unavailableReason {
             payload["reason"] = reason
             switch metadata.state {
@@ -549,6 +560,34 @@ public struct ProviderRouter: Sendable {
             }
         }
         return payload
+    }
+
+    private func aliasRoutingMetadata(for model: String) -> (
+        decision: ProviderRoutingDecision,
+        state: String
+    )? {
+        guard Self.acceptedModeAliases.contains(model) else { return nil }
+        let decision = routingDecision(
+            selectedModel: model,
+            payload: [:],
+            activeModel: activeModel(),
+            defaultEndpoint: defaultUpstreamEndpoint(),
+            canProxyWithoutEndpoint: legacyUpstream != nil
+        )
+        return (decision, routingState(for: decision))
+    }
+
+    private func routingState(for decision: ProviderRoutingDecision) -> String {
+        guard let fallbackReason = decision.fallbackReason else {
+            return decision.upstreamEndpoint == nil ? "unavailable" : "role_endpoint"
+        }
+        if fallbackReason.contains("using active model") {
+            return "active_model_fallback"
+        }
+        if fallbackReason.contains("using default endpoint") {
+            return "default_endpoint_fallback"
+        }
+        return "unavailable"
     }
 
     private func modelMetadata(for model: String) -> ProviderModelMetadata {
@@ -1029,13 +1068,41 @@ public struct ProviderRouter: Sendable {
 
         let selectedModel = object["selected_model"] as? String
         let currentMode = mode(forSelectedModel: selectedModel)
-        let advice = await classifyModeAdvice(input: input, currentMode: currentMode)
+        let advice = await classifyModeAdviceWithTimeout(input: input, currentMode: currentMode)
         debugContext.selectedModel = selectedModel
         debugContext.modeAdvice = advice
-        eventLogger(
-            "Provider mode advice: suggested=\(advice.suggestedMode.rawValue), confidence=\(advice.confidence), current=\(advice.currentMode ?? "none"), switch=\(advice.shouldSuggestSwitch)"
-        )
+        if advice.suggestedMode == .unknown {
+            eventLogger("Provider mode advice unavailable: \(advice.reason)")
+        } else {
+            eventLogger(
+                "Provider mode advice: suggested=\(advice.suggestedMode.rawValue), confidence=\(advice.confidence), current=\(advice.currentMode ?? "none"), switch=\(advice.shouldSuggestSwitch)"
+            )
+        }
         return (jsonResponse(advice.responsePayload), debugContext)
+    }
+
+    private func classifyModeAdviceWithTimeout(
+        input: String,
+        currentMode: String?
+    ) async -> ProviderModeAdvice {
+        await withTaskGroup(of: ProviderModeAdvice.self) { group in
+            group.addTask {
+                await classifyModeAdvice(input: input, currentMode: currentMode)
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: Self.modeAdviceTimeoutNanoseconds)
+                return ProviderModeAdvice.unknown(
+                    currentMode: currentMode,
+                    reason: "Mode advice timed out."
+                )
+            }
+            let advice = await group.next() ?? ProviderModeAdvice.unknown(
+                currentMode: currentMode,
+                reason: "Mode advice timed out."
+            )
+            group.cancelAll()
+            return advice
+        }
     }
 
     private func classifyModeAdvice(
@@ -1310,9 +1377,23 @@ public struct ProviderRouter: Sendable {
                 next["role"] = "user"
                 changed = true
             }
-            if let content = message["content"], let text = normalizedContent(content), !(content is String) {
-                next["content"] = text
-                changed = true
+            if let content = message["content"], let text = normalizedContent(content) {
+                if !(content is String) {
+                    next["content"] = text
+                    changed = true
+                }
+                if let channelContent = normalizedChannelContent(
+                    from: text,
+                    isAssistant: next["role"] as? String == "assistant"
+                ) {
+                    next["content"] = channelContent.content
+                    if let thinking = channelContent.thinking, !thinking.isEmpty {
+                        next["thinking"] = thinking
+                    } else {
+                        next.removeValue(forKey: "thinking")
+                    }
+                    changed = true
+                }
             }
             return next
         }
@@ -1373,6 +1454,85 @@ public struct ProviderRouter: Sendable {
         }.joined(separator: "\n")
     }
 
+    private func normalizedChannelContent(
+        from text: String,
+        isAssistant: Bool
+    ) -> NormalizedChannelContent? {
+        guard text.contains("<|channel|>") || text.contains("<|message|>") || text.contains("<|end|>") else {
+            return nil
+        }
+        let segments = channelMarkedSegments(from: text)
+        if isAssistant {
+            let finalTexts = segments
+                .filter { $0.channel == "final" || ($0.channel != "analysis" && $0.channel != nil) || $0.channel == nil }
+                .map(\.text)
+            let thinkingTexts = segments
+                .filter { $0.channel == "analysis" }
+                .map(\.text)
+            return NormalizedChannelContent(
+                content: joinedMessageText(finalTexts),
+                thinking: joinedMessageText(thinkingTexts)
+            )
+        }
+        return NormalizedChannelContent(
+            content: joinedMessageText(segments.map(\.text)),
+            thinking: nil
+        )
+    }
+
+    private func channelMarkedSegments(from text: String) -> [ChannelMarkedSegment] {
+        var segments: [ChannelMarkedSegment] = []
+        var cursor = text.startIndex
+
+        func appendPlain(_ substring: Substring) {
+            let cleaned = cleanedMarkerText(String(substring))
+            guard !cleaned.isEmpty else { return }
+            segments.append(ChannelMarkedSegment(channel: nil, text: cleaned))
+        }
+
+        while let channelRange = text[cursor...].range(of: "<|channel|>") {
+            appendPlain(text[cursor..<channelRange.lowerBound])
+            let channelStart = channelRange.upperBound
+            guard let messageRange = text[channelStart...].range(of: "<|message|>") else {
+                appendPlain(text[channelRange.lowerBound...])
+                cursor = text.endIndex
+                break
+            }
+            let channel = String(text[channelStart..<messageRange.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let messageStart = messageRange.upperBound
+            let messageText: String
+            if let endRange = text[messageStart...].range(of: "<|end|>") {
+                messageText = String(text[messageStart..<endRange.lowerBound])
+                cursor = endRange.upperBound
+            } else {
+                messageText = String(text[messageStart...])
+                cursor = text.endIndex
+            }
+            let cleaned = cleanedMarkerText(messageText)
+            if !cleaned.isEmpty {
+                segments.append(ChannelMarkedSegment(channel: channel, text: cleaned))
+            }
+        }
+        appendPlain(text[cursor...])
+        return segments
+    }
+
+    private func cleanedMarkerText(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "<|channel|>", with: "")
+            .replacingOccurrences(of: "<|message|>", with: "")
+            .replacingOccurrences(of: "<|end|>", with: "\n\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func joinedMessageText(_ texts: [String]) -> String {
+        texts
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+    }
+
     private func mergedMessage(_ first: [String: Any], _ second: [String: Any]) -> [String: Any] {
         var merged = first
         let firstContent = first["content"] as? String ?? ""
@@ -1382,6 +1542,16 @@ public struct ProviderRouter: Sendable {
             merged["content"] = secondContent
         case (false, false):
             merged["content"] = "\(firstContent)\n\n\(secondContent)"
+        default:
+            break
+        }
+        let firstThinking = first["thinking"] as? String ?? ""
+        let secondThinking = second["thinking"] as? String ?? ""
+        switch (firstThinking.isEmpty, secondThinking.isEmpty) {
+        case (true, false):
+            merged["thinking"] = secondThinking
+        case (false, false):
+            merged["thinking"] = "\(firstThinking)\n\n\(secondThinking)"
         default:
             break
         }
@@ -1771,6 +1941,16 @@ private struct ProviderDebugContext {
     var aliasResolution: String?
     var routingDecision: ProviderRoutingDecision?
     var modeAdvice: ProviderModeAdvice?
+}
+
+private struct ChannelMarkedSegment {
+    var channel: String?
+    var text: String
+}
+
+private struct NormalizedChannelContent {
+    var content: String
+    var thinking: String?
 }
 
 private enum ProviderModeAdviceMode: String {
