@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import inspect
+import json
 import threading
 import time
 from typing import Any, Mapping, Sequence
@@ -79,12 +80,34 @@ class TextDiffusionProvider:
             "model_type": self.model_type,
             "supports_streaming": False,
             "supported_generation_modes": sorted(self.supported_modes),
+            "mode_advice_strategy": "heuristic",
         }
 
     def chat_completion(self, payload: Mapping[str, Any]) -> GenerationResult:
         messages = payload.get("messages")
         if not isinstance(messages, list) or not messages:
             raise RuntimeRequestError("messages must be a non-empty array")
+
+        advice = _mode_advice_result(messages)
+        if advice is not None:
+            text = json.dumps(advice, separators=(",", ":"))
+            prompt_text = "\n".join(
+                str(message.get("content", ""))
+                for message in messages
+                if isinstance(message, Mapping)
+            )
+            return GenerationResult(
+                text=text,
+                prompt_tokens=len(self._encode(prompt_text)),
+                completion_tokens=len(self._encode(text)),
+                finish_reason="stop",
+                elapsed_seconds=0,
+                mode="heuristic",
+                steps=None,
+                block_length=None,
+                nfe=0,
+            )
+
         prompt = self._render_chat(messages)
         prompt_ids = self._encode(prompt)
         max_tokens = _bounded_int(payload.get("max_tokens", 256), "max_tokens", 1, 32768)
@@ -259,6 +282,39 @@ class TextDiffusionProvider:
         ):
             modes.add("diffusion")
         return modes
+
+
+def _mode_advice_result(messages: list[object]) -> dict[str, object] | None:
+    system_text = "\n".join(
+        str(message.get("content", ""))
+        for message in messages
+        if isinstance(message, Mapping) and message.get("role") in {"system", "developer"}
+    )
+    if "Classify the user's request for a local coding assistant UI" not in system_text:
+        return None
+    user_text = "\n".join(
+        str(message.get("content", ""))
+        for message in messages
+        if isinstance(message, Mapping) and message.get("role") == "user"
+    ).lower()
+    plan_terms = (
+        "plan", "architecture", "design", "roadmap", "sequence", "decompose",
+        "break down", "risk analysis", "implementation approach",
+    )
+    coding_terms = (
+        "implement", "write code", "edit", "patch", "fix", "refactor", "test",
+        "build", "compile", "create file", "change the code",
+    )
+    if any(term in user_text for term in coding_terms):
+        mode = "coding"
+        reason = "The request asks for code changes or implementation work."
+    elif any(term in user_text for term in plan_terms):
+        mode = "plan"
+        reason = "The request asks for architecture, sequencing, or planning."
+    else:
+        mode = "ask"
+        reason = "The request is explanatory or does not require code changes."
+    return {"mode": mode, "confidence": 0.9, "reason": reason}
 
 
 def _sampler(temperature: float, top_p: float, top_k: int, min_p: float) -> Any:
