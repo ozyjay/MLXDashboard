@@ -139,6 +139,42 @@ public struct ProviderRoleGenerationDefaults: Codable, Equatable, Sendable {
     }
 }
 
+public struct TextDiffusionGenerationSettings: Codable, Equatable, Sendable {
+    public var mode: TextGenerationMode
+    public var steps: Int
+    public var blockLength: Int
+    public var threshold: Double
+    public var algorithm: String
+    public var seed: Int?
+
+    public init(
+        mode: TextGenerationMode = .diffusion,
+        steps: Int = 64,
+        blockLength: Int = 32,
+        threshold: Double = 0.9,
+        algorithm: String = "entropy",
+        seed: Int? = nil
+    ) {
+        self.mode = mode
+        self.steps = steps
+        self.blockLength = blockLength
+        self.threshold = threshold
+        self.algorithm = algorithm
+        self.seed = seed
+    }
+
+    public func validated() -> TextDiffusionGenerationSettings {
+        TextDiffusionGenerationSettings(
+            mode: mode,
+            steps: min(max(steps, 1), 4096),
+            blockLength: min(max(blockLength, 1), 4096),
+            threshold: min(max(threshold, 0), 1),
+            algorithm: algorithm.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "entropy" : algorithm,
+            seed: seed
+        )
+    }
+}
+
 public enum HuggingFaceDownloadMode: String, Codable, CaseIterable, Equatable, Sendable {
     case standard
     case xetConservative
@@ -186,13 +222,12 @@ public struct HuggingFaceDownloadSettings: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        let decoded = HuggingFaceDownloadSettings(
+        self = HuggingFaceDownloadSettings(
             mode: try container.decodeIfPresent(HuggingFaceDownloadMode.self, forKey: .mode) ?? .standard,
             xetConcurrency: try container.decodeIfPresent(Int.self, forKey: .xetConcurrency) ?? 4,
             downloadTimeoutSeconds: try container.decodeIfPresent(Int.self, forKey: .downloadTimeoutSeconds) ?? 60,
             etagTimeoutSeconds: try container.decodeIfPresent(Int.self, forKey: .etagTimeoutSeconds) ?? 30
         ).validated()
-        self = decoded
     }
 
     public func validated() -> HuggingFaceDownloadSettings {
@@ -250,37 +285,57 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
     public var providerDebugCaptureEnabled: Bool
     public var providerRoleAssignments: ProviderRoleAssignments
     public var providerGenerationDefaults: ProviderRoleGenerationDefaults
+    public var textDiffusionDefaults: TextDiffusionGenerationSettings
+    public var modeAdviceStrategy: ModeAdviceStrategy
+    public var modeAdviceModel: String?
+    public var modelRuntimeOverrides: [String: ModelRuntimeOverride]
+    public var residentModelMemoryBudgetGB: Double
+    public var maxResidentModelProcesses: Int
     public var downloadSettings: HuggingFaceDownloadSettings
 
     public init(
         activeModel: String? = nil,
-        mlxHost: String = "127.0.0.1",
+        mlxHost: String = DashboardSettings.localMLXHost,
         mlxPort: Int = 8080,
-        providerHost: String = "127.0.0.1",
+        providerHost: String = DashboardSettings.localMLXHost,
         providerPort: Int = 8123,
         serverFlags: [String] = [],
         providerDebugCaptureEnabled: Bool = true,
         providerRoleAssignments: ProviderRoleAssignments = ProviderRoleAssignments(),
         providerGenerationDefaults: ProviderRoleGenerationDefaults = .recommendedDefault,
+        textDiffusionDefaults: TextDiffusionGenerationSettings = TextDiffusionGenerationSettings(),
+        modeAdviceStrategy: ModeAdviceStrategy = .automatic,
+        modeAdviceModel: String? = nil,
+        modelRuntimeOverrides: [String: ModelRuntimeOverride] = [:],
+        residentModelMemoryBudgetGB: Double = 42,
+        maxResidentModelProcesses: Int = 2,
         downloadSettings: HuggingFaceDownloadSettings = .standardDefault
     ) {
         self.activeModel = activeModel
-        self.mlxHost = mlxHost
+        self.mlxHost = Self.localMLXHost
         self.mlxPort = mlxPort
-        self.providerHost = providerHost
+        self.providerHost = Self.localMLXHost
         self.providerPort = providerPort
         self.serverFlags = serverFlags
         self.providerDebugCaptureEnabled = providerDebugCaptureEnabled
         self.providerRoleAssignments = providerRoleAssignments
         self.providerGenerationDefaults = providerGenerationDefaults
+        self.textDiffusionDefaults = textDiffusionDefaults.validated()
+        self.modeAdviceStrategy = modeAdviceStrategy
+        self.modeAdviceModel = modeAdviceModel
+        self.modelRuntimeOverrides = modelRuntimeOverrides
+        self.residentModelMemoryBudgetGB = min(max(residentModelMemoryBudgetGB, 4), 60)
+        self.maxResidentModelProcesses = min(max(maxResidentModelProcesses, 1), 8)
         self.downloadSettings = downloadSettings.validated()
+        _ = mlxHost
+        _ = providerHost
     }
 
     public init(
         activeModel: String? = nil,
-        mlxHost: String = "127.0.0.1",
+        mlxHost: String = DashboardSettings.localMLXHost,
         mlxPort: Int = 8080,
-        providerHost: String = "127.0.0.1",
+        providerHost: String = DashboardSettings.localMLXHost,
         providerPort: Int = 8123,
         serverFlags: [String] = [],
         providerDebugCaptureEnabled: Bool = true,
@@ -311,29 +366,57 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
         case providerDebugCaptureEnabled
         case providerRoleAssignments
         case providerGenerationDefaults
+        case textDiffusionDefaults
+        case modeAdviceStrategy
+        case modeAdviceModel
+        case modelRuntimeOverrides
+        case residentModelMemoryBudgetGB
+        case maxResidentModelProcesses
         case downloadSettings
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.activeModel = try container.decodeIfPresent(String.self, forKey: .activeModel)
-        self.mlxHost = try container.decodeIfPresent(String.self, forKey: .mlxHost) ?? "127.0.0.1"
-        self.mlxPort = try container.decodeIfPresent(Int.self, forKey: .mlxPort) ?? 8080
-        self.providerHost = try container.decodeIfPresent(String.self, forKey: .providerHost) ?? "127.0.0.1"
-        self.providerPort = try container.decodeIfPresent(Int.self, forKey: .providerPort) ?? 8123
-        self.serverFlags = try container.decodeIfPresent([String].self, forKey: .serverFlags) ?? []
-        self.providerDebugCaptureEnabled = try container.decodeIfPresent(Bool.self, forKey: .providerDebugCaptureEnabled) ?? true
-        self.providerRoleAssignments = try container.decodeIfPresent(ProviderRoleAssignments.self, forKey: .providerRoleAssignments) ?? ProviderRoleAssignments()
-        self.providerGenerationDefaults = try container.decodeIfPresent(ProviderRoleGenerationDefaults.self, forKey: .providerGenerationDefaults) ?? .recommendedDefault
-        self.downloadSettings = (try container.decodeIfPresent(HuggingFaceDownloadSettings.self, forKey: .downloadSettings) ?? .standardDefault).validated()
+        self.init(
+            activeModel: try container.decodeIfPresent(String.self, forKey: .activeModel),
+            mlxPort: try container.decodeIfPresent(Int.self, forKey: .mlxPort) ?? 8080,
+            providerPort: try container.decodeIfPresent(Int.self, forKey: .providerPort) ?? 8123,
+            serverFlags: try container.decodeIfPresent([String].self, forKey: .serverFlags) ?? [],
+            providerDebugCaptureEnabled: try container.decodeIfPresent(Bool.self, forKey: .providerDebugCaptureEnabled) ?? true,
+            providerRoleAssignments: try container.decodeIfPresent(ProviderRoleAssignments.self, forKey: .providerRoleAssignments) ?? ProviderRoleAssignments(),
+            providerGenerationDefaults: try container.decodeIfPresent(ProviderRoleGenerationDefaults.self, forKey: .providerGenerationDefaults) ?? .recommendedDefault,
+            textDiffusionDefaults: try container.decodeIfPresent(TextDiffusionGenerationSettings.self, forKey: .textDiffusionDefaults) ?? TextDiffusionGenerationSettings(),
+            modeAdviceStrategy: try container.decodeIfPresent(ModeAdviceStrategy.self, forKey: .modeAdviceStrategy) ?? .automatic,
+            modeAdviceModel: try container.decodeIfPresent(String.self, forKey: .modeAdviceModel),
+            modelRuntimeOverrides: try container.decodeIfPresent([String: ModelRuntimeOverride].self, forKey: .modelRuntimeOverrides) ?? [:],
+            residentModelMemoryBudgetGB: try container.decodeIfPresent(Double.self, forKey: .residentModelMemoryBudgetGB) ?? 42,
+            maxResidentModelProcesses: try container.decodeIfPresent(Int.self, forKey: .maxResidentModelProcesses) ?? 2,
+            downloadSettings: try container.decodeIfPresent(HuggingFaceDownloadSettings.self, forKey: .downloadSettings) ?? .standardDefault
+        )
+    }
+
+    public var providerRootURL: URL {
+        URL(string: "http://\(Self.localMLXHost):\(providerPort)")!
     }
 
     public var providerBaseURL: URL {
-        URL(string: "http://\(providerHost):\(providerPort)/v1")!
+        providerRootURL
+    }
+
+    public var providerOpenAIBaseURL: URL {
+        providerRootURL.appending(path: "v1")
     }
 
     public var mlxBaseURL: URL {
         URL(string: "http://\(Self.localMLXHost):\(mlxPort)")!
+    }
+
+    public func runtimeConfiguration(modelID: String, modelType: String? = nil) -> ModelRuntimeConfiguration {
+        ModelRuntimeResolver.resolved(
+            modelID: modelID,
+            modelType: modelType,
+            overrides: modelRuntimeOverrides
+        )
     }
 }
 
