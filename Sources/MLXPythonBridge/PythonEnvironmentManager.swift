@@ -4,9 +4,24 @@ import MLXCore
 public struct PythonEnvironmentStatus: Sendable, Equatable {
     public var pythonExecutable: URL
     public var packageReport: PythonPackageReport
+    public var optionalPackageReport: PythonPackageReport
 
     public var isReady: Bool {
         packageReport.isReady
+    }
+
+    public var textDiffusionRuntimeAvailable: Bool {
+        !optionalPackageReport.missingInstallNames.contains("mlxdashboard-text-diffusion")
+    }
+
+    public init(
+        pythonExecutable: URL,
+        packageReport: PythonPackageReport,
+        optionalPackageReport: PythonPackageReport = PythonPackageReport(missingInstallNames: [])
+    ) {
+        self.pythonExecutable = pythonExecutable
+        self.packageReport = packageReport
+        self.optionalPackageReport = optionalPackageReport
     }
 }
 
@@ -118,7 +133,7 @@ public struct PythonEnvironmentManager: Sendable {
         guard baseResult.exitCode == 0 else {
             throw PythonEnvironmentError.packageInstallFailed(baseResult.standardError)
         }
-        try await installBundledTextDiffusionRuntime(pythonExecutable: python)
+        _ = try? await installBundledTextDiffusionRuntime(pythonExecutable: python)
     }
 
     public func installBundledTextDiffusionRuntime(pythonExecutable: URL) async throws {
@@ -143,14 +158,23 @@ public struct PythonEnvironmentManager: Sendable {
             packages: [
                 PythonPackage(importName: "mlx", installName: "mlx"),
                 PythonPackage(importName: "mlx_lm", installName: "mlx-lm"),
-                PythonPackage(importName: "huggingface_hub", installName: "huggingface_hub"),
+                PythonPackage(importName: "huggingface_hub", installName: "huggingface_hub")
+            ]
+        )
+        let optionalReport = try await checker.checkPackages(
+            pythonExecutable: python,
+            packages: [
                 PythonPackage(
                     importName: "mlxdashboard_text_diffusion",
                     installName: "mlxdashboard-text-diffusion"
                 )
             ]
         )
-        return PythonEnvironmentStatus(pythonExecutable: python, packageReport: report)
+        return PythonEnvironmentStatus(
+            pythonExecutable: python,
+            packageReport: report,
+            optionalPackageReport: optionalReport
+        )
     }
 
     public func runtimePackageUpgradeReport() async throws -> PythonPackageUpgradeReport {
@@ -220,7 +244,7 @@ public struct PythonEnvironmentManager: Sendable {
         guard result.exitCode == 0 else {
             throw PythonEnvironmentError.packageInstallFailed(result.standardError)
         }
-        try await installBundledTextDiffusionRuntime(pythonExecutable: pythonExecutable)
+        _ = try? await installBundledTextDiffusionRuntime(pythonExecutable: pythonExecutable)
     }
 
     public func mlxLMRuntimeCapabilities(pythonExecutable: URL) async throws -> MLXModelRuntimeCapabilities {

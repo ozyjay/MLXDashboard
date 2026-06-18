@@ -505,9 +505,16 @@ final class DashboardViewModel: ObservableObject {
             }
             try serverPoolController.start(settings: settings, pythonExecutable: python)
             roleServerStatuses = serverPoolController.roleStatuses
-            updateProviderEndpointState()
-            telemetry.appendLog("Started mlx-lm on \(DashboardSettings.localMLXHost):\(settings.mlxPort)")
-            try startProvider()
+            let ready = await serverPoolController.waitUntilReady(timeout: 180, pollInterval: 0.5)
+            roleServerStatuses = serverPoolController.roleStatuses
+            if ready {
+                updateProviderEndpointState()
+                telemetry.appendLog("Started mlx-lm on \(DashboardSettings.localMLXHost):\(settings.mlxPort)")
+                try startProvider()
+            } else {
+                clearProviderEndpointState()
+                telemetry.appendLog("Failed to start server: \(serverPoolController.lastError ?? "runtime readiness check failed")")
+            }
         } catch {
             roleServerStatuses = serverPoolController.roleStatuses
             if serverPoolController.state != .running {
@@ -543,8 +550,15 @@ final class DashboardViewModel: ObservableObject {
             clearProviderEndpointState()
             try serverPoolController.start(settings: settings, pythonExecutable: python)
             roleServerStatuses = serverPoolController.roleStatuses
-            updateProviderEndpointState()
-            telemetry.appendLog("Restarted mlx-lm on \(DashboardSettings.localMLXHost):\(settings.mlxPort)")
+            let ready = await serverPoolController.waitUntilReady(timeout: 180, pollInterval: 0.5)
+            roleServerStatuses = serverPoolController.roleStatuses
+            if ready {
+                updateProviderEndpointState()
+                telemetry.appendLog("Restarted mlx-lm on \(DashboardSettings.localMLXHost):\(settings.mlxPort)")
+            } else {
+                clearProviderEndpointState()
+                telemetry.appendLog("Failed to restart server: \(serverPoolController.lastError ?? "runtime readiness check failed")")
+            }
         } catch {
             roleServerStatuses = serverPoolController.roleStatuses
             if serverPoolController.state != .running {
@@ -559,6 +573,8 @@ final class DashboardViewModel: ObservableObject {
             let python = try await environmentManager.ensureVenv()
             await refreshRuntimeCapabilities(pythonExecutable: python)
             try serverPoolController.restart(role: role, settings: settings, pythonExecutable: python)
+            roleServerStatuses = serverPoolController.roleStatuses
+            _ = await serverPoolController.waitUntilRoleReady(role, timeout: 180)
             roleServerStatuses = serverPoolController.roleStatuses
             updateProviderEndpointState()
             let status = serverPoolController.status(for: role)

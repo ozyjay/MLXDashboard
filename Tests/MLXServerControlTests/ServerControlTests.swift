@@ -33,7 +33,8 @@ final class ServerControlTests: XCTestCase {
                 ask: "mlx-community/ask",
                 plan: "mlx-community/plan",
                 coding: "mlx-community/coding"
-            )
+            ),
+            maxResidentModelProcesses: 4
         )
 
         let plan = RoleServerPoolController.makePlan(settings: settings)
@@ -80,13 +81,14 @@ final class ServerControlTests: XCTestCase {
         XCTAssertEqual(plan.endpoint(for: .plan)?.port, 8081)
     }
 
-    func testRoleServerPoolStartsOneProcessPerUniqueModel() throws {
+    func testRoleServerPoolStartsOneProcessPerUniqueModelAfterReadiness() async throws {
         let gemma = FakeManagedProcess()
         let devstral = FakeManagedProcess()
         let launcher = FakeProcessLauncher(processes: [gemma, devstral])
         let controller = RoleServerPoolController(
             processLauncher: launcher,
-            portChecker: FakePortChecker(isAvailable: true)
+            portChecker: FakePortChecker(isAvailable: true),
+            healthChecker: FakeHealthChecker()
         )
         let settings = DashboardSettings(
             activeModel: "mlx-community/gemma4",
@@ -99,6 +101,10 @@ final class ServerControlTests: XCTestCase {
         )
 
         try controller.start(settings: settings, pythonExecutable: URL(filePath: "/usr/bin/python3"))
+        XCTAssertEqual(controller.state, .starting)
+        XCTAssertNil(controller.endpoint(for: .plan))
+        let ready = await controller.waitUntilReady(timeout: 0.1, pollInterval: 0.05)
+        XCTAssertTrue(ready)
 
         XCTAssertTrue(gemma.wasLaunched)
         XCTAssertTrue(devstral.wasLaunched)
@@ -115,13 +121,14 @@ final class ServerControlTests: XCTestCase {
         XCTAssertEqual(controller.roleStatuses.map(\.kind), [.shared, .running, .shared])
     }
 
-    func testRoleServerPoolStartsDefaultWithoutModelArgumentWhenActiveModelMissing() throws {
+    func testRoleServerPoolStartsDefaultWithoutModelArgumentWhenActiveModelMissing() async throws {
         let base = FakeManagedProcess()
         let plan = FakeManagedProcess()
         let launcher = FakeProcessLauncher(processes: [base, plan])
         let controller = RoleServerPoolController(
             processLauncher: launcher,
-            portChecker: FakePortChecker(isAvailable: true)
+            portChecker: FakePortChecker(isAvailable: true),
+            healthChecker: FakeHealthChecker()
         )
         let settings = DashboardSettings(
             activeModel: nil,
@@ -130,6 +137,8 @@ final class ServerControlTests: XCTestCase {
         )
 
         try controller.start(settings: settings, pythonExecutable: URL(filePath: "/usr/bin/python3"))
+        let ready = await controller.waitUntilReady(timeout: 0.1, pollInterval: 0.05)
+        XCTAssertTrue(ready)
 
         XCTAssertEqual(base.arguments, ["-m", "mlx_lm", "server", "--host", "127.0.0.1", "--port", "8080"])
         XCTAssertEqual(plan.arguments, ["-m", "mlx_lm", "server", "--host", "127.0.0.1", "--port", "8081", "--model", "plan"])
@@ -137,21 +146,25 @@ final class ServerControlTests: XCTestCase {
         XCTAssertEqual(controller.endpoint(for: .plan)?.modelID, "plan")
     }
 
-    func testRoleServerPoolStopsEveryOwnedProcess() throws {
+    func testRoleServerPoolStopsEveryOwnedProcess() async throws {
         let base = FakeManagedProcess()
         let ask = FakeManagedProcess()
         let plan = FakeManagedProcess()
         let launcher = FakeProcessLauncher(processes: [base, ask, plan])
         let controller = RoleServerPoolController(
             processLauncher: launcher,
-            portChecker: FakePortChecker(isAvailable: true)
+            portChecker: FakePortChecker(isAvailable: true),
+            healthChecker: FakeHealthChecker()
         )
         let settings = DashboardSettings(
             activeModel: "base",
-            providerRoleAssignments: ProviderRoleAssignments(ask: "ask", plan: "plan")
+            providerRoleAssignments: ProviderRoleAssignments(ask: "ask", plan: "plan"),
+            maxResidentModelProcesses: 3
         )
 
         try controller.start(settings: settings, pythonExecutable: URL(filePath: "/usr/bin/python3"))
+        let ready = await controller.waitUntilReady(timeout: 0.1, pollInterval: 0.05)
+        XCTAssertTrue(ready)
         controller.stopAll()
 
         XCTAssertTrue(base.wasTerminated)
@@ -162,12 +175,13 @@ final class ServerControlTests: XCTestCase {
         XCTAssertEqual(controller.roleEndpoints, [:])
     }
 
-    func testRoleServerPoolKeepsDefaultRunningWhenAdditionalRolePortUnavailable() throws {
+    func testRoleServerPoolKeepsDefaultRunningWhenAdditionalRolePortUnavailable() async throws {
         let base = FakeManagedProcess()
         let launcher = FakeProcessLauncher(processes: [base])
         let controller = RoleServerPoolController(
             processLauncher: launcher,
-            portChecker: FakePortChecker(unavailablePorts: [8081])
+            portChecker: FakePortChecker(unavailablePorts: [8081]),
+            healthChecker: FakeHealthChecker()
         )
         let settings = DashboardSettings(
             activeModel: "base",
@@ -176,6 +190,8 @@ final class ServerControlTests: XCTestCase {
         )
 
         try controller.start(settings: settings, pythonExecutable: URL(filePath: "/usr/bin/python3"))
+        let ready = await controller.waitUntilReady(timeout: 0.1, pollInterval: 0.05)
+        XCTAssertTrue(ready)
 
         XCTAssertTrue(base.wasLaunched)
         XCTAssertEqual(controller.state, .running)
@@ -227,11 +243,12 @@ final class ServerControlTests: XCTestCase {
         XCTAssertEqual(controller.roleStatuses.map(\.kind), [.unassigned, .unassigned, .unassigned])
     }
 
-    func testRoleServerPoolMarksRoleFailedWhenRolePortUnavailableWithoutActiveModel() throws {
+    func testRoleServerPoolMarksRoleFailedWhenRolePortUnavailableWithoutActiveModel() async throws {
         let base = FakeManagedProcess()
         let controller = RoleServerPoolController(
             processLauncher: FakeProcessLauncher(process: base),
-            portChecker: FakePortChecker(unavailablePorts: [8081])
+            portChecker: FakePortChecker(unavailablePorts: [8081]),
+            healthChecker: FakeHealthChecker()
         )
         let settings = DashboardSettings(
             activeModel: nil,
@@ -240,6 +257,8 @@ final class ServerControlTests: XCTestCase {
         )
 
         try controller.start(settings: settings, pythonExecutable: URL(filePath: "/usr/bin/python3"))
+        let ready = await controller.waitUntilReady(timeout: 0.1, pollInterval: 0.05)
+        XCTAssertTrue(ready)
 
         XCTAssertTrue(base.wasLaunched)
         XCTAssertEqual(controller.state, .running)
@@ -249,12 +268,13 @@ final class ServerControlTests: XCTestCase {
         XCTAssertEqual(controller.status(for: .plan).detail, "Port 8081 unavailable; no active model fallback")
     }
 
-    func testStoppingOneRoleFallsBackOnlyThatRoleWhenProcessIsUnique() throws {
+    func testStoppingOneRoleFallsBackOnlyThatRoleWhenProcessIsUnique() async throws {
         let base = FakeManagedProcess()
         let ask = FakeManagedProcess()
         let controller = RoleServerPoolController(
             processLauncher: FakeProcessLauncher(processes: [base, ask]),
-            portChecker: FakePortChecker(isAvailable: true)
+            portChecker: FakePortChecker(isAvailable: true),
+            healthChecker: FakeHealthChecker()
         )
         let settings = DashboardSettings(
             activeModel: "base",
@@ -265,6 +285,8 @@ final class ServerControlTests: XCTestCase {
         )
 
         try controller.start(settings: settings, pythonExecutable: URL(filePath: "/usr/bin/python3"))
+        let ready = await controller.waitUntilReady(timeout: 0.1, pollInterval: 0.05)
+        XCTAssertTrue(ready)
 
         controller.stop(role: .ask)
 
@@ -279,12 +301,13 @@ final class ServerControlTests: XCTestCase {
         XCTAssertEqual(Set(controller.processesByPort.keys), [8080])
     }
 
-    func testStoppingOneSharedRoleKeepsSharedProcessForOtherRole() throws {
+    func testStoppingOneSharedRoleKeepsSharedProcessForOtherRole() async throws {
         let base = FakeManagedProcess()
         let shared = FakeManagedProcess()
         let controller = RoleServerPoolController(
             processLauncher: FakeProcessLauncher(processes: [base, shared]),
-            portChecker: FakePortChecker(isAvailable: true)
+            portChecker: FakePortChecker(isAvailable: true),
+            healthChecker: FakeHealthChecker()
         )
         let settings = DashboardSettings(
             activeModel: "base",
@@ -295,6 +318,8 @@ final class ServerControlTests: XCTestCase {
         )
 
         try controller.start(settings: settings, pythonExecutable: URL(filePath: "/usr/bin/python3"))
+        let ready = await controller.waitUntilReady(timeout: 0.1, pollInterval: 0.05)
+        XCTAssertTrue(ready)
 
         controller.stop(role: .ask)
 
@@ -308,13 +333,14 @@ final class ServerControlTests: XCTestCase {
         XCTAssertEqual(Set(controller.processesByPort.keys), [8080, 8081])
     }
 
-    func testRestartingStoppedRoleLaunchesOnlyThatRoleProcess() throws {
+    func testRestartingStoppedRoleLaunchesOnlyThatRoleProcess() async throws {
         let base = FakeManagedProcess()
         let originalAsk = FakeManagedProcess()
         let restartedAsk = FakeManagedProcess()
         let controller = RoleServerPoolController(
             processLauncher: FakeProcessLauncher(processes: [base, originalAsk, restartedAsk]),
-            portChecker: FakePortChecker(isAvailable: true)
+            portChecker: FakePortChecker(isAvailable: true),
+            healthChecker: FakeHealthChecker()
         )
         let settings = DashboardSettings(
             activeModel: "base",
@@ -325,6 +351,8 @@ final class ServerControlTests: XCTestCase {
         )
 
         try controller.start(settings: settings, pythonExecutable: URL(filePath: "/usr/bin/python3"))
+        let ready = await controller.waitUntilReady(timeout: 0.1, pollInterval: 0.05)
+        XCTAssertTrue(ready)
         controller.stop(role: .ask)
 
         try controller.restart(
@@ -332,6 +360,8 @@ final class ServerControlTests: XCTestCase {
             settings: settings,
             pythonExecutable: URL(filePath: "/usr/bin/python3")
         )
+        let roleReady = await controller.waitUntilRoleReady(.ask, timeout: 0.1)
+        XCTAssertTrue(roleReady)
 
         XCTAssertTrue(originalAsk.wasTerminated)
         XCTAssertTrue(restartedAsk.wasLaunched)
@@ -347,12 +377,13 @@ final class ServerControlTests: XCTestCase {
         XCTAssertEqual(Set(controller.processesByPort.keys), [8080, 8081])
     }
 
-    func testRestartingSharedNonDefaultRoleDoesNotTerminateOrRelaunchSharedProcess() throws {
+    func testRestartingSharedNonDefaultRoleDoesNotTerminateOrRelaunchSharedProcess() async throws {
         let base = FakeManagedProcess()
         let shared = FakeManagedProcess()
         let controller = RoleServerPoolController(
             processLauncher: FakeProcessLauncher(processes: [base, shared]),
-            portChecker: FakePortChecker(isAvailable: true)
+            portChecker: FakePortChecker(isAvailable: true),
+            healthChecker: FakeHealthChecker()
         )
         let settings = DashboardSettings(
             activeModel: "base",
@@ -363,6 +394,8 @@ final class ServerControlTests: XCTestCase {
         )
 
         try controller.start(settings: settings, pythonExecutable: URL(filePath: "/usr/bin/python3"))
+        let ready = await controller.waitUntilReady(timeout: 0.1, pollInterval: 0.05)
+        XCTAssertTrue(ready)
 
         try controller.restart(
             role: .ask,
@@ -384,14 +417,25 @@ final class ServerControlTests: XCTestCase {
         XCTAssertEqual(ProviderModelRole.coding.displayName, "Coding")
     }
 
-    func testControllerStartsAndStopsOwnedMLXServerProcess() throws {
+    func testControllerStartsAndStopsOwnedMLXServerProcess() async throws {
         let process = FakeManagedProcess()
         let launcher = FakeProcessLauncher(process: process)
-        let controller = ServerProcessController(processLauncher: launcher, portChecker: FakePortChecker(isAvailable: true))
+        let controller = ServerProcessController(
+            processLauncher: launcher,
+            portChecker: FakePortChecker(isAvailable: true),
+            healthChecker: FakeHealthChecker()
+        )
         let settings = DashboardSettings(activeModel: "mlx-community/Tiny")
 
         try controller.start(settings: settings, pythonExecutable: URL(filePath: "/venv/bin/python"))
 
+        XCTAssertEqual(controller.state, .starting)
+        let ready = await controller.waitUntilReady(
+            baseURL: URL(string: "http://127.0.0.1:8080")!,
+            timeout: 0.1,
+            pollInterval: 0.05
+        )
+        XCTAssertTrue(ready)
         XCTAssertEqual(controller.state, .running)
         XCTAssertEqual(process.executableURL?.path, "/venv/bin/python")
         XCTAssertEqual(process.arguments, [
@@ -440,7 +484,7 @@ final class ServerControlTests: XCTestCase {
             XCTAssertEqual(error as? ServerProcessControllerError, .portUnavailable(host: "127.0.0.1", port: 8080))
         }
         XCTAssertEqual(controller.state, .failed)
-        XCTAssertEqual(controller.lastError, "Cannot start mlx-lm because 127.0.0.1:8080 is already in use.")
+        XCTAssertEqual(controller.lastError, "Cannot start the model runtime because 127.0.0.1:8080 is already in use.")
         XCTAssertFalse(process.wasLaunched)
     }
 
@@ -468,6 +512,50 @@ final class ServerControlTests: XCTestCase {
         XCTAssertTrue(arguments.contains("--trust-remote-code"))
         XCTAssertTrue(arguments.contains("--extra"))
     }
+
+    func testRoleServerPoolFailsAndWithdrawsEndpointsWhenReadinessFails() async throws {
+        let base = FakeManagedProcess()
+        let controller = RoleServerPoolController(
+            processLauncher: FakeProcessLauncher(process: base),
+            portChecker: FakePortChecker(isAvailable: true),
+            healthChecker: FakeHealthChecker(healthyPorts: [])
+        )
+
+        try controller.start(
+            settings: DashboardSettings(activeModel: "base"),
+            pythonExecutable: URL(filePath: "/usr/bin/python3")
+        )
+
+        let ready = await controller.waitUntilReady(timeout: 0.1, pollInterval: 0.05)
+        XCTAssertFalse(ready)
+        XCTAssertTrue(base.wasTerminated)
+        XCTAssertEqual(controller.state, .failed)
+        XCTAssertNil(controller.defaultEndpoint)
+        XCTAssertEqual(controller.roleEndpoints, [:])
+    }
+
+    func testRoleServerPoolWithdrawsEndpointsWhenRuntimeTerminatesUnexpectedly() async throws {
+        let base = FakeManagedProcess()
+        let controller = RoleServerPoolController(
+            processLauncher: FakeProcessLauncher(process: base),
+            portChecker: FakePortChecker(isAvailable: true),
+            healthChecker: FakeHealthChecker()
+        )
+
+        try controller.start(
+            settings: DashboardSettings(activeModel: "base"),
+            pythonExecutable: URL(filePath: "/usr/bin/python3")
+        )
+        let ready = await controller.waitUntilReady(timeout: 0.1, pollInterval: 0.05)
+        XCTAssertTrue(ready)
+
+        base.finish(status: 9)
+        await MainActor.run {}
+
+        XCTAssertEqual(controller.state, .failed)
+        XCTAssertNil(controller.defaultEndpoint)
+        XCTAssertEqual(controller.roleEndpoints, [:])
+    }
 }
 
 private extension Array where Element == String {
@@ -493,6 +581,7 @@ private final class FakeManagedProcess: ManagedProcess {
     var launchCount = 0
     var wasTerminated = false
     var isRunning = false
+    var terminationHandler: ManagedProcessTerminationHandler?
     let errorToThrowOnLaunch: Error?
 
     init(errorToThrowOnLaunch: Error? = nil) {
@@ -511,6 +600,11 @@ private final class FakeManagedProcess: ManagedProcess {
     func terminate() {
         wasTerminated = true
         isRunning = false
+    }
+
+    func finish(status: Int32) {
+        isRunning = false
+        terminationHandler?(status)
     }
 }
 
@@ -541,5 +635,18 @@ private struct FakePortChecker: ServerPortChecking {
 
     func isPortAvailable(host: String, port: Int) -> Bool {
         isAvailable && !unavailablePorts.contains(port)
+    }
+}
+
+private struct FakeHealthChecker: ServerHealthChecking {
+    var healthyPorts: Set<Int>? = nil
+
+    func waitUntilHealthy(
+        baseURL: URL,
+        timeout: TimeInterval,
+        pollInterval: TimeInterval
+    ) async -> Bool {
+        guard let healthyPorts else { return true }
+        return healthyPorts.contains(baseURL.port ?? -1)
     }
 }

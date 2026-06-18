@@ -114,7 +114,7 @@ public struct RoleServerPlan: Equatable, Sendable {
     }
 }
 
-public final class RoleServerPoolController: ObservableObject {
+public final class RoleServerPoolController: ObservableObject, @unchecked Sendable {
     @Published public private(set) var state: ServerState
     @Published public private(set) var lastError: String?
     @Published public private(set) var roleStatuses: [RoleServerStatusRow]
@@ -124,13 +124,15 @@ public final class RoleServerPoolController: ObservableObject {
     public let processLauncher: ProcessLaunching
     public let portChecker: ServerPortChecking
     public let argumentBuilder: ServerProcessController
+    private let healthChecker: ServerHealthChecking
     public private(set) var processesByPort: [Int: ManagedProcess]
     public private(set) var plan: RoleServerPlan?
 
     public init(
         processLauncher: ProcessLaunching = FoundationProcessLauncher(),
         portChecker: ServerPortChecking = TCPServerPortChecker(),
-        argumentBuilder: ServerProcessController = ServerProcessController()
+        argumentBuilder: ServerProcessController = ServerProcessController(),
+        healthChecker: ServerHealthChecking = MLXHealthClient()
     ) {
         self.state = .stopped
         self.lastError = nil
@@ -141,6 +143,7 @@ public final class RoleServerPoolController: ObservableObject {
         self.processLauncher = processLauncher
         self.portChecker = portChecker
         self.argumentBuilder = argumentBuilder
+        self.healthChecker = healthChecker
         self.processesByPort = [:]
         self.plan = nil
     }
@@ -224,13 +227,14 @@ public final class RoleServerPoolController: ObservableObject {
 
         processesByPort = launched
         if !unavailablePorts.isEmpty {
-            roleStatuses = Self.makeRoleStatuses(
+            let statuses = Self.makeRoleStatuses(
                 plan: nextPlan,
                 defaultEndpoint: nextPlan.defaultEndpoint,
                 runningRoleEndpoints: [:],
                 unavailablePorts: unavailablePorts,
                 portsAreReady: false
             )
+            applyResolvedRoleStatuses(statuses)
         }
     }
 
@@ -243,7 +247,7 @@ public final class RoleServerPoolController: ObservableObject {
         let processSnapshot = processesByPort
         var healthyPorts: Set<Int> = []
         for server in currentPlan.servers where processSnapshot[server.port]?.isRunning == true {
-            let healthy = await MLXHealthClient().waitUntilHealthy(
+            let healthy = await healthChecker.waitUntilHealthy(
                 baseURL: server.endpoint.baseURL,
                 timeout: timeout,
                 pollInterval: pollInterval
@@ -416,9 +420,10 @@ public final class RoleServerPoolController: ObservableObject {
               let endpoint = currentPlan.endpoint(for: role),
               processesByPort[endpoint.port]?.isRunning == true
         else { return false }
-        let healthy = await MLXHealthClient().waitUntilHealthy(
+        let healthy = await healthChecker.waitUntilHealthy(
             baseURL: endpoint.baseURL,
-            timeout: timeout
+            timeout: timeout,
+            pollInterval: 0.5
         )
         await MainActor.run {
             if healthy {
@@ -593,6 +598,18 @@ public final class RoleServerPoolController: ObservableObject {
             }
             let plannedEndpoint = plan.endpoint(for: role) ?? planned.endpoint ?? defaultEndpoint
             guard let runningEndpoint = runningRoleEndpoints[role] else {
+                if unavailablePorts.contains(plannedEndpoint.port) {
+                    let fallbackAvailable = defaultEndpoint.modelID != nil
+                    return RoleServerStatusRow(
+                        role: role,
+                        assignedModel: assignedModel,
+                        endpoint: fallbackAvailable ? defaultEndpoint : nil,
+                        kind: fallbackAvailable ? .fallback : .failed,
+                        detail: fallbackAvailable
+                            ? "Port \(plannedEndpoint.port) unavailable; using active model"
+                            : "Port \(plannedEndpoint.port) unavailable; no active model fallback"
+                    )
+                }
                 if !portsAreReady && !unavailablePorts.contains(plannedEndpoint.port) {
                     return RoleServerStatusRow(
                         role: role,

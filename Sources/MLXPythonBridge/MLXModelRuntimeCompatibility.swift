@@ -43,7 +43,7 @@ public struct MLXModelRuntimeCompatibilityChecker: Sendable {
         if Self.unsupportedModelTypes.contains(normalized) {
             return .unsupported(
                 modelType: modelType,
-                reason: "Model architecture is explicitly unsupported: \(modelType)"
+                reason: runtimeCapabilities.unsupportedReason(modelType: modelType)
             )
         }
 
@@ -51,7 +51,7 @@ public struct MLXModelRuntimeCompatibilityChecker: Sendable {
             guard runtimeCapabilities.textDiffusionRuntimeAvailable else {
                 return .unsupported(
                     modelType: modelType,
-                    reason: "The bundled text diffusion runtime is not installed for model_type \(modelType)"
+                    reason: runtimeCapabilities.unsupportedReason(modelType: modelType)
                 )
             }
             return .runnable(modelType: modelType)
@@ -83,7 +83,7 @@ public struct MLXModelRuntimeCompatibilityChecker: Sendable {
         guard let data = try? Data(contentsOf: configURL),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
-            return .unknown(reason: "Model config.json could not be read.")
+            return .runnable(modelType: nil)
         }
 
         let modelType = object["model_type"] as? String
@@ -102,9 +102,7 @@ public struct MLXModelRuntimeCompatibilityChecker: Sendable {
         }
 
         guard let modelType, !modelType.isEmpty else {
-            return .unknown(
-                reason: "Model config does not declare model_type or custom model code."
-            )
+            return .runnable(modelType: nil)
         }
         return compatibility(modelType: modelType)
     }

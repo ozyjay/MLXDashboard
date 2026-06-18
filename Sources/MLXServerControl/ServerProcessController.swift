@@ -10,19 +10,22 @@ public enum ServerState: String, Equatable, Sendable {
     case failed
 }
 
-public final class ServerProcessController: ObservableObject {
+public final class ServerProcessController: ObservableObject, @unchecked Sendable {
     @Published public private(set) var state: ServerState
     @Published public private(set) var lastError: String?
     private let processLauncher: ProcessLaunching
     private let portChecker: ServerPortChecking
+    private let healthChecker: ServerHealthChecking
     private var process: ManagedProcess?
 
     public init(
         processLauncher: ProcessLaunching = FoundationProcessLauncher(),
-        portChecker: ServerPortChecking = TCPServerPortChecker()
+        portChecker: ServerPortChecking = TCPServerPortChecker(),
+        healthChecker: ServerHealthChecking = MLXHealthClient()
     ) {
         self.processLauncher = processLauncher
         self.portChecker = portChecker
+        self.healthChecker = healthChecker
         self.state = .stopped
     }
 
@@ -97,7 +100,7 @@ public final class ServerProcessController: ObservableObject {
         timeout: TimeInterval = 180,
         pollInterval: TimeInterval = 0.5
     ) async -> Bool {
-        let ready = await MLXHealthClient().waitUntilHealthy(
+        let ready = await healthChecker.waitUntilHealthy(
             baseURL: baseURL,
             timeout: timeout,
             pollInterval: pollInterval
@@ -253,3 +256,13 @@ public struct MLXHealthClient: Sendable {
         return false
     }
 }
+
+public protocol ServerHealthChecking: Sendable {
+    func waitUntilHealthy(
+        baseURL: URL,
+        timeout: TimeInterval,
+        pollInterval: TimeInterval
+    ) async -> Bool
+}
+
+extension MLXHealthClient: ServerHealthChecking {}

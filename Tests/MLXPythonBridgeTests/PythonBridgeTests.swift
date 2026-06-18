@@ -129,18 +129,31 @@ final class PythonBridgeTests: XCTestCase {
 
         XCTAssertEqual(
             compatibility,
-            .unsupported(modelType: "diffusion_gemma", reason: "Unsupported by installed mlx-lm: diffusion_gemma")
+            .unsupported(
+                modelType: "diffusion_gemma",
+                reason: "Bundled text diffusion runtime is unavailable for model_type diffusion_gemma"
+            )
         )
     }
 
     func testRuntimeCompatibilityAllowsDiffusionGemmaWhenRuntimeCapabilityIsKnown() throws {
         let checker = MLXModelRuntimeCompatibilityChecker(
-            runtimeCapabilities: MLXModelRuntimeCapabilities(supportedModelTypes: ["diffusion_gemma"])
+            runtimeCapabilities: MLXModelRuntimeCapabilities(textDiffusionRuntimeAvailable: true)
         )
 
         let compatibility = checker.compatibility(modelType: "diffusion_gemma")
 
         XCTAssertEqual(compatibility, .runnable(modelType: "diffusion_gemma"))
+    }
+
+    func testRuntimeCompatibilityTreatsMissingLocalConfigAsTransparent() throws {
+        let root = try temporaryDirectory()
+        let snapshot = root.appending(path: "models--mlx-community--Tiny/snapshots/abc123", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+
+        let compatibility = MLXModelRuntimeCompatibilityChecker().compatibility(localPath: snapshot.path)
+
+        XCTAssertEqual(compatibility, .runnable(modelType: nil))
     }
 
     func testRuntimeCapabilitiesDetectInstalledModelModulesFromPackageRoot() throws {
@@ -155,7 +168,7 @@ final class PythonBridgeTests: XCTestCase {
         )
 
         XCTAssertEqual(capabilities.mlxLMVersion, "0.31.3")
-        XCTAssertTrue(capabilities.supports(modelType: "nemotron_labs_diffusion"))
+        XCTAssertFalse(capabilities.supports(modelType: "nemotron_labs_diffusion"))
     }
 
     func testRuntimeCompatibilityRejectsNemotronDiffusionWhenRuntimeModuleIsMissing() throws {
@@ -167,7 +180,7 @@ final class PythonBridgeTests: XCTestCase {
             compatibility,
             .unsupported(
                 modelType: "nemotron_labs_diffusion",
-                reason: "Installed mlx-lm 0.31.3 does not support model_type nemotron_labs_diffusion"
+                reason: "Bundled text diffusion runtime is unavailable for model_type nemotron_labs_diffusion"
             )
         )
     }
@@ -191,7 +204,7 @@ final class PythonBridgeTests: XCTestCase {
         )
 
         XCTAssertEqual(capabilities.mlxLMVersion, "0.31.3")
-        XCTAssertTrue(capabilities.supports(modelType: "nemotron_labs_diffusion"))
+        XCTAssertFalse(capabilities.supports(modelType: "nemotron_labs_diffusion"))
     }
 
     func testRuntimeCapabilityInspectionFailureIncludesFallbackReasonWhenOutputIsEmpty() async throws {
@@ -330,10 +343,9 @@ final class PythonBridgeTests: XCTestCase {
 
         try await manager.upgradeRuntimePackages(pythonExecutable: URL(filePath: "/tmp/python"))
 
-        XCTAssertEqual(
-            runner.commands.map(\.arguments),
-            [["-m", "pip", "install", "--upgrade", "mlx", "mlx-lm"]]
-        )
+        XCTAssertEqual(runner.commands.first?.arguments, ["-m", "pip", "install", "--upgrade", "mlx", "mlx-lm"])
+        XCTAssertEqual(Array(runner.commands.last?.arguments.prefix(4) ?? []), ["-m", "pip", "install", "--upgrade"])
+        XCTAssertTrue(runner.commands.last?.arguments.last?.contains("TextDiffusionRuntime") == true)
     }
 
     func testCacheManagerDeletesWholeRepoCacheFolderForModel() throws {
@@ -833,7 +845,7 @@ private struct FakeCommandRunner: CommandRunning {
             key = "install"
         } else if script.contains("whoami") {
             key = "whoami"
-        } else if script.contains("MLXDashboard runtime package versions") {
+        } else if script.contains("packages = sys.argv[1:]") {
             key = "runtime-package-versions"
         } else if script.contains("metadata.distribution(\"mlx-lm\")") {
             key = "runtime-capabilities"
@@ -841,6 +853,10 @@ private struct FakeCommandRunner: CommandRunning {
             key = "pip-outdated"
         } else if command.arguments == ["-m", "pip", "install", "--upgrade", "mlx", "mlx-lm"] {
             key = "runtime-upgrade"
+        } else if command.arguments.count == 5,
+                  Array(command.arguments[0...3]) == ["-m", "pip", "install", "--upgrade"],
+                  command.arguments[4].contains("TextDiffusionRuntime") {
+            key = "text-diffusion-runtime-install"
         } else {
             key = script
         }
