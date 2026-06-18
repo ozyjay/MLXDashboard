@@ -6,16 +6,28 @@ public protocol ManagedProcess: AnyObject {
     var arguments: [String] { get set }
     var environment: [String: String]? { get set }
     var isRunning: Bool { get }
+    var terminationHandler: ((Int32) -> Void)? { get set }
 
     func launch() throws
     func terminate()
 }
 
+public extension ManagedProcess {
+    var terminationHandler: ((Int32) -> Void)? {
+        get { nil }
+        set { _ = newValue }
+    }
+}
+
 public final class FoundationManagedProcess: ManagedProcess {
     private let process: Process
+    private var storedTerminationHandler: ((Int32) -> Void)?
 
     public init(process: Process = Process()) {
         self.process = process
+        self.process.terminationHandler = { [weak self] process in
+            self?.storedTerminationHandler?(process.terminationStatus)
+        }
     }
 
     public var executableURL: URL? {
@@ -35,6 +47,11 @@ public final class FoundationManagedProcess: ManagedProcess {
 
     public var isRunning: Bool {
         process.isRunning
+    }
+
+    public var terminationHandler: ((Int32) -> Void)? {
+        get { storedTerminationHandler }
+        set { storedTerminationHandler = newValue }
     }
 
     public func launch() throws {
