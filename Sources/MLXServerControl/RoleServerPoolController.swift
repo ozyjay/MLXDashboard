@@ -17,11 +17,21 @@ public struct RoleServerEndpoint: Equatable, Sendable {
     public var modelID: String?
     public var port: Int
     public var baseURL: URL
+    public var runtime: ModelRuntimeKind
+    public var estimatedResidentMemoryGB: Double
 
-    public init(modelID: String?, port: Int, baseURL: URL) {
+    public init(
+        modelID: String?,
+        port: Int,
+        baseURL: URL,
+        runtime: ModelRuntimeKind = .mlxLM,
+        estimatedResidentMemoryGB: Double = 0
+    ) {
         self.modelID = modelID
         self.port = port
         self.baseURL = baseURL
+        self.runtime = runtime
+        self.estimatedResidentMemoryGB = estimatedResidentMemoryGB
     }
 }
 
@@ -53,11 +63,21 @@ public struct RoleServerPlan: Equatable, Sendable {
         public var modelID: String?
         public var port: Int
         public var endpoint: RoleServerEndpoint
+        public var runtime: ModelRuntimeKind
+        public var estimatedResidentMemoryGB: Double
 
-        public init(modelID: String?, port: Int, endpoint: RoleServerEndpoint) {
+        public init(
+            modelID: String?,
+            port: Int,
+            endpoint: RoleServerEndpoint,
+            runtime: ModelRuntimeKind = .mlxLM,
+            estimatedResidentMemoryGB: Double = 0
+        ) {
             self.modelID = modelID
             self.port = port
             self.endpoint = endpoint
+            self.runtime = runtime
+            self.estimatedResidentMemoryGB = estimatedResidentMemoryGB
         }
     }
 
@@ -84,13 +104,13 @@ public struct RoleServerPlan: Equatable, Sendable {
 
     public func status(for role: ProviderModelRole) -> RoleServerStatusRow {
         roleStatuses.first(where: { $0.role == role })
-        ?? RoleServerStatusRow(
-            role: role,
-            assignedModel: nil,
-            endpoint: nil,
-            kind: .unassigned,
-            detail: "No model assigned"
-        )
+            ?? RoleServerStatusRow(
+                role: role,
+                assignedModel: nil,
+                endpoint: nil,
+                kind: .unassigned,
+                detail: "No model assigned"
+            )
     }
 }
 
@@ -100,6 +120,7 @@ public final class RoleServerPoolController: ObservableObject {
     @Published public private(set) var roleStatuses: [RoleServerStatusRow]
     @Published public private(set) var defaultEndpoint: RoleServerEndpoint?
     @Published public private(set) var roleEndpoints: [ProviderModelRole: RoleServerEndpoint]
+    @Published public private(set) var readyPorts: Set<Int>
     public let processLauncher: ProcessLaunching
     public let portChecker: ServerPortChecking
     public let argumentBuilder: ServerProcessController
@@ -113,17 +134,10 @@ public final class RoleServerPoolController: ObservableObject {
     ) {
         self.state = .stopped
         self.lastError = nil
-        self.roleStatuses = ProviderModelRole.orderedRoutingRoles.map { role in
-            RoleServerStatusRow(
-                role: role,
-                assignedModel: nil,
-                endpoint: nil,
-                kind: .unassigned,
-                detail: "No model assigned"
-            )
-        }
+        self.roleStatuses = Self.makeUnassignedStatuses()
         self.defaultEndpoint = nil
         self.roleEndpoints = [:]
+        self.readyPorts = []
         self.processLauncher = processLauncher
         self.portChecker = portChecker
         self.argumentBuilder = argumentBuilder
@@ -140,25 +154,23 @@ public final class RoleServerPoolController: ObservableObject {
     }
 
     public func start(settings: DashboardSettings, pythonExecutable: URL) throws {
-        guard state != .running else {
-            return
-        }
-
+        guard state != .running && state != .starting else { return }
         state = .starting
         lastError = nil
+        readyPorts = []
+        defaultEndpoint = nil
+        roleEndpoints = [:]
 
         let nextPlan = Self.makePlan(settings: settings)
         plan = nextPlan
         roleStatuses = nextPlan.roleStatuses.map { row in
-            guard row.kind == .planned else {
-                return row
-            }
+            guard row.kind == .planned else { return row }
             return RoleServerStatusRow(
                 role: row.role,
                 assignedModel: row.assignedModel,
                 endpoint: row.endpoint,
                 kind: .starting,
-                detail: "Starting"
+                detail: "Loading \(row.endpoint?.runtime.displayName ?? "runtime")"
             )
         }
 
@@ -174,9 +186,8 @@ public final class RoleServerPoolController: ObservableObject {
             throw error
         }
 
-        var launchedProcesses: [Int: ManagedProcess] = [:]
+        var launched: [Int: ManagedProcess] = [:]
         var unavailablePorts: Set<Int> = []
-
         do {
             for server in nextPlan.servers {
                 if server.port != defaultPort,
@@ -184,20 +195,25 @@ public final class RoleServerPoolController: ObservableObject {
                     unavailablePorts.insert(server.port)
                     continue
                 }
-
                 let process = processLauncher.makeProcess()
                 process.executableURL = pythonExecutable
                 process.arguments = argumentBuilder.makeArguments(
                     modelID: server.modelID,
                     port: server.port,
-                    serverFlags: settings.serverFlags
+                    serverFlags: settings.serverFlags,
+                    runtime: server.runtime
                 )
                 process.environment = ProcessInfo.processInfo.environment
+                process.terminationHandler = { [weak self] status in
+                    DispatchQueue.main.async {
+                        self?.handleProcessTermination(port: server.port, status: status)
+                    }
+                }
                 try process.launch()
-                launchedProcesses[server.port] = process
+                launched[server.port] = process
             }
         } catch {
-            for process in launchedProcesses.values where process.isRunning {
+            for process in launched.values where process.isRunning {
                 process.terminate()
             }
             resetRuntimeState()
@@ -206,18 +222,81 @@ public final class RoleServerPoolController: ObservableObject {
             throw error
         }
 
-        processesByPort = launchedProcesses
-        defaultEndpoint = nextPlan.defaultEndpoint
+        processesByPort = launched
+        if !unavailablePorts.isEmpty {
+            roleStatuses = Self.makeRoleStatuses(
+                plan: nextPlan,
+                defaultEndpoint: nextPlan.defaultEndpoint,
+                runningRoleEndpoints: [:],
+                unavailablePorts: unavailablePorts,
+                portsAreReady: false
+            )
+        }
+    }
 
-        let runningPorts = Set(launchedProcesses.keys)
-        roleEndpoints = nextPlan.roleEndpoints.filter { runningPorts.contains($0.value.port) }
-        roleStatuses = Self.makeRoleStatuses(
-            plan: nextPlan,
-            defaultEndpoint: nextPlan.defaultEndpoint,
-            runningRoleEndpoints: roleEndpoints,
-            unavailablePorts: unavailablePorts
-        )
-        state = .running
+    @discardableResult
+    public func waitUntilReady(
+        timeout: TimeInterval = 180,
+        pollInterval: TimeInterval = 0.5
+    ) async -> Bool {
+        guard let currentPlan = plan else { return false }
+        let processSnapshot = processesByPort
+        var healthyPorts: Set<Int> = []
+        for server in currentPlan.servers where processSnapshot[server.port]?.isRunning == true {
+            let healthy = await MLXHealthClient().waitUntilHealthy(
+                baseURL: server.endpoint.baseURL,
+                timeout: timeout,
+                pollInterval: pollInterval
+            )
+            if healthy {
+                healthyPorts.insert(server.port)
+            }
+        }
+
+        let defaultReady = healthyPorts.contains(currentPlan.defaultEndpoint.port)
+        await MainActor.run {
+            readyPorts = healthyPorts
+            if !defaultReady {
+                for process in processesByPort.values where process.isRunning {
+                    process.terminate()
+                }
+                processesByPort = [:]
+                defaultEndpoint = nil
+                roleEndpoints = [:]
+                state = .failed
+                lastError = "The default model runtime did not become healthy within \(Int(timeout)) seconds."
+                roleStatuses = currentPlan.roleStatuses.map { row in
+                    guard row.assignedModel != nil else { return row }
+                    return RoleServerStatusRow(
+                        role: row.role,
+                        assignedModel: row.assignedModel,
+                        endpoint: nil,
+                        kind: .failed,
+                        detail: "Default runtime failed readiness check"
+                    )
+                }
+                return
+            }
+
+            let failedPorts = Set(processesByPort.keys).subtracting(healthyPorts)
+            for port in failedPorts {
+                if let process = processesByPort.removeValue(forKey: port), process.isRunning {
+                    process.terminate()
+                }
+            }
+            defaultEndpoint = currentPlan.defaultEndpoint
+            roleEndpoints = currentPlan.roleEndpoints.filter { healthyPorts.contains($0.value.port) }
+            roleStatuses = Self.makeRoleStatuses(
+                plan: currentPlan,
+                defaultEndpoint: currentPlan.defaultEndpoint,
+                runningRoleEndpoints: roleEndpoints,
+                unavailablePorts: failedPorts,
+                portsAreReady: true
+            )
+            state = .running
+            lastError = nil
+        }
+        return defaultReady
     }
 
     public func stopAll() {
@@ -230,32 +309,31 @@ public final class RoleServerPoolController: ObservableObject {
     }
 
     public func stop(role: ProviderModelRole) {
-        guard let removedEndpoint = removeRuntimeEndpoint(for: role) else {
-            return
-        }
-
+        guard let removedEndpoint = removeRuntimeEndpoint(for: role) else { return }
         let assignedModel = status(for: role).assignedModel
-        let defaultEndpoint = self.defaultEndpoint ?? plan?.defaultEndpoint ?? removedEndpoint
+        let fallbackEndpoint = defaultEndpoint ?? plan?.defaultEndpoint ?? removedEndpoint
         var statuses = resolvedRoleStatuses(
             plan: plan,
-            defaultEndpoint: defaultEndpoint,
+            defaultEndpoint: fallbackEndpoint,
             runningRoleEndpoints: roleEndpoints
         )
-
         if let index = statuses.firstIndex(where: { $0.role == role }) {
             statuses[index] = Self.makeStoppedStatus(
                 for: role,
                 assignedModel: assignedModel,
-                defaultEndpoint: self.defaultEndpoint
+                defaultEndpoint: defaultEndpoint
             )
         }
-
         applyResolvedRoleStatuses(statuses)
     }
 
-    public func restart(role: ProviderModelRole, settings: DashboardSettings, pythonExecutable: URL) throws {
+    public func restart(
+        role: ProviderModelRole,
+        settings: DashboardSettings,
+        pythonExecutable: URL
+    ) throws {
         let nextPlan = Self.makePlan(settings: settings)
-        let activeDefaultEndpoint = defaultEndpoint ?? nextPlan.defaultEndpoint
+        let activeDefault = defaultEndpoint ?? nextPlan.defaultEndpoint
         plan = nextPlan
         lastError = nil
 
@@ -263,40 +341,33 @@ public final class RoleServerPoolController: ObservableObject {
               let assignedModel = nextPlan.status(for: role).assignedModel
         else {
             removeRuntimeEndpoint(for: role)
-            roleStatuses = resolvedRoleStatuses(
-                plan: nextPlan,
-                defaultEndpoint: activeDefaultEndpoint,
-                runningRoleEndpoints: roleEndpoints
-            )
+            roleStatuses = nextPlan.roleStatuses
             return
         }
 
         removeRuntimeEndpoint(for: role)
-
-        if plannedEndpoint.port == activeDefaultEndpoint.port {
-            roleEndpoints[role] = activeDefaultEndpoint
+        if plannedEndpoint.port == activeDefault.port {
+            roleEndpoints[role] = activeDefault
             roleStatuses = resolvedRoleStatuses(
                 plan: nextPlan,
-                defaultEndpoint: activeDefaultEndpoint,
+                defaultEndpoint: activeDefault,
                 runningRoleEndpoints: roleEndpoints
             )
             return
         }
-
         if roleEndpoints.values.contains(where: { $0.port == plannedEndpoint.port }) {
             roleEndpoints[role] = plannedEndpoint
             roleStatuses = resolvedRoleStatuses(
                 plan: nextPlan,
-                defaultEndpoint: activeDefaultEndpoint,
+                defaultEndpoint: activeDefault,
                 runningRoleEndpoints: roleEndpoints
             )
             return
         }
-
         guard portChecker.isPortAvailable(host: DashboardSettings.localMLXHost, port: plannedEndpoint.port) else {
             roleStatuses = resolvedRoleStatuses(
                 plan: nextPlan,
-                defaultEndpoint: activeDefaultEndpoint,
+                defaultEndpoint: activeDefault,
                 runningRoleEndpoints: roleEndpoints,
                 unavailablePorts: [plannedEndpoint.port]
             )
@@ -308,72 +379,167 @@ public final class RoleServerPoolController: ObservableObject {
         process.arguments = argumentBuilder.makeArguments(
             modelID: assignedModel,
             port: plannedEndpoint.port,
-            serverFlags: settings.serverFlags
+            serverFlags: settings.serverFlags,
+            runtime: plannedEndpoint.runtime
         )
         process.environment = ProcessInfo.processInfo.environment
-
+        process.terminationHandler = { [weak self] status in
+            DispatchQueue.main.async {
+                self?.handleProcessTermination(port: plannedEndpoint.port, status: status)
+            }
+        }
         do {
             try process.launch()
             processesByPort[plannedEndpoint.port] = process
-            roleEndpoints[role] = plannedEndpoint
-            roleStatuses = resolvedRoleStatuses(
-                plan: nextPlan,
-                defaultEndpoint: activeDefaultEndpoint,
-                runningRoleEndpoints: roleEndpoints
-            )
+            readyPorts.remove(plannedEndpoint.port)
+            if let index = roleStatuses.firstIndex(where: { $0.role == role }) {
+                roleStatuses[index] = RoleServerStatusRow(
+                    role: role,
+                    assignedModel: assignedModel,
+                    endpoint: plannedEndpoint,
+                    kind: .starting,
+                    detail: "Loading \(plannedEndpoint.runtime.displayName)"
+                )
+            }
         } catch {
             lastError = String(describing: error)
-            roleStatuses = resolvedRoleStatuses(
-                plan: nextPlan,
-                defaultEndpoint: activeDefaultEndpoint,
-                runningRoleEndpoints: roleEndpoints
-            )
             throw error
         }
+    }
+
+    @discardableResult
+    public func waitUntilRoleReady(
+        _ role: ProviderModelRole,
+        timeout: TimeInterval = 180
+    ) async -> Bool {
+        guard let currentPlan = plan,
+              let endpoint = currentPlan.endpoint(for: role),
+              processesByPort[endpoint.port]?.isRunning == true
+        else { return false }
+        let healthy = await MLXHealthClient().waitUntilHealthy(
+            baseURL: endpoint.baseURL,
+            timeout: timeout
+        )
+        await MainActor.run {
+            if healthy {
+                readyPorts.insert(endpoint.port)
+                roleEndpoints[role] = endpoint
+            } else if let process = processesByPort.removeValue(forKey: endpoint.port), process.isRunning {
+                process.terminate()
+            }
+            let fallback = defaultEndpoint ?? currentPlan.defaultEndpoint
+            roleStatuses = Self.makeRoleStatuses(
+                plan: currentPlan,
+                defaultEndpoint: fallback,
+                runningRoleEndpoints: roleEndpoints,
+                unavailablePorts: healthy ? [] : [endpoint.port],
+                portsAreReady: true
+            )
+        }
+        return healthy
     }
 
     public static func makePlan(settings: DashboardSettings) -> RoleServerPlan {
         let defaultModelID = settings.activeModel.flatMap { $0.isEmpty ? nil : $0 }
         let defaultPort = settings.mlxPort
-        let defaultEndpoint = makeEndpoint(modelID: defaultModelID, port: defaultPort)
+        let defaultConfiguration = defaultModelID.map {
+            settings.runtimeConfiguration(modelID: $0)
+        } ?? .mlxLM()
+        let defaultMemory = ModelMemoryEstimator.estimatedResidentMemoryGB(
+            modelID: defaultModelID,
+            runtimeConfiguration: defaultConfiguration
+        )
+        let defaultEndpoint = makeEndpoint(
+            modelID: defaultModelID,
+            port: defaultPort,
+            configuration: defaultConfiguration,
+            estimatedMemoryGB: defaultMemory
+        )
 
         var modelPorts: [String: Int] = [:]
         var servers: [RoleServerPlan.Server] = [
-            RoleServerPlan.Server(modelID: defaultModelID, port: defaultPort, endpoint: defaultEndpoint)
+            RoleServerPlan.Server(
+                modelID: defaultModelID,
+                port: defaultPort,
+                endpoint: defaultEndpoint,
+                runtime: defaultConfiguration.runtime,
+                estimatedResidentMemoryGB: defaultMemory
+            )
         ]
         if let defaultModelID {
             modelPorts[defaultModelID] = defaultPort
         }
+        var plannedMemory = defaultMemory
         var nextPort = defaultPort + 1
         var roleEndpoints: [ProviderModelRole: RoleServerEndpoint] = [:]
         var roleStatuses: [RoleServerStatusRow] = []
 
         for role in ProviderModelRole.orderedRoutingRoles {
-            guard let assignedModel = settings.providerRoleAssignments.model(for: role), !assignedModel.isEmpty else {
+            guard let assignedModel = settings.providerRoleAssignments.model(for: role),
+                  !assignedModel.isEmpty
+            else {
+                roleStatuses.append(makeUnassignedStatus(for: role))
+                continue
+            }
+
+            if let existingPort = modelPorts[assignedModel] {
+                let endpoint = servers.first(where: { $0.port == existingPort })?.endpoint
+                    ?? defaultEndpoint
+                roleEndpoints[role] = endpoint
                 roleStatuses.append(
                     RoleServerStatusRow(
                         role: role,
-                        assignedModel: nil,
-                        endpoint: nil,
-                        kind: .unassigned,
-                        detail: "No model assigned"
+                        assignedModel: assignedModel,
+                        endpoint: endpoint,
+                        kind: .planned,
+                        detail: "Shared \(endpoint.runtime.displayName), estimated \(endpoint.estimatedResidentMemoryGB) GB"
                     )
                 )
                 continue
             }
 
-            let port: Int
-            if let existingPort = modelPorts[assignedModel] {
-                port = existingPort
-            } else {
-                port = nextPort
-                nextPort += 1
-                modelPorts[assignedModel] = port
-                let endpoint = makeEndpoint(modelID: assignedModel, port: port)
-                servers.append(RoleServerPlan.Server(modelID: assignedModel, port: port, endpoint: endpoint))
+            let configuration = settings.runtimeConfiguration(modelID: assignedModel)
+            let estimatedMemory = ModelMemoryEstimator.estimatedResidentMemoryGB(
+                modelID: assignedModel,
+                runtimeConfiguration: configuration
+            )
+            let processLimitReached = servers.count >= settings.maxResidentModelProcesses
+            let memoryLimitReached = plannedMemory + estimatedMemory > settings.residentModelMemoryBudgetGB
+            if processLimitReached || memoryLimitReached {
+                let reason = processLimitReached
+                    ? "resident process limit \(settings.maxResidentModelProcesses) reached"
+                    : "memory budget \(settings.residentModelMemoryBudgetGB) GB would be exceeded"
+                roleStatuses.append(
+                    RoleServerStatusRow(
+                        role: role,
+                        assignedModel: assignedModel,
+                        endpoint: defaultModelID == nil ? nil : defaultEndpoint,
+                        kind: defaultModelID == nil ? .failed : .fallback,
+                        detail: "Deferred: \(reason); estimated \(estimatedMemory) GB"
+                    )
+                )
+                continue
             }
 
-            let endpoint = makeEndpoint(modelID: assignedModel, port: port)
+            let port = nextPort
+            nextPort += 1
+            let endpoint = makeEndpoint(
+                modelID: assignedModel,
+                port: port,
+                configuration: configuration,
+                estimatedMemoryGB: estimatedMemory
+            )
+            modelPorts[assignedModel] = port
+            plannedMemory += estimatedMemory
+            servers.append(
+                RoleServerPlan.Server(
+                    modelID: assignedModel,
+                    port: port,
+                    endpoint: endpoint,
+                    runtime: configuration.runtime,
+                    estimatedResidentMemoryGB: estimatedMemory
+                )
+            )
             roleEndpoints[role] = endpoint
             roleStatuses.append(
                 RoleServerStatusRow(
@@ -381,7 +547,7 @@ public final class RoleServerPoolController: ObservableObject {
                     assignedModel: assignedModel,
                     endpoint: endpoint,
                     kind: .planned,
-                    detail: "Ready to start"
+                    detail: "\(configuration.runtime.displayName), estimated \(estimatedMemory) GB"
                 )
             )
         }
@@ -394,11 +560,18 @@ public final class RoleServerPoolController: ObservableObject {
         )
     }
 
-    private static func makeEndpoint(modelID: String?, port: Int) -> RoleServerEndpoint {
+    private static func makeEndpoint(
+        modelID: String?,
+        port: Int,
+        configuration: ModelRuntimeConfiguration,
+        estimatedMemoryGB: Double
+    ) -> RoleServerEndpoint {
         RoleServerEndpoint(
             modelID: modelID,
             port: port,
-            baseURL: URL(string: "http://\(DashboardSettings.localMLXHost):\(port)")!
+            baseURL: URL(string: "http://\(DashboardSettings.localMLXHost):\(port)")!,
+            runtime: configuration.runtime,
+            estimatedResidentMemoryGB: estimatedMemoryGB
         )
     }
 
@@ -406,46 +579,40 @@ public final class RoleServerPoolController: ObservableObject {
         plan: RoleServerPlan,
         defaultEndpoint: RoleServerEndpoint,
         runningRoleEndpoints: [ProviderModelRole: RoleServerEndpoint],
-        unavailablePorts: Set<Int>
+        unavailablePorts: Set<Int>,
+        portsAreReady: Bool = true
     ) -> [RoleServerStatusRow] {
         var firstOwnedRoleByPort: Set<Int> = []
-
         return ProviderModelRole.orderedRoutingRoles.map { role in
-            let plannedStatus = plan.status(for: role)
-            guard let assignedModel = plannedStatus.assignedModel else {
+            let planned = plan.status(for: role)
+            guard let assignedModel = planned.assignedModel else {
                 return makeUnassignedStatus(for: role)
             }
-
-            let plannedEndpoint = plan.endpoint(for: role) ?? plannedStatus.endpoint ?? defaultEndpoint
-
+            if planned.kind == .fallback || planned.kind == .failed {
+                return planned
+            }
+            let plannedEndpoint = plan.endpoint(for: role) ?? planned.endpoint ?? defaultEndpoint
             guard let runningEndpoint = runningRoleEndpoints[role] else {
-                let activeFallbackAvailable = defaultEndpoint.modelID != nil
-                let kind: RoleServerStatusKind
-                let endpoint: RoleServerEndpoint?
-                let detail: String
-
-                if unavailablePorts.contains(plannedEndpoint.port), !activeFallbackAvailable {
-                    kind = .failed
-                    endpoint = nil
-                    detail = "Port \(plannedEndpoint.port) unavailable; no active model fallback"
-                } else {
-                    kind = .fallback
-                    endpoint = activeFallbackAvailable ? defaultEndpoint : nil
-                    if unavailablePorts.contains(plannedEndpoint.port) {
-                        detail = "Port \(plannedEndpoint.port) unavailable; using active model"
-                    } else {
-                        detail = "Using active model"
-                    }
+                if !portsAreReady && !unavailablePorts.contains(plannedEndpoint.port) {
+                    return RoleServerStatusRow(
+                        role: role,
+                        assignedModel: assignedModel,
+                        endpoint: plannedEndpoint,
+                        kind: .starting,
+                        detail: "Loading \(plannedEndpoint.runtime.displayName)"
+                    )
                 }
+                let fallbackAvailable = defaultEndpoint.modelID != nil
                 return RoleServerStatusRow(
                     role: role,
                     assignedModel: assignedModel,
-                    endpoint: endpoint,
-                    kind: kind,
-                    detail: detail
+                    endpoint: fallbackAvailable ? defaultEndpoint : nil,
+                    kind: fallbackAvailable ? .fallback : .failed,
+                    detail: fallbackAvailable
+                        ? "Role runtime unavailable; using active model"
+                        : "Role runtime unavailable; no active model fallback"
                 )
             }
-
             if runningEndpoint.port == defaultEndpoint.port {
                 return RoleServerStatusRow(
                     role: role,
@@ -455,17 +622,15 @@ public final class RoleServerPoolController: ObservableObject {
                     detail: "Shared on port \(runningEndpoint.port)"
                 )
             }
-
-            let kind: RoleServerStatusKind = firstOwnedRoleByPort.insert(runningEndpoint.port).inserted ? .running : .shared
-            let detail = kind == .running
-                ? "Running on port \(runningEndpoint.port)"
-                : "Shared on port \(runningEndpoint.port)"
+            let kind: RoleServerStatusKind = firstOwnedRoleByPort.insert(runningEndpoint.port).inserted
+                ? .running
+                : .shared
             return RoleServerStatusRow(
                 role: role,
                 assignedModel: assignedModel,
                 endpoint: runningEndpoint,
                 kind: kind,
-                detail: detail
+                detail: "\(kind == .running ? "Running" : "Shared") on port \(runningEndpoint.port)"
             )
         }
     }
@@ -501,17 +666,14 @@ public final class RoleServerPoolController: ObservableObject {
 
     @discardableResult
     private func removeRuntimeEndpoint(for role: ProviderModelRole) -> RoleServerEndpoint? {
-        guard let endpoint = roleEndpoints.removeValue(forKey: role) else {
-            return nil
-        }
-
+        guard let endpoint = roleEndpoints.removeValue(forKey: role) else { return nil }
+        readyPorts.remove(endpoint.port)
         if endpoint.port != defaultEndpoint?.port,
            !roleEndpoints.values.contains(where: { $0.port == endpoint.port }) {
             if let process = processesByPort.removeValue(forKey: endpoint.port), process.isRunning {
                 process.terminate()
             }
         }
-
         return endpoint
     }
 
@@ -521,10 +683,7 @@ public final class RoleServerPoolController: ObservableObject {
         runningRoleEndpoints: [ProviderModelRole: RoleServerEndpoint],
         unavailablePorts: Set<Int> = []
     ) -> [RoleServerStatusRow] {
-        guard let plan else {
-            return Self.makeUnassignedStatuses()
-        }
-
+        guard let plan else { return Self.makeUnassignedStatuses() }
         return Self.makeRoleStatuses(
             plan: plan,
             defaultEndpoint: defaultEndpoint,
@@ -535,13 +694,32 @@ public final class RoleServerPoolController: ObservableObject {
 
     private func applyResolvedRoleStatuses(_ statuses: [RoleServerStatusRow]) {
         roleStatuses = statuses
-
-        guard var currentPlan = plan else {
-            return
-        }
-
+        guard var currentPlan = plan else { return }
         currentPlan.roleStatuses = statuses
         plan = currentPlan
+    }
+
+    private func handleProcessTermination(port: Int, status: Int32) {
+        processesByPort.removeValue(forKey: port)
+        readyPorts.remove(port)
+        guard state != .stopping && state != .stopped else { return }
+        if defaultEndpoint?.port == port || plan?.defaultEndpoint.port == port {
+            defaultEndpoint = nil
+            roleEndpoints = [:]
+            state = .failed
+            lastError = "Default model runtime exited with status \(status)."
+            return
+        }
+        roleEndpoints = roleEndpoints.filter { $0.value.port != port }
+        if let plan, let fallback = defaultEndpoint {
+            roleStatuses = Self.makeRoleStatuses(
+                plan: plan,
+                defaultEndpoint: fallback,
+                runningRoleEndpoints: roleEndpoints,
+                unavailablePorts: [port]
+            )
+        }
+        lastError = status == 0 ? nil : "Role model runtime on port \(port) exited with status \(status)."
     }
 
     private func resetRuntimeState() {
@@ -549,6 +727,7 @@ public final class RoleServerPoolController: ObservableObject {
         plan = nil
         defaultEndpoint = nil
         roleEndpoints = [:]
+        readyPorts = []
         roleStatuses = Self.makeUnassignedStatuses()
     }
 }
