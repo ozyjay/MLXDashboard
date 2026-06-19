@@ -6,6 +6,7 @@ Native macOS SwiftUI dashboard for owning a local `mlx-lm` server, installing ML
 
 - [MLX-LM runtime and model planning](docs/notes/mlx-lm-runtime-and-model-planning.md): runtime choice, localhost-only server binding, context budgeting, model-role presets, and 64GB memory guidance.
 - [Ollama lessons for MLXDashboard](docs/notes/ollama-lessons-for-mlx-dashboard.md): UX and architecture lessons to apply from OllamaPull and OllamaAgent.
+- [Provider streaming and quality hardening plan](docs/superpowers/plans/2026-06-19-provider-streaming-and-quality.md): streamed provider regression tests, alias contract cleanup, localhost provider hardening, diagnostic-capture privacy, and CI coverage.
 
 ## MLXChat Provider Contract
 
