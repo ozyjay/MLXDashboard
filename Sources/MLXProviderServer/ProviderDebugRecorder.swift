@@ -3,11 +3,20 @@ import Foundation
 public final class ProviderDebugRecorder: @unchecked Sendable {
     private let fileURL: URL
     private let isEnabled: @Sendable () -> Bool
+    private let maxBytes: Int
+    private let retainedFileCount: Int
     private let lock = NSLock()
 
-    public init(fileURL: URL, isEnabled: @escaping @Sendable () -> Bool) {
+    public init(
+        fileURL: URL,
+        isEnabled: @escaping @Sendable () -> Bool,
+        maxBytes: Int = 5_000_000,
+        retainedFileCount: Int = 3
+    ) {
         self.fileURL = fileURL
         self.isEnabled = isEnabled
+        self.maxBytes = maxBytes
+        self.retainedFileCount = retainedFileCount
     }
 
     public var isEnabledNow: Bool {
@@ -66,6 +75,7 @@ public final class ProviderDebugRecorder: @unchecked Sendable {
                 )
                 var line = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
                 line.append(Data("\n".utf8))
+                try rotateIfNeeded(incomingByteCount: line.count)
                 if FileManager.default.fileExists(atPath: fileURL.path) {
                     let handle = try FileHandle(forWritingTo: fileURL)
                     try handle.seekToEnd()
@@ -78,6 +88,48 @@ public final class ProviderDebugRecorder: @unchecked Sendable {
                 // Provider diagnostics must never break request handling.
             }
         }
+    }
+
+    private func rotateIfNeeded(incomingByteCount: Int) throws {
+        guard maxBytes > 0,
+              FileManager.default.fileExists(atPath: fileURL.path)
+        else { return }
+
+        let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let currentSize = attributes[.size] as? Int ?? 0
+        guard currentSize + incomingByteCount > maxBytes else { return }
+
+        if retainedFileCount <= 0 {
+            try FileManager.default.removeItem(at: fileURL)
+            return
+        }
+
+        let oldest = rotatedURL(index: retainedFileCount)
+        if FileManager.default.fileExists(atPath: oldest.path) {
+            try FileManager.default.removeItem(at: oldest)
+        }
+
+        if retainedFileCount > 1 {
+            for index in stride(from: retainedFileCount - 1, through: 1, by: -1) {
+                let source = rotatedURL(index: index)
+                guard FileManager.default.fileExists(atPath: source.path) else { continue }
+                let destination = rotatedURL(index: index + 1)
+                if FileManager.default.fileExists(atPath: destination.path) {
+                    try FileManager.default.removeItem(at: destination)
+                }
+                try FileManager.default.moveItem(at: source, to: destination)
+            }
+        }
+
+        let firstRotation = rotatedURL(index: 1)
+        if FileManager.default.fileExists(atPath: firstRotation.path) {
+            try FileManager.default.removeItem(at: firstRotation)
+        }
+        try FileManager.default.moveItem(at: fileURL, to: firstRotation)
+    }
+
+    private func rotatedURL(index: Int) -> URL {
+        URL(fileURLWithPath: "\(fileURL.path).\(index)")
     }
 
     private func redactedHeaders(_ headers: [String: String]) -> [String: String] {

@@ -1,4 +1,5 @@
 import Foundation
+import MLXCore
 @preconcurrency import NIO
 @preconcurrency import NIOHTTP1
 @preconcurrency import NIOFoundationCompat
@@ -11,11 +12,12 @@ public final class NIOProviderServer {
     private var channel: Channel?
     public private(set) var boundPort: Int?
 
-    public init(host: String = "127.0.0.1", port: Int = 8123, router: ProviderRouter) {
-        self.host = host
+    public init(host: String = DashboardSettings.localMLXHost, port: Int = 8123, router: ProviderRouter) {
+        self.host = DashboardSettings.localMLXHost
         self.port = port
         self.router = router
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        _ = host
     }
 
     deinit {
@@ -82,7 +84,7 @@ private final class ProviderHTTPHandler: ChannelInboundHandler, @unchecked Senda
                     writer.write(.buffered(ProviderResponse(
                         status: 502,
                         headers: ["content-type": "application/json"],
-                        body: Data(#"{"error":"bad gateway"}"#.utf8)
+                        body: Data("{\"error\":\"bad gateway\"}".utf8)
                     )))
                 }
             }
@@ -158,7 +160,6 @@ private struct ProviderResponseWriter: @unchecked Sendable {
                             }
                         }
                     } catch {
-                        // The connection is already open; ending it is the least surprising failure mode.
                     }
                     context.eventLoop.execute {
                         handler.writeEnd(context: context)

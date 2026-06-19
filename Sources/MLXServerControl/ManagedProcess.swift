@@ -1,21 +1,40 @@
 import Foundation
 import Darwin
 
+public typealias ManagedProcessTerminationHandler = @Sendable (Int32) -> Void
+
 public protocol ManagedProcess: AnyObject {
     var executableURL: URL? { get set }
     var arguments: [String] { get set }
     var environment: [String: String]? { get set }
     var isRunning: Bool { get }
+    var terminationHandler: ManagedProcessTerminationHandler? { get set }
 
     func launch() throws
     func terminate()
 }
 
-public final class FoundationManagedProcess: ManagedProcess {
+public extension ManagedProcess {
+    var terminationHandler: ManagedProcessTerminationHandler? {
+        get { nil }
+        set { _ = newValue }
+    }
+}
+
+public final class FoundationManagedProcess: ManagedProcess, @unchecked Sendable {
     private let process: Process
+    private let terminationHandlerLock = NSLock()
+    private var storedTerminationHandler: ManagedProcessTerminationHandler?
 
     public init(process: Process = Process()) {
         self.process = process
+        self.process.terminationHandler = { [weak self] process in
+            guard let self else { return }
+            let handler = terminationHandlerLock.withLock {
+                storedTerminationHandler
+            }
+            handler?(process.terminationStatus)
+        }
     }
 
     public var executableURL: URL? {
@@ -35,6 +54,19 @@ public final class FoundationManagedProcess: ManagedProcess {
 
     public var isRunning: Bool {
         process.isRunning
+    }
+
+    public var terminationHandler: ManagedProcessTerminationHandler? {
+        get {
+            terminationHandlerLock.withLock {
+                storedTerminationHandler
+            }
+        }
+        set {
+            terminationHandlerLock.withLock {
+                storedTerminationHandler = newValue
+            }
+        }
     }
 
     public func launch() throws {
@@ -79,8 +111,15 @@ public struct TCPServerPortChecker: ServerPortChecking {
         }
 
         return withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
-                Darwin.bind(socketDescriptor, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+            pointer.withMemoryRebound(
+                to: sockaddr.self,
+                capacity: 1
+            ) { sockaddrPointer in
+                Darwin.bind(
+                    socketDescriptor,
+                    sockaddrPointer,
+                    socklen_t(MemoryLayout<sockaddr_in>.size)
+                ) == 0
             }
         }
     }

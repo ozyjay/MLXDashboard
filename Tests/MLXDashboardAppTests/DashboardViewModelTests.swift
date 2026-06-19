@@ -135,7 +135,8 @@ final class DashboardViewModelTests: XCTestCase {
         let process = FakeManagedProcess()
         let serverPoolController = RoleServerPoolController(
             processLauncher: FakeProcessLauncher(processes: [process]),
-            portChecker: FakePortChecker(isAvailable: true)
+            portChecker: FakePortChecker(isAvailable: true),
+            healthChecker: FakeHealthChecker()
         )
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
@@ -156,7 +157,7 @@ final class DashboardViewModelTests: XCTestCase {
 
         XCTAssertFalse(viewModel.canStartServer)
         XCTAssertTrue(viewModel.canStopServer)
-        XCTAssertTrue(viewModel.canRestartServer)
+        XCTAssertFalse(viewModel.canRestartServer)
         XCTAssertGreaterThan(refreshCount, 0)
         cancellable.cancel()
     }
@@ -184,7 +185,8 @@ final class DashboardViewModelTests: XCTestCase {
         let restartedProcess = FakeManagedProcess()
         let serverPoolController = RoleServerPoolController(
             processLauncher: FakeProcessLauncher(processes: [originalProcess, restartedProcess]),
-            portChecker: FakePortChecker(isAvailable: true)
+            portChecker: FakePortChecker(isAvailable: true),
+            healthChecker: FakeHealthChecker()
         )
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
@@ -197,6 +199,8 @@ final class DashboardViewModelTests: XCTestCase {
         )
 
         try serverPoolController.start(settings: DashboardSettings(), pythonExecutable: python)
+        let ready = await serverPoolController.waitUntilReady(timeout: 0.1, pollInterval: 0.05)
+        XCTAssertTrue(ready)
         await viewModel.restartServer()
 
         XCTAssertTrue(originalProcess.wasTerminated)
@@ -212,7 +216,8 @@ final class DashboardViewModelTests: XCTestCase {
         let process = FakeManagedProcess()
         let serverPoolController = RoleServerPoolController(
             processLauncher: FakeProcessLauncher(processes: [process]),
-            portChecker: FakePortChecker(unavailablePorts: [DashboardSettings().mlxPort])
+            portChecker: FakePortChecker(unavailablePorts: [DashboardSettings().mlxPort]),
+            healthChecker: FakeHealthChecker()
         )
         let runner = FakeCommandRunner(results: [
             "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
@@ -230,7 +235,7 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(serverPoolController.state, .failed)
         XCTAssertFalse(process.wasLaunched)
         let logText = try String(contentsOf: paths.logsDirectory.appending(path: "mlxdashboard.log"), encoding: .utf8)
-        XCTAssertTrue(logText.contains("Failed to start server: Cannot start mlx-lm because 127.0.0.1:8080 is already in use."))
+        XCTAssertTrue(logText.contains("Failed to start server: Cannot start the model runtime because 127.0.0.1:8080 is already in use."))
     }
 
     func testStartServerStartsUniqueRoleServerPoolProcesses() async throws {
@@ -243,7 +248,8 @@ final class DashboardViewModelTests: XCTestCase {
         let devstral = FakeManagedProcess()
         let serverPoolController = RoleServerPoolController(
             processLauncher: FakeProcessLauncher(processes: [gemma, devstral]),
-            portChecker: FakePortChecker(isAvailable: true)
+            portChecker: FakePortChecker(isAvailable: true),
+            healthChecker: FakeHealthChecker()
         )
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
@@ -286,7 +292,8 @@ final class DashboardViewModelTests: XCTestCase {
         let devstral = FakeManagedProcess()
         let serverPoolController = RoleServerPoolController(
             processLauncher: FakeProcessLauncher(processes: [gemma, devstral]),
-            portChecker: FakePortChecker(isAvailable: true)
+            portChecker: FakePortChecker(isAvailable: true),
+            healthChecker: FakeHealthChecker()
         )
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
@@ -326,7 +333,8 @@ final class DashboardViewModelTests: XCTestCase {
         let ask = FakeManagedProcess()
         let serverPoolController = RoleServerPoolController(
             processLauncher: FakeProcessLauncher(processes: [base, ask]),
-            portChecker: FakePortChecker(isAvailable: true)
+            portChecker: FakePortChecker(isAvailable: true),
+            healthChecker: FakeHealthChecker()
         )
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
@@ -361,7 +369,8 @@ final class DashboardViewModelTests: XCTestCase {
         let restartedAsk = FakeManagedProcess()
         let serverPoolController = RoleServerPoolController(
             processLauncher: FakeProcessLauncher(processes: [base, originalAsk, restartedAsk]),
-            portChecker: FakePortChecker(isAvailable: true)
+            portChecker: FakePortChecker(isAvailable: true),
+            healthChecker: FakeHealthChecker()
         )
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
@@ -397,7 +406,8 @@ final class DashboardViewModelTests: XCTestCase {
         let ask = FakeManagedProcess()
         let serverPoolController = RoleServerPoolController(
             processLauncher: FakeProcessLauncher(processes: [base, ask]),
-            portChecker: portChecker
+            portChecker: portChecker,
+            healthChecker: FakeHealthChecker()
         )
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
@@ -528,7 +538,7 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(nemotron["state"] as? String, "unsupported")
         XCTAssertEqual(
             nemotron["unsupported_reason"] as? String,
-            "Installed mlx-lm 0.31.3 does not support model_type nemotron_labs_diffusion"
+            "Bundled text diffusion runtime is unavailable for model_type nemotron_labs_diffusion"
         )
     }
 
@@ -608,7 +618,8 @@ final class DashboardViewModelTests: XCTestCase {
 
         let serverPoolController = RoleServerPoolController(
             processLauncher: FakeProcessLauncher(processes: [FakeManagedProcess(), FakeManagedProcess()]),
-            portChecker: FakePortChecker(isAvailable: true)
+            portChecker: FakePortChecker(isAvailable: true),
+            healthChecker: FakeHealthChecker()
         )
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
@@ -633,6 +644,8 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(unavailableStatus, 503)
 
         try serverPoolController.start(settings: viewModel.settings, pythonExecutable: URL(filePath: "/venv/bin/python"))
+        let ready = await serverPoolController.waitUntilReady(timeout: 0.1, pollInterval: 0.05)
+        XCTAssertTrue(ready)
         await Task.yield()
 
         let routedModel = try await providerResponseModel(port: ports.providerPort, model: "mlx-plan")
@@ -654,7 +667,8 @@ final class DashboardViewModelTests: XCTestCase {
 
         let serverPoolController = RoleServerPoolController(
             processLauncher: FakeProcessLauncher(processes: [FakeManagedProcess(), FakeManagedProcess()]),
-            portChecker: FakePortChecker(isAvailable: true)
+            portChecker: FakePortChecker(isAvailable: true),
+            healthChecker: FakeHealthChecker()
         )
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
@@ -676,6 +690,8 @@ final class DashboardViewModelTests: XCTestCase {
         defer { viewModel.stopProvider() }
 
         try serverPoolController.start(settings: viewModel.settings, pythonExecutable: URL(filePath: "/venv/bin/python"))
+        let ready = await serverPoolController.waitUntilReady(timeout: 0.1, pollInterval: 0.05)
+        XCTAssertTrue(ready)
         await Task.yield()
         let routedModel = try await providerResponseModel(port: ports.providerPort, model: "mlx-plan")
         XCTAssertEqual(routedModel, planModel)
@@ -1064,7 +1080,7 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.searchResults, [])
         XCTAssertEqual(viewModel.modelSearchMessage, "Python packages are required before searching: mlx-lm, huggingface_hub.")
         XCTAssertTrue(viewModel.shouldOfferPythonPackageInstall)
-        XCTAssertEqual(runner.commands.count, 3)
+        XCTAssertEqual(runner.commands.count, 4)
     }
 
     func testInstallPythonPackagesInstallsRequiredPackagesWhenPrompted() async throws {
@@ -1205,6 +1221,46 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.runtimePackageUpgradeSummary, "Runtime updates: not checked")
         XCTAssertFalse(viewModel.canUpgradeRuntimePackages)
         XCTAssertFalse(runner.commands.contains { $0.arguments == ["-m", "pip", "list", "--outdated", "--format=json"] })
+    }
+
+    func testRuntimePackageUpgradeCheckLogsCancellationWithoutFailure() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(
+            at: python.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+        let sitePackages = try temporaryDirectory()
+
+        let runner = FakeCommandRunner(
+            results: [
+                "runtime-capabilities": CommandResult(
+                    exitCode: 0,
+                    standardOutput: #"{"site_packages":"\#(sitePackages.path)","version":"0.31.3"}"#,
+                    standardError: ""
+                ),
+                "runtime-package-versions": CommandResult(
+                    exitCode: 0,
+                    standardOutput: #"{"mlx":"0.29.0","mlx-lm":"0.31.3"}"#,
+                    standardError: ""
+                )
+            ],
+            thrownErrors: [
+                "pip-outdated": CancellationError()
+            ]
+        )
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: runner)
+        )
+
+        await viewModel.checkRuntimePackageUpgrades()
+
+        let logText = try String(contentsOf: paths.logsDirectory.appending(path: "mlxdashboard.log"), encoding: .utf8)
+        XCTAssertTrue(logText.contains("Runtime package upgrade check cancelled."))
+        XCTAssertFalse(logText.contains("Runtime package upgrade check failed"))
     }
 
     func testUpgradeRuntimePackagesRunsUpgradeAndRefreshesUpgradeStatus() async throws {
@@ -2545,7 +2601,7 @@ private final class FakeCommandRunner: CommandRunning, @unchecked Sendable {
             key = "install"
         } else if script.contains("whoami") {
             key = "whoami"
-        } else if script.contains("MLXDashboard runtime package versions") {
+        } else if script.contains("packages = sys.argv[1:]") {
             key = "runtime-package-versions"
         } else if script.contains("metadata.distribution(\"mlx-lm\")") {
             key = "runtime-capabilities"
@@ -2553,6 +2609,10 @@ private final class FakeCommandRunner: CommandRunning, @unchecked Sendable {
             key = "pip-outdated"
         } else if command.arguments == ["-m", "pip", "install", "--upgrade", "mlx", "mlx-lm"] {
             key = "runtime-upgrade"
+        } else if command.arguments.count == 5,
+                  Array(command.arguments[0...3]) == ["-m", "pip", "install", "--upgrade"],
+                  command.arguments[4].contains("TextDiffusionRuntime") {
+            key = "text-diffusion-runtime-install"
         } else if script.contains("list_models") {
             if command.arguments.last == "50", results["search-limit-50"] != nil {
                 key = "search-limit-50"
@@ -2598,7 +2658,7 @@ private final class LateOutputCommandRunner: CommandRunning, @unchecked Sendable
         if script.contains("whoami") {
             return CommandResult(exitCode: 0, standardOutput: #"{"name":"octocat"}"#, standardError: "")
         }
-        if script.contains("import mlx_lm") || script.contains("import huggingface_hub") {
+        if script == "import mlx" || script == "import mlx_lm" || script == "import huggingface_hub" {
             return CommandResult(exitCode: 0, standardOutput: "", standardError: "")
         }
         return CommandResult(exitCode: 127, standardOutput: "", standardError: "unexpected command")
@@ -2682,7 +2742,7 @@ private final class PausingCommandRunner: CommandRunning, @unchecked Sendable {
         if script.contains("whoami") {
             return CommandResult(exitCode: 0, standardOutput: #"{"name":"octocat"}"#, standardError: "")
         }
-        if script.contains("import mlx_lm") || script.contains("import huggingface_hub") {
+        if script == "import mlx" || script == "import mlx_lm" || script == "import huggingface_hub" {
             return CommandResult(exitCode: 0, standardOutput: "", standardError: "")
         }
         return CommandResult(exitCode: 127, standardOutput: "", standardError: "unexpected command")
@@ -2741,6 +2801,19 @@ private struct FakePortChecker: ServerPortChecking {
 
     func isPortAvailable(host: String, port: Int) -> Bool {
         isAvailable && !unavailablePorts.contains(port)
+    }
+}
+
+private struct FakeHealthChecker: ServerHealthChecking {
+    var healthyPorts: Set<Int>? = nil
+
+    func waitUntilHealthy(
+        baseURL: URL,
+        timeout: TimeInterval,
+        pollInterval: TimeInterval
+    ) async -> Bool {
+        guard let healthyPorts else { return true }
+        return healthyPorts.contains(baseURL.port ?? -1)
     }
 }
 
