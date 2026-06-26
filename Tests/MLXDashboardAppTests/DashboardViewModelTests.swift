@@ -17,7 +17,23 @@ final class DashboardViewModelTests: XCTestCase {
     func testDashboardRecentLogsUseExpandedMinimumHeight() {
         XCTAssertEqual(DashboardLayoutPolicy.activeModelMinHeight, 240)
         XCTAssertEqual(DashboardLayoutPolicy.recentLogsMinHeight, 360)
-        XCTAssertEqual(DashboardLayoutPolicy.recentLogsVisibleLimit, 24)
+        XCTAssertEqual(DashboardLayoutPolicy.recentLogsMaxHeight, 420)
+        XCTAssertEqual(DashboardLayoutPolicy.recentLogsVisibleLimit, 200)
+    }
+
+    func testAppTextSizePolicyClampsShortcutLevels() {
+        XCTAssertEqual(AppTextSizePolicy.increased(AppTextSizePolicy.maximumLevel), AppTextSizePolicy.maximumLevel)
+        XCTAssertEqual(AppTextSizePolicy.increased(0), 1)
+        XCTAssertEqual(AppTextSizePolicy.decreased(AppTextSizePolicy.minimumLevel), AppTextSizePolicy.minimumLevel)
+        XCTAssertEqual(AppTextSizePolicy.decreased(0), -1)
+    }
+
+    func testAppTextSizePolicyMapsLevelsToDynamicTypeSizes() {
+        XCTAssertEqual(AppTextSizePolicy.dynamicTypeSize(for: -3), .small)
+        XCTAssertEqual(AppTextSizePolicy.dynamicTypeSize(for: -1), .medium)
+        XCTAssertEqual(AppTextSizePolicy.dynamicTypeSize(for: 0), .large)
+        XCTAssertEqual(AppTextSizePolicy.dynamicTypeSize(for: 2), .xxLarge)
+        XCTAssertEqual(AppTextSizePolicy.dynamicTypeSize(for: 4), .xxxLarge)
     }
 
     func testDashboardSectionDefaultsToDashboardLandingView() {

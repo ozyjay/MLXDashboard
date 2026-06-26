@@ -79,7 +79,40 @@ struct DashboardLayoutPolicy {
     static let spacing: CGFloat = 16
     static let activeModelMinHeight: CGFloat = 240
     static let recentLogsMinHeight: CGFloat = 360
-    static let recentLogsVisibleLimit = 24
+    static let recentLogsMaxHeight: CGFloat = 420
+    static let recentLogsVisibleLimit = 200
+}
+
+struct AppTextSizePolicy {
+    static let storageKey = "MLXDashboardAppTextSizeLevel"
+    static let defaultLevel = 0
+    static let minimumLevel = -2
+    static let maximumLevel = 3
+
+    static func increased(_ level: Int) -> Int {
+        min(level + 1, maximumLevel)
+    }
+
+    static func decreased(_ level: Int) -> Int {
+        max(level - 1, minimumLevel)
+    }
+
+    static func dynamicTypeSize(for level: Int) -> DynamicTypeSize {
+        switch min(max(level, minimumLevel), maximumLevel) {
+        case -2:
+            return .small
+        case -1:
+            return .medium
+        case 1:
+            return .xLarge
+        case 2:
+            return .xxLarge
+        case 3:
+            return .xxxLarge
+        default:
+            return .large
+        }
+    }
 }
 
 struct RoleServerStatusTablePolicy {
@@ -1140,13 +1173,17 @@ private struct RecentLogsView: View {
                         Text(entry.message)
                             .font(.system(.caption, design: .monospaced))
                             .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(
             maxWidth: .infinity,
             minHeight: DashboardLayoutPolicy.recentLogsMinHeight,
+            maxHeight: DashboardLayoutPolicy.recentLogsMaxHeight,
             alignment: .topLeading
         )
     }
