@@ -2003,6 +2003,158 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(upstream.requests.map(\.path), ["/v1/chat/completions"])
     }
 
+    func testProviderLeavesStreamUnchangedWithoutUsageOptIn() async throws {
+        let upstreamStream = """
+        data: {"choices":[{"delta":{"content":"Hel"},"finish_reason":null}]}
+
+        data: {"choices":[{"delta":{"content":"lo"},"finish_reason":null}]}
+
+        data: [DONE]
+
+        """
+        let upstream = FakeUpstream(streamingChatCompletionBody: Data(upstreamStream.utf8))
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Tiny" }
+        )
+        let body = Data(#"{"messages":[{"role":"user","content":"hi"}],"stream":true}"#.utf8)
+
+        let response = try await router.handle(
+            ProviderRequest(method: "POST", path: "/v1/chat/completions", headers: [:], body: body)
+        )
+
+        XCTAssertEqual(response.status, 200)
+        XCTAssertEqual(String(data: response.body, encoding: .utf8), upstreamStream)
+        XCTAssertFalse(String(data: response.body, encoding: .utf8)?.contains("event: mlx.usage") == true)
+    }
+
+    func testProviderEmitsUsageEventsWhenStreamOptionsIncludeUsage() async throws {
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Tiny" },
+            modelMetadataProvider: {
+                [
+                    "mlx-community/Tiny": ProviderModelMetadata(maxContextLength: 32768)
+                ]
+            }
+        )
+        let body = Data(
+            #"{"messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":true}}"#.utf8
+        )
+
+        let response = try await router.handle(
+            ProviderRequest(method: "POST", path: "/v1/chat/completions", headers: [:], body: body)
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let stream = try XCTUnwrap(String(data: response.body, encoding: .utf8))
+        let events = try mlxUsageEvents(in: stream)
+        XCTAssertEqual(events.count, 2)
+        let startedEvent = try XCTUnwrap(events.first)
+        XCTAssertEqual(startedEvent["phase"] as? String, "started")
+        XCTAssertEqual(startedEvent["model"] as? String, "mlx-community/Tiny")
+        let startedContext = try XCTUnwrap(startedEvent["context"] as? [String: Any])
+        XCTAssertEqual(startedContext["limit_tokens"] as? Int, 32768)
+        XCTAssertTrue(startedContext["used_tokens"] is NSNull)
+        let startedTokens = try XCTUnwrap(startedEvent["tokens"] as? [String: Any])
+        XCTAssertTrue(startedTokens["input_tokens"] is NSNull)
+        let completedEvent = try XCTUnwrap(events.last)
+        XCTAssertEqual(completedEvent["phase"] as? String, "completed")
+        XCTAssertTrue(stream.contains(#""content":"Hel""#))
+        XCTAssertTrue(stream.contains("data: [DONE]"))
+
+        let proxied = try XCTUnwrap(upstream.requests.last)
+        let proxiedJSON = try JSONSerialization.jsonObject(with: proxied.body) as? [String: Any]
+        XCTAssertNil(proxiedJSON?["stream_options"])
+        let messages = try XCTUnwrap(proxiedJSON?["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.first?["role"] as? String, "user")
+        XCTAssertFalse(String(data: proxied.body, encoding: .utf8)?.contains("Tool calls are not available") == true)
+    }
+
+    func testProviderEmitsUsageEventsWhenUsageHeaderIsPresent() async throws {
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Tiny" }
+        )
+        let body = Data(#"{"messages":[{"role":"user","content":"hi"}],"stream":true}"#.utf8)
+
+        let response = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/v1/chat/completions",
+                headers: ["x-mlx-usage-events": "true"],
+                body: body
+            )
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let stream = try XCTUnwrap(String(data: response.body, encoding: .utf8))
+        let events = try mlxUsageEvents(in: stream)
+        XCTAssertEqual(events.map { $0["phase"] as? String }, ["started", "completed"])
+    }
+
+    func testProviderUsesNullContextLimitWhenUsageMetadataIsMissing() async throws {
+        let upstream = FakeUpstream()
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Tiny" }
+        )
+        let body = Data(
+            #"{"messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":true}}"#.utf8
+        )
+
+        let response = try await router.handle(
+            ProviderRequest(method: "POST", path: "/v1/chat/completions", headers: [:], body: body)
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let stream = try XCTUnwrap(String(data: response.body, encoding: .utf8))
+        let events = try mlxUsageEvents(in: stream)
+        let context = try XCTUnwrap(events.first?["context"] as? [String: Any])
+        XCTAssertTrue(context["limit_tokens"] is NSNull)
+    }
+
+    func testProviderMapsUpstreamStreamedUsageIntoCompletedUsageEvent() async throws {
+        let upstreamStream = """
+        data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}
+
+        data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}
+
+        data: [DONE]
+
+        """
+        let upstream = FakeUpstream(streamingChatCompletionBody: Data(upstreamStream.utf8))
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Tiny" },
+            modelMetadataProvider: {
+                [
+                    "mlx-community/Tiny": ProviderModelMetadata(maxContextLength: 32768)
+                ]
+            }
+        )
+        let body = Data(
+            #"{"messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":true}}"#.utf8
+        )
+
+        let response = try await router.handle(
+            ProviderRequest(method: "POST", path: "/v1/chat/completions", headers: [:], body: body)
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let stream = try XCTUnwrap(String(data: response.body, encoding: .utf8))
+        XCTAssertTrue(stream.contains(#""content":"Hi""#))
+        XCTAssertTrue(stream.contains(#""usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}"#))
+        XCTAssertTrue(stream.contains("data: [DONE]"))
+        let events = try mlxUsageEvents(in: stream)
+        let completedTokens = try XCTUnwrap(events.last?["tokens"] as? [String: Any])
+        XCTAssertEqual(completedTokens["input_tokens"] as? Int, 10)
+        XCTAssertEqual(completedTokens["output_tokens"] as? Int, 4)
+        XCTAssertEqual(completedTokens["total_tokens"] as? Int, 14)
+    }
+
     func testProviderRoutesRunnableTextDiffusionChatCompletionsAsText() async throws {
         let upstream = FakeUpstream()
         let router = ProviderRouter(
@@ -2359,6 +2511,26 @@ final class ProviderRouterTests: XCTestCase {
         try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 
+    private func mlxUsageEvents(in stream: String) throws -> [[String: Any]] {
+        try stream
+            .components(separatedBy: "\n\n")
+            .filter { block in
+                block
+                    .split(separator: "\n")
+                    .contains { $0.trimmingCharacters(in: .whitespaces) == "event: mlx.usage" }
+            }
+            .map { block in
+                let dataLine = try XCTUnwrap(
+                    block
+                        .split(separator: "\n")
+                        .map { $0.trimmingCharacters(in: .whitespaces) }
+                        .first { $0.hasPrefix("data:") }
+                )
+                let payload = dataLine.dropFirst("data:".count).trimmingCharacters(in: .whitespaces)
+                return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any])
+            }
+    }
+
     private func modeAdviceRouter(upstream: FakeUpstream) -> ProviderRouter {
         ProviderRouter(
             upstream: upstream,
@@ -2417,17 +2589,29 @@ private final class FakeUpstream: ProviderUpstreamClient, ProviderUpstreamProxyC
     private let notFoundBody: Data
     private let chatCompletionBody: Data
     private let chatCompletionStatus: Int
+    private let streamingChatCompletionBody: Data
 
     init(
         notFoundBody: Data = Data(),
         chatCompletionBody: Data = Data(
             #"{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"mlx-community/Tiny","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"Hello from chat."}}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}"#.utf8
         ),
-        chatCompletionStatus: Int = 200
+        chatCompletionStatus: Int = 200,
+        streamingChatCompletionBody: Data = Data(
+            """
+            data: {"choices":[{"delta":{"content":"Hel"},"finish_reason":null}]}
+
+            data: {"choices":[{"delta":{"content":"lo"},"finish_reason":null}]}
+
+            data: [DONE]
+
+            """.utf8
+        )
     ) {
         self.notFoundBody = notFoundBody
         self.chatCompletionBody = chatCompletionBody
         self.chatCompletionStatus = chatCompletionStatus
+        self.streamingChatCompletionBody = streamingChatCompletionBody
     }
 
     var requests: [ProviderRequest] {
@@ -2477,15 +2661,7 @@ private final class FakeUpstream: ProviderUpstreamClient, ProviderUpstreamProxyC
                     body: chatCompletionBody
                 )
             }
-            let stream = """
-            data: {"choices":[{"delta":{"content":"Hel"},"finish_reason":null}]}
-
-            data: {"choices":[{"delta":{"content":"lo"},"finish_reason":null}]}
-
-            data: [DONE]
-
-            """
-            return ProviderResponse(status: 200, headers: ["content-type": "text/event-stream"], body: Data(stream.utf8))
+            return ProviderResponse(status: 200, headers: ["content-type": "text/event-stream"], body: streamingChatCompletionBody)
         default:
             return ProviderResponse(status: 404, headers: [:], body: notFoundBody)
         }

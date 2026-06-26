@@ -295,12 +295,22 @@ public struct ProviderRouter: Sendable {
             return finish(result.response, context: result.debugContext)
         }
 
+        let usageEventsRequested = shouldEmitMLXUsageEvents(for: request)
         let routed = requestWithSelectedUpstreamIfAvailable(request)
         let proxiedRequest = routed.request
         let upstreamEndpoint = routed.upstreamEndpoint ?? defaultUpstreamEndpoint()
         do {
             if shouldStream(proxiedRequest) {
-                let response = try await proxyStream(proxiedRequest, to: upstreamEndpoint)
+                var response = try await proxyStream(proxiedRequest, to: upstreamEndpoint)
+                if usageEventsRequested, proxiedRequest.path == "/v1/chat/completions" {
+                    response = responseWithMLXUsageEvents(
+                        response,
+                        model: routed.debugContext.routingDecision?.upstreamModel
+                            ?? selectedModel(from: proxiedRequest.body)
+                            ?? activeModel()
+                            ?? "local"
+                    )
+                }
                 eventLogger("Provider streaming \(request.method) \(request.path) from upstream with status \(response.status)")
                 return finishStream(response, context: routed.debugContext, upstreamRequest: proxiedRequest)
             }
@@ -389,6 +399,20 @@ public struct ProviderRouter: Sendable {
               let object = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any]
         else { return false }
         return object["stream"] as? Bool == true
+    }
+
+    private func shouldEmitMLXUsageEvents(for request: ProviderRequest) -> Bool {
+        if request.header("x-mlx-usage-events")?.lowercased() == "true" {
+            return true
+        }
+
+        guard request.method == "POST",
+              request.path == "/v1/chat/completions",
+              let object = decodedObject(from: request.body),
+              let streamOptions = object["stream_options"] as? [String: Any]
+        else { return false }
+
+        return streamOptions["include_usage"] as? Bool == true
     }
 
     private func activeModel() -> String? {
@@ -1066,6 +1090,7 @@ public struct ProviderRouter: Sendable {
             payload["messages"] = normalizedMessages
             eventLogger("Provider normalized \(request.method) \(request.path) messages for MLX upstream compatibility")
         }
+        _ = removeStreamOptions(from: &payload)
         if removeToolCallingFields(from: &payload) {
             prependSystemMessage(
                 "Tool calls are not available through this local MLX provider. Answer in text instead of calling tools.",
@@ -1394,8 +1419,12 @@ public struct ProviderRouter: Sendable {
         }
     }
 
+    private func removeStreamOptions(from payload: inout [String: Any]) -> Bool {
+        payload.removeValue(forKey: "stream_options") != nil
+    }
+
     private func removeToolCallingFields(from payload: inout [String: Any]) -> Bool {
-        let toolFields = ["tools", "tool_choice", "parallel_tool_calls", "stream_options"]
+        let toolFields = ["tools", "tool_choice", "parallel_tool_calls"]
         var removed = false
         for field in toolFields where payload[field] != nil {
             payload.removeValue(forKey: field)
@@ -1989,6 +2018,170 @@ public struct ProviderRouter: Sendable {
             "total_tokens": totalTokens
         ]
     }
+
+    private func responseWithMLXUsageEvents(
+        _ response: ProviderStreamedResponse,
+        model: String
+    ) -> ProviderStreamedResponse {
+        let contextLimit = modelMetadata(for: model).maxContextLength
+        let chunks = AsyncThrowingStream<Data, Error> { continuation in
+            Task {
+                var buffer = ""
+                var latestUsage: MLXStreamTokenUsage?
+                var didEmitCompletedUsage = false
+                continuation.yield(
+                    mlxUsageEventData(
+                        phase: "started",
+                        model: model,
+                        contextLimit: contextLimit,
+                        tokens: nil
+                    )
+                )
+
+                do {
+                    for try await chunk in response.chunks {
+                        guard let text = String(data: chunk, encoding: .utf8) else {
+                            continuation.yield(chunk)
+                            continue
+                        }
+
+                        buffer.append(text)
+                        while let delimiterRange = buffer.range(of: "\n\n") {
+                            let blockWithDelimiter = String(buffer[..<delimiterRange.upperBound])
+                            let block = String(buffer[..<delimiterRange.lowerBound])
+                            buffer.removeSubrange(..<delimiterRange.upperBound)
+
+                            if let usage = mlxStreamTokenUsage(fromSSEBlock: block) {
+                                latestUsage = usage
+                            }
+                            if isSSEDoneBlock(block), !didEmitCompletedUsage {
+                                continuation.yield(
+                                    mlxUsageEventData(
+                                        phase: "completed",
+                                        model: model,
+                                        contextLimit: contextLimit,
+                                        tokens: latestUsage
+                                    )
+                                )
+                                didEmitCompletedUsage = true
+                            }
+
+                            continuation.yield(Data(blockWithDelimiter.utf8))
+                        }
+                    }
+
+                    if !buffer.isEmpty {
+                        if let usage = mlxStreamTokenUsage(fromSSEBlock: buffer) {
+                            latestUsage = usage
+                        }
+                        if isSSEDoneBlock(buffer), !didEmitCompletedUsage {
+                            continuation.yield(
+                                mlxUsageEventData(
+                                    phase: "completed",
+                                    model: model,
+                                    contextLimit: contextLimit,
+                                    tokens: latestUsage
+                                )
+                            )
+                            didEmitCompletedUsage = true
+                        }
+                        continuation.yield(Data(buffer.utf8))
+                    }
+
+                    if !didEmitCompletedUsage {
+                        continuation.yield(
+                            mlxUsageEventData(
+                                phase: "completed",
+                                model: model,
+                                contextLimit: contextLimit,
+                                tokens: latestUsage
+                            )
+                        )
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+        return ProviderStreamedResponse(status: response.status, headers: response.headers, chunks: chunks)
+    }
+
+    private func mlxUsageEventData(
+        phase: String,
+        model: String,
+        contextLimit: Int?,
+        tokens: MLXStreamTokenUsage?
+    ) -> Data {
+        let null = NSNull()
+        let context: [String: Any] = [
+            "limit_tokens": contextLimit.map { $0 as Any } ?? null,
+            "used_tokens": null,
+            "remaining_tokens": null,
+            "usage_ratio": null
+        ]
+        let tokenPayload: [String: Any] = [
+            "input_tokens": tokens?.inputTokens.map { $0 as Any } ?? null,
+            "output_tokens": tokens?.outputTokens.map { $0 as Any } ?? null,
+            "total_tokens": tokens?.totalTokens.map { $0 as Any } ?? null
+        ]
+        let payload: [String: Any] = [
+            "type": "mlx.usage",
+            "phase": phase,
+            "model": model,
+            "context": context,
+            "tokens": tokenPayload
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+              let json = String(data: data, encoding: .utf8)
+        else { return Data() }
+        return Data("event: mlx.usage\ndata: \(json)\n\n".utf8)
+    }
+
+    private func isSSEDoneBlock(_ block: String) -> Bool {
+        sseDataPayloads(in: block).contains("[DONE]")
+    }
+
+    private func mlxStreamTokenUsage(fromSSEBlock block: String) -> MLXStreamTokenUsage? {
+        for payload in sseDataPayloads(in: block) where payload != "[DONE]" {
+            guard let data = payload.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let usage = object["usage"] as? [String: Any]
+            else { continue }
+
+            let inputTokens = intValue(usage["prompt_tokens"])
+            let outputTokens = intValue(usage["completion_tokens"])
+            let totalTokens = intValue(usage["total_tokens"]) ?? inputTokens.map { input in
+                input + (outputTokens ?? 0)
+            }
+            return MLXStreamTokenUsage(
+                inputTokens: inputTokens,
+                outputTokens: outputTokens,
+                totalTokens: totalTokens
+            )
+        }
+        return nil
+    }
+
+    private func sseDataPayloads(in block: String) -> [String] {
+        block
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .compactMap { line -> String? in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard trimmed.hasPrefix("data:") else { return nil }
+                return String(trimmed.dropFirst("data:".count)).trimmingCharacters(in: .whitespaces)
+            }
+    }
+
+    private func intValue(_ value: Any?) -> Int? {
+        if let value = value as? Int {
+            return value
+        }
+        if let value = value as? NSNumber {
+            return value.intValue
+        }
+        return nil
+    }
 }
 
 private struct ProviderDebugContext {
@@ -2006,6 +2199,12 @@ private struct ChannelMarkedSegment {
 private struct NormalizedChannelContent {
     var content: String
     var thinking: String?
+}
+
+private struct MLXStreamTokenUsage {
+    var inputTokens: Int?
+    var outputTokens: Int?
+    var totalTokens: Int?
 }
 
 private enum ProviderModeAdviceMode: String {
