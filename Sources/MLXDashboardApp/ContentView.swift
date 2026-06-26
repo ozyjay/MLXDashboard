@@ -51,6 +51,7 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
         }
+        .appFont(.body)
         .frame(minWidth: 980, minHeight: 680)
         .background(WindowCloseGuardView())
         .onChange(of: viewModel.modelDownloadSettingsNavigationRequestID) { _, _ in
@@ -79,7 +80,6 @@ struct DashboardLayoutPolicy {
     static let spacing: CGFloat = 16
     static let activeModelMinHeight: CGFloat = 240
     static let recentLogsMinHeight: CGFloat = 360
-    static let recentLogsMaxHeight: CGFloat = 420
     static let recentLogsVisibleLimit = 200
 }
 
@@ -88,6 +88,7 @@ struct AppTextSizePolicy {
     static let defaultLevel = 0
     static let minimumLevel = -2
     static let maximumLevel = 3
+    static let scaleFactor: CGFloat = 1.12
 
     static func increased(_ level: Int) -> Int {
         min(level + 1, maximumLevel)
@@ -97,21 +98,114 @@ struct AppTextSizePolicy {
         max(level - 1, minimumLevel)
     }
 
-    static func dynamicTypeSize(for level: Int) -> DynamicTypeSize {
-        switch min(max(level, minimumLevel), maximumLevel) {
-        case -2:
-            return .small
-        case -1:
-            return .medium
-        case 1:
-            return .xLarge
-        case 2:
-            return .xxLarge
-        case 3:
-            return .xxxLarge
-        default:
-            return .large
+    static func clamped(_ level: Int) -> Int {
+        min(max(level, minimumLevel), maximumLevel)
+    }
+
+    static func pointSize(for style: AppTextStyle, level: Int) -> CGFloat {
+        style.basePointSize * pow(scaleFactor, CGFloat(clamped(level)))
+    }
+
+    static func font(
+        _ style: AppTextStyle,
+        level: Int,
+        weight: Font.Weight? = nil,
+        design: Font.Design = .default
+    ) -> Font {
+        .system(size: pointSize(for: style, level: level), weight: weight, design: design)
+    }
+}
+
+enum AppTextStyle {
+    case caption
+    case body
+    case subheadline
+    case headline
+    case title3
+    case title2
+
+    var basePointSize: CGFloat {
+        switch self {
+        case .caption:
+            return 11
+        case .body, .headline:
+            return 13
+        case .subheadline:
+            return 12
+        case .title3:
+            return 15
+        case .title2:
+            return 17
         }
+    }
+}
+
+@MainActor
+final class AppTextSizeController: ObservableObject {
+    @Published private(set) var level: Int
+
+    private let defaults: UserDefaults
+    private let storageKey: String
+
+    init(
+        defaults: UserDefaults = .standard,
+        storageKey: String = AppTextSizePolicy.storageKey
+    ) {
+        self.defaults = defaults
+        self.storageKey = storageKey
+        self.level = AppTextSizePolicy.clamped(defaults.integer(forKey: storageKey))
+        defaults.set(level, forKey: storageKey)
+    }
+
+    func increase() {
+        setLevel(AppTextSizePolicy.increased(level))
+    }
+
+    func decrease() {
+        setLevel(AppTextSizePolicy.decreased(level))
+    }
+
+    func reset() {
+        setLevel(AppTextSizePolicy.defaultLevel)
+    }
+
+    func setLevel(_ level: Int) {
+        let clampedLevel = AppTextSizePolicy.clamped(level)
+        self.level = clampedLevel
+        defaults.set(clampedLevel, forKey: storageKey)
+    }
+}
+
+private struct AppTextSizeLevelKey: EnvironmentKey {
+    static let defaultValue = AppTextSizePolicy.defaultLevel
+}
+
+extension EnvironmentValues {
+    var appTextSizeLevel: Int {
+        get { self[AppTextSizeLevelKey.self] }
+        set { self[AppTextSizeLevelKey.self] = newValue }
+    }
+}
+
+private struct AppFontModifier: ViewModifier {
+    @Environment(\.appTextSizeLevel) private var level
+
+    let style: AppTextStyle
+    let weight: Font.Weight?
+    let design: Font.Design
+
+    func body(content: Content) -> some View {
+        content.font(AppTextSizePolicy.font(style, level: level, weight: weight, design: design))
+    }
+}
+
+extension View {
+    func appFont(
+        _ style: AppTextStyle,
+        weight: Font.Weight? = nil,
+        design: Font.Design = .default
+    ) -> some View {
+        modifier(AppFontModifier(style: style, weight: weight, design: design))
     }
 }
 
@@ -148,7 +242,7 @@ private struct AppHeader: View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
                 Text(section.rawValue)
-                    .font(.headline)
+                    .appFont(.headline, weight: .semibold)
                 HStack(spacing: 10) {
                     Text("Python: \(viewModel.pythonStatus)")
                     if viewModel.runtimePackageUpgradeStatus.hasAvailableUpgrades {
@@ -159,7 +253,7 @@ private struct AppHeader: View {
                         Text("Default: \(activeModel)")
                     }
                 }
-                .font(.caption)
+                .appFont(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -197,7 +291,9 @@ private struct DashboardTab: View {
                 ActiveModelView()
                 RecentLogsView()
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task {
             await viewModel.refreshPythonStatus()
         }
@@ -208,50 +304,53 @@ private struct ControllerTab: View {
     @EnvironmentObject private var viewModel: DashboardViewModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Server Controller").font(.title2.bold())
-            TextField("Default model", text: Binding(
-                get: { viewModel.settings.activeModel ?? "" },
-                set: { viewModel.settings.activeModel = $0.isEmpty ? nil : $0 }
-            ))
-            .textFieldStyle(.roundedBorder)
-            HStack {
-                TextField("MLX port", value: $viewModel.settings.mlxPort, format: .number)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 120)
-                TextField("Provider port", value: $viewModel.settings.providerPort, format: .number)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 140)
-                Button("Save") { viewModel.saveSettings() }
-                Button("Start") { Task { await viewModel.startServer() } }
-                    .disabled(!viewModel.canStartServer)
-                    .keyboardShortcut("r", modifiers: [.command])
-                Button("Stop") { viewModel.stopServer() }
-                    .disabled(!viewModel.canStopServer)
-                Button("Restart") { Task { await viewModel.restartServer() } }
-                    .disabled(!viewModel.canRestartServer)
-            }
-            Text("Python: \(viewModel.pythonStatus)")
-                .foregroundStyle(.secondary)
-            RuntimePackageUpdatesView()
-            RoleServerStatusTable()
-            HStack {
-                Button("Check Python") { Task { await viewModel.refreshPythonStatus() } }
-                Button("Install Packages") { Task { await viewModel.installPythonPackages() } }
-                    .disabled(!viewModel.shouldOfferPythonPackageInstall)
-                Button("Check Upgrades") { Task { await viewModel.checkRuntimePackageUpgrades() } }
-                    .disabled(viewModel.isCheckingRuntimePackageUpgrades || viewModel.isUpgradingRuntimePackages)
-                Button("Upgrade Runtime") { Task { await viewModel.upgradeRuntimePackages() } }
-                    .disabled(!viewModel.canUpgradeRuntimePackages)
-                if viewModel.isCheckingRuntimePackageUpgrades || viewModel.isUpgradingRuntimePackages {
-                    ProgressView()
-                        .controlSize(.small)
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Server Controller").appFont(.title2, weight: .bold)
+                TextField("Default model", text: Binding(
+                    get: { viewModel.settings.activeModel ?? "" },
+                    set: { viewModel.settings.activeModel = $0.isEmpty ? nil : $0 }
+                ))
+                .textFieldStyle(.roundedBorder)
+                HStack {
+                    TextField("MLX port", value: $viewModel.settings.mlxPort, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 132)
+                    TextField("Provider port", value: $viewModel.settings.providerPort, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 156)
+                    Button("Save") { viewModel.saveSettings() }
+                    Button("Start") { Task { await viewModel.startServer() } }
+                        .disabled(!viewModel.canStartServer)
+                        .keyboardShortcut("r", modifiers: [.command])
+                    Button("Stop") { viewModel.stopServer() }
+                        .disabled(!viewModel.canStopServer)
+                    Button("Restart") { Task { await viewModel.restartServer() } }
+                        .disabled(!viewModel.canRestartServer)
                 }
+                Text("Python: \(viewModel.pythonStatus)")
+                    .foregroundStyle(.secondary)
+                RuntimePackageUpdatesView()
+                RoleServerStatusTable()
+                HStack {
+                    Button("Check Python") { Task { await viewModel.refreshPythonStatus() } }
+                    Button("Install Packages") { Task { await viewModel.installPythonPackages() } }
+                        .disabled(!viewModel.shouldOfferPythonPackageInstall)
+                    Button("Check Upgrades") { Task { await viewModel.checkRuntimePackageUpgrades() } }
+                        .disabled(viewModel.isCheckingRuntimePackageUpgrades || viewModel.isUpgradingRuntimePackages)
+                    Button("Upgrade Runtime") { Task { await viewModel.upgradeRuntimePackages() } }
+                        .disabled(!viewModel.canUpgradeRuntimePackages)
+                    if viewModel.isCheckingRuntimePackageUpgrades || viewModel.isUpgradingRuntimePackages {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+                Divider()
+                ModelDownloadsSettingsView()
             }
-            Divider()
-            ModelDownloadsSettingsView()
-            Spacer()
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 
@@ -261,7 +360,7 @@ private struct RuntimePackageUpdatesView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(viewModel.runtimePackageUpgradeSummary)
-                .font(.subheadline.weight(.semibold))
+                .appFont(.subheadline, weight: .semibold)
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
                 GridRow {
                     headerText("Package")
@@ -291,7 +390,7 @@ private struct RuntimePackageUpdatesView: View {
                     }
                 }
             }
-            .font(.caption)
+            .appFont(.caption)
         }
     }
 
@@ -324,7 +423,7 @@ private struct RuntimePackageUpdatesView: View {
 
     private func headerText(_ text: String) -> some View {
         Text(text)
-            .font(.caption.weight(.semibold))
+            .appFont(.caption, weight: .semibold)
             .foregroundStyle(.secondary)
     }
 }
@@ -339,22 +438,22 @@ private struct RoleServerStatusTable: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Role Servers")
-                .font(.headline)
+                .appFont(.headline, weight: .semibold)
 
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
                 GridRow {
                     headerText("Role")
-                        .frame(width: 70, alignment: .leading)
+                        .frame(width: 82, alignment: .leading)
                     headerText("Assigned model")
-                        .frame(minWidth: 200, maxWidth: 280, alignment: .leading)
+                        .frame(minWidth: 220, maxWidth: 320, alignment: .leading)
                     headerText("Port")
-                        .frame(width: 50, alignment: .leading)
+                        .frame(width: 60, alignment: .leading)
                     headerText("Status")
-                        .frame(width: 90, alignment: .leading)
+                        .frame(width: 108, alignment: .leading)
                     headerText("Detail")
                         .frame(minWidth: 220, maxWidth: .infinity, alignment: .leading)
                     headerText("Actions")
-                        .frame(width: 120, alignment: .leading)
+                        .frame(width: 140, alignment: .leading)
                 }
 
                 Divider()
@@ -363,16 +462,16 @@ private struct RoleServerStatusTable: View {
                 ForEach(viewModel.roleServerStatuses) { row in
                     GridRow {
                         Text(row.role.displayName)
-                            .frame(width: 70, alignment: .leading)
+                            .frame(width: 82, alignment: .leading)
                         Text(row.assignedModel ?? "—")
                             .lineLimit(1)
                             .truncationMode(.middle)
-                            .frame(minWidth: 200, maxWidth: 280, alignment: .leading)
+                            .frame(minWidth: 220, maxWidth: 320, alignment: .leading)
                         Text(portText(for: row))
-                            .frame(width: 50, alignment: .leading)
+                            .frame(width: 60, alignment: .leading)
                         Text(statusText(for: row.kind))
                             .foregroundStyle(statusColor(for: row.kind))
-                            .frame(width: 90, alignment: .leading)
+                            .frame(width: 108, alignment: .leading)
                         Text(row.detail)
                             .lineLimit(2)
                             .truncationMode(.tail)
@@ -401,18 +500,18 @@ private struct RoleServerStatusTable: View {
                             )
                         }
                         .buttonStyle(.borderless)
-                        .frame(width: 120, alignment: .leading)
+                        .frame(width: 140, alignment: .leading)
                     }
                 }
             }
-            .font(.caption)
+            .appFont(.caption)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func headerText(_ text: String) -> some View {
         Text(text)
-            .font(.caption.weight(.semibold))
+            .appFont(.caption, weight: .semibold)
             .foregroundStyle(.secondary)
     }
 
@@ -477,9 +576,9 @@ private struct ModelDownloadsSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Model Downloads")
-                .font(.headline)
+                .appFont(.headline, weight: .semibold)
             Text("Standard download is recommended until Xet is tested on this network.")
-                .font(.caption)
+                .appFont(.caption)
                 .foregroundStyle(.secondary)
 
             Picker("Download mode", selection: modeBinding) {
@@ -595,7 +694,7 @@ private struct DiscoverModelsView: View {
                         .lineLimit(2)
                 }
             }
-            .font(.caption)
+            .appFont(.caption)
 
             HStack(spacing: 10) {
                 Button("Install Selected") {
@@ -626,12 +725,12 @@ private struct DiscoverModelsView: View {
                 TableColumn("Model") { family in
                     VStack(alignment: .leading, spacing: 6) {
                         Text(family.displayName)
-                            .font(.body.weight(.medium))
+                            .appFont(.body, weight: .medium)
                             .lineLimit(1)
                             .textSelection(.enabled)
                         if let variant = family.selectedVariant {
                             Text(variant.summary.id)
-                                .font(.caption)
+                                .appFont(.caption)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
@@ -687,8 +786,9 @@ private struct DiscoverModelsView: View {
                 }
                 .width(min: 112, ideal: 128, max: 150)
             }
-            .frame(minHeight: 420)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task {
             await viewModel.searchDefaultModelsIfReady()
         }
@@ -702,7 +802,7 @@ private struct VariantChipLabel: View {
     var body: some View {
         HStack(spacing: 4) {
             Text(variant.label)
-                .font(.caption.weight(isSelected ? .semibold : .regular))
+                .appFont(.caption, weight: isSelected ? .semibold : .regular)
             switch variant.installState {
             case .installed:
                 Image(systemName: "checkmark.circle.fill")
@@ -738,7 +838,7 @@ private struct InstalledModelsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("Installed Models").font(.title3.bold())
+                Text("Installed Models").appFont(.title3, weight: .bold)
                 Spacer()
                 Button("Scan Cache") { viewModel.scanModelCache() }
                 if viewModel.hasRunningDownloads {
@@ -774,7 +874,7 @@ private struct InstalledModelsView: View {
                 )
             } else if let message = viewModel.modelInstallMessage {
                 Text(message)
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
@@ -803,7 +903,9 @@ private struct InstalledModelsView: View {
                 }
                 .width(min: 90, ideal: 140, max: 190)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .confirmationDialog(
             "Delete cached model?",
             isPresented: $isConfirmingCacheDelete,
@@ -901,19 +1003,19 @@ private struct InstallProgressBanner: View {
                 Image(systemName: symbolName)
                     .foregroundStyle(tintColor)
                 Text(progress.title)
-                    .font(.caption.bold())
+                    .appFont(.caption, weight: .bold)
                 Text(progress.stepText)
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.secondary)
                 Text(progress.modelID)
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer()
                 if let downloadStatusText = progress.downloadStatusText {
                     Text(downloadStatusText)
-                        .font(.caption.monospacedDigit())
+                        .appFont(.caption).monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
             }
@@ -928,13 +1030,13 @@ private struct InstallProgressBanner: View {
             }
             if let cacheStatusText = progress.cacheStatusText {
                 Text(cacheStatusText)
-                    .font(.caption.monospacedDigit())
+                    .appFont(.caption).monospacedDigit()
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
             if let xetFallbackHint = progress.xetFallbackHint {
                 Text(xetFallbackHint)
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.orange)
                     .textSelection(.enabled)
             }
@@ -942,7 +1044,7 @@ private struct InstallProgressBanner: View {
                 activityRowsView
             }
             Text(progress.detail)
-                .font(.caption)
+                .appFont(.caption)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
                 .lineLimit(2)
@@ -968,7 +1070,7 @@ private struct InstallProgressBanner: View {
         VStack(alignment: .leading, spacing: 3) {
             ForEach(displayedActivityRows) { row in
                 Text(row.message)
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(showsFullActivity ? 2 : 1)
                     .truncationMode(.middle)
@@ -982,79 +1084,82 @@ private struct ProviderTab: View {
     @EnvironmentObject private var viewModel: DashboardViewModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("MLXChat Provider").font(.title2.bold())
-            LabeledContent("Base URL", value: viewModel.providerBaseURL)
-            LabeledContent("Access", value: "Localhost only")
-            GroupBox("Role assignments") {
-                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
-                    roleRow("Ask", viewModel.settings.providerRoleAssignments.ask)
-                    roleRow("Plan", viewModel.settings.providerRoleAssignments.plan)
-                    roleRow("Coding", viewModel.settings.providerRoleAssignments.coding)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            GroupBox("Generation defaults") {
-                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
-                    GridRow {
-                        generationHeader("Role")
-                            .frame(width: 64, alignment: .leading)
-                        generationHeader("Temp")
-                            .frame(width: 64, alignment: .leading)
-                        generationHeader("Top P")
-                            .frame(width: 64, alignment: .leading)
-                        generationHeader("Max tokens")
-                            .frame(width: 86, alignment: .leading)
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("MLXChat Provider").appFont(.title2, weight: .bold)
+                LabeledContent("Base URL", value: viewModel.providerBaseURL)
+                LabeledContent("Access", value: "Localhost only")
+                GroupBox("Role assignments") {
+                    Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
+                        roleRow("Ask", viewModel.settings.providerRoleAssignments.ask)
+                        roleRow("Plan", viewModel.settings.providerRoleAssignments.plan)
+                        roleRow("Coding", viewModel.settings.providerRoleAssignments.coding)
                     }
-                    generationRow(.ask)
-                    generationRow(.plan)
-                    generationRow(.coding)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            Toggle(
-                "Full local payload capture",
-                isOn: Binding(
-                    get: { viewModel.settings.providerDebugCaptureEnabled },
-                    set: { viewModel.setProviderDebugCaptureEnabled($0) }
+                GroupBox("Generation defaults") {
+                    Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
+                        GridRow {
+                            generationHeader("Role")
+                                .frame(width: 76, alignment: .leading)
+                            generationHeader("Temp")
+                                .frame(width: 76, alignment: .leading)
+                            generationHeader("Top P")
+                                .frame(width: 76, alignment: .leading)
+                            generationHeader("Max tokens")
+                                .frame(width: 104, alignment: .leading)
+                        }
+                        generationRow(.ask)
+                        generationRow(.plan)
+                        generationRow(.coding)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                Toggle(
+                    "Full local payload capture",
+                    isOn: Binding(
+                        get: { viewModel.settings.providerDebugCaptureEnabled },
+                        set: { viewModel.setProviderDebugCaptureEnabled($0) }
+                    )
                 )
-            )
-            .toggleStyle(.switch)
-            Text("Debug log: \(viewModel.providerDebugLogPath)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-            HStack {
-                Button("Start Provider") {
-                    do {
-                        try viewModel.startProvider()
-                    } catch {
-                        viewModel.telemetry.appendLog("Provider start failed: \(error)")
+                .toggleStyle(.switch)
+                Text("Debug log: \(viewModel.providerDebugLogPath)")
+                    .appFont(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                HStack {
+                    Button("Start Provider") {
+                        do {
+                            try viewModel.startProvider()
+                        } catch {
+                            viewModel.telemetry.appendLog("Provider start failed: \(error)")
+                        }
                     }
+                    .disabled(!viewModel.canStartProvider)
+                    Button("Stop Provider") { viewModel.stopProvider() }
+                        .disabled(!viewModel.canStopProvider)
                 }
-                .disabled(!viewModel.canStartProvider)
-                Button("Stop Provider") { viewModel.stopProvider() }
-                    .disabled(!viewModel.canStopProvider)
+                Divider()
+                Text("Routes").appFont(.headline, weight: .semibold)
+                Text("GET /health")
+                Text("GET /v1/models")
+                Text("POST /v1/responses")
+                Text("POST /v1/chat/completions")
+                Text("POST /v1/completions")
             }
-            Divider()
-            Text("Routes").font(.headline)
-            Text("GET /health")
-            Text("GET /v1/models")
-            Text("POST /v1/responses")
-            Text("POST /v1/chat/completions")
-            Text("POST /v1/completions")
-            Spacer()
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     @ViewBuilder
     private func roleRow(_ label: String, _ model: String?) -> some View {
         GridRow {
             Text(label)
-                .font(.caption.weight(.semibold))
+                .appFont(.caption, weight: .semibold)
                 .foregroundStyle(.secondary)
             Text(model ?? "Not assigned")
-                .font(.caption)
+                .appFont(.caption)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .textSelection(.enabled)
@@ -1064,36 +1169,36 @@ private struct ProviderTab: View {
     private func generationRow(_ role: ProviderModelRole) -> some View {
         GridRow {
             Text(role.displayName)
-                .font(.caption.weight(.semibold))
+                .appFont(.caption, weight: .semibold)
                 .foregroundStyle(.secondary)
-                .frame(width: 64, alignment: .leading)
+                .frame(width: 76, alignment: .leading)
             TextField(
                 "Temp",
                 value: generationDoubleBinding(role: role, keyPath: \.temperature),
                 format: .number.precision(.fractionLength(0...2))
             )
             .textFieldStyle(.roundedBorder)
-            .frame(width: 64)
+            .frame(width: 76)
             TextField(
                 "Top P",
                 value: generationDoubleBinding(role: role, keyPath: \.topP),
                 format: .number.precision(.fractionLength(0...2))
             )
             .textFieldStyle(.roundedBorder)
-            .frame(width: 64)
+            .frame(width: 76)
             TextField(
                 "Max",
                 value: generationMaxTokensBinding(role: role),
                 format: .number
             )
             .textFieldStyle(.roundedBorder)
-            .frame(width: 86)
+            .frame(width: 104)
         }
     }
 
     private func generationHeader(_ text: String) -> some View {
         Text(text)
-            .font(.caption.weight(.semibold))
+            .appFont(.caption, weight: .semibold)
             .foregroundStyle(.secondary)
     }
 
@@ -1132,15 +1237,16 @@ private struct ActiveModelView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Active Model").font(.headline)
+            Text("Active Model").appFont(.headline, weight: .semibold)
             Text(viewModel.settings.activeModel ?? "No model selected")
-                .font(.title3)
+                .appFont(.title3)
             Text("MLX: \(viewModel.settings.mlxBaseURL.absoluteString)")
             Text("MLXChat: \(viewModel.providerBaseURL)")
         }
         .frame(
             maxWidth: .infinity,
             minHeight: DashboardLayoutPolicy.activeModelMinHeight,
+            maxHeight: .infinity,
             alignment: .topLeading
         )
     }
@@ -1152,8 +1258,8 @@ private struct MetricTile: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            Text(value).font(.title3.bold()).lineLimit(2)
+            Text(title).appFont(.caption).foregroundStyle(.secondary)
+            Text(value).appFont(.title3, weight: .bold).lineLimit(2)
         }
         .padding(14)
         .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
@@ -1166,12 +1272,12 @@ private struct RecentLogsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Recent Logs").font(.headline)
+            Text("Recent Logs").appFont(.headline, weight: .semibold)
             ScrollView {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(viewModel.telemetry.logs.suffix(DashboardLayoutPolicy.recentLogsVisibleLimit)) { entry in
                         Text(entry.message)
-                            .font(.system(.caption, design: .monospaced))
+                            .appFont(.caption, design: .monospaced)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .textSelection(.enabled)
                     }
@@ -1183,7 +1289,7 @@ private struct RecentLogsView: View {
         .frame(
             maxWidth: .infinity,
             minHeight: DashboardLayoutPolicy.recentLogsMinHeight,
-            maxHeight: DashboardLayoutPolicy.recentLogsMaxHeight,
+            maxHeight: .infinity,
             alignment: .topLeading
         )
     }

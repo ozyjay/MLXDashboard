@@ -17,7 +17,7 @@ struct AppLaunchOptions {
 struct MLXDashboardApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var viewModel = DashboardViewModel()
-    @AppStorage(AppTextSizePolicy.storageKey) private var appTextSizeLevel = AppTextSizePolicy.defaultLevel
+    @StateObject private var textSizeController = AppTextSizeController()
     @State private var didHandleLaunchOptions = false
     private let launchOptions = AppLaunchOptions()
 
@@ -25,7 +25,8 @@ struct MLXDashboardApp: App {
         WindowGroup("MLXDashboard") {
             ContentView()
                 .environmentObject(viewModel)
-                .dynamicTypeSize(AppTextSizePolicy.dynamicTypeSize(for: appTextSizeLevel))
+                .environmentObject(textSizeController)
+                .environment(\.appTextSizeLevel, textSizeController.level)
                 .frame(minWidth: 980, minHeight: 680)
                 .onAppear {
                     appDelegate.closeState = viewModel
@@ -50,17 +51,17 @@ struct MLXDashboardApp: App {
             }
             CommandMenu("View") {
                 Button("Increase Font Size") {
-                    appTextSizeLevel = AppTextSizePolicy.increased(appTextSizeLevel)
+                    textSizeController.increase()
                 }
                 .keyboardShortcut("+", modifiers: [.command])
 
                 Button("Decrease Font Size") {
-                    appTextSizeLevel = AppTextSizePolicy.decreased(appTextSizeLevel)
+                    textSizeController.decrease()
                 }
                 .keyboardShortcut("-", modifiers: [.command])
 
                 Button("Reset Font Size") {
-                    appTextSizeLevel = AppTextSizePolicy.defaultLevel
+                    textSizeController.reset()
                 }
                 .keyboardShortcut("0", modifiers: [.command])
             }

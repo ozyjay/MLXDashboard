@@ -17,7 +17,6 @@ final class DashboardViewModelTests: XCTestCase {
     func testDashboardRecentLogsUseExpandedMinimumHeight() {
         XCTAssertEqual(DashboardLayoutPolicy.activeModelMinHeight, 240)
         XCTAssertEqual(DashboardLayoutPolicy.recentLogsMinHeight, 360)
-        XCTAssertEqual(DashboardLayoutPolicy.recentLogsMaxHeight, 420)
         XCTAssertEqual(DashboardLayoutPolicy.recentLogsVisibleLimit, 200)
     }
 
@@ -28,12 +27,60 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertEqual(AppTextSizePolicy.decreased(0), -1)
     }
 
-    func testAppTextSizePolicyMapsLevelsToDynamicTypeSizes() {
-        XCTAssertEqual(AppTextSizePolicy.dynamicTypeSize(for: -3), .small)
-        XCTAssertEqual(AppTextSizePolicy.dynamicTypeSize(for: -1), .medium)
-        XCTAssertEqual(AppTextSizePolicy.dynamicTypeSize(for: 0), .large)
-        XCTAssertEqual(AppTextSizePolicy.dynamicTypeSize(for: 2), .xxLarge)
-        XCTAssertEqual(AppTextSizePolicy.dynamicTypeSize(for: 4), .xxxLarge)
+    func testAppTextSizePolicyScalesPointSizesByLevel() {
+        XCTAssertEqual(AppTextSizePolicy.pointSize(for: .caption, level: 0), 11, accuracy: 0.001)
+        XCTAssertEqual(AppTextSizePolicy.pointSize(for: .body, level: 0), 13, accuracy: 0.001)
+        XCTAssertEqual(AppTextSizePolicy.pointSize(for: .title2, level: 0), 17, accuracy: 0.001)
+        XCTAssertEqual(AppTextSizePolicy.pointSize(for: .body, level: 2), 16.3072, accuracy: 0.001)
+        XCTAssertEqual(AppTextSizePolicy.pointSize(for: .body, level: -2), 10.3635, accuracy: 0.001)
+        XCTAssertEqual(
+            AppTextSizePolicy.pointSize(for: .body, level: 9),
+            AppTextSizePolicy.pointSize(for: .body, level: AppTextSizePolicy.maximumLevel),
+            accuracy: 0.001
+        )
+    }
+
+    func testAppTextSizeControllerMutatesAndPersistsLevel() throws {
+        let suiteName = "MLXDashboardAppTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let controller = AppTextSizeController(defaults: defaults)
+        XCTAssertEqual(controller.level, AppTextSizePolicy.defaultLevel)
+
+        controller.increase()
+        controller.increase()
+        XCTAssertEqual(controller.level, 2)
+        XCTAssertEqual(defaults.integer(forKey: AppTextSizePolicy.storageKey), 2)
+
+        let restored = AppTextSizeController(defaults: defaults)
+        XCTAssertEqual(restored.level, 2)
+
+        restored.decrease()
+        XCTAssertEqual(restored.level, 1)
+
+        restored.reset()
+        XCTAssertEqual(restored.level, AppTextSizePolicy.defaultLevel)
+        XCTAssertEqual(defaults.integer(forKey: AppTextSizePolicy.storageKey), AppTextSizePolicy.defaultLevel)
+    }
+
+    func testAppTextSizeControllerClampsPersistedAndMutatedLevels() throws {
+        let suiteName = "MLXDashboardAppTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(100, forKey: AppTextSizePolicy.storageKey)
+
+        let controller = AppTextSizeController(defaults: defaults)
+        XCTAssertEqual(controller.level, AppTextSizePolicy.maximumLevel)
+
+        controller.increase()
+        XCTAssertEqual(controller.level, AppTextSizePolicy.maximumLevel)
+
+        controller.setLevel(-100)
+        XCTAssertEqual(controller.level, AppTextSizePolicy.minimumLevel)
+
+        controller.decrease()
+        XCTAssertEqual(controller.level, AppTextSizePolicy.minimumLevel)
     }
 
     func testDashboardSectionDefaultsToDashboardLandingView() {
