@@ -854,13 +854,21 @@ private struct InstalledModelsView: View {
                     viewModel.startRetrySelectedInstalledModelInstallWithoutXet()
                 }
                 .disabled(!viewModel.canRetrySelectedInstalledModelInstallWithoutXet)
-                Button("Set Default") { viewModel.setSelectedInstalledModelActive() }
+                Button("Set Default") {
+                    Task { await viewModel.setSelectedInstalledModelActiveAndRestartIfRunning() }
+                }
                     .disabled(!viewModel.canSetSelectedInstalledModelActive)
-                Button("Set Ask") { viewModel.assignSelectedInstalledModel(to: .ask) }
+                Button("Set Ask") {
+                    Task { await viewModel.assignSelectedInstalledModelAndRestartIfRunning(to: .ask) }
+                }
                     .disabled(!viewModel.canAssignSelectedInstalledModelToProviderRole)
-                Button("Set Plan") { viewModel.assignSelectedInstalledModel(to: .plan) }
+                Button("Set Plan") {
+                    Task { await viewModel.assignSelectedInstalledModelAndRestartIfRunning(to: .plan) }
+                }
                     .disabled(!viewModel.canAssignSelectedInstalledModelToProviderRole)
-                Button("Set Coding") { viewModel.assignSelectedInstalledModel(to: .coding) }
+                Button("Set Coding") {
+                    Task { await viewModel.assignSelectedInstalledModelAndRestartIfRunning(to: .coding) }
+                }
                     .disabled(!viewModel.canAssignSelectedInstalledModelToProviderRole)
                 Button("Delete from Cache", role: .destructive) {
                     isConfirmingCacheDelete = true

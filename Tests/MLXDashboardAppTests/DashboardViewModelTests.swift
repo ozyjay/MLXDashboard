@@ -498,6 +498,97 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertFalse(logText.contains("Restarted Ask role server"))
     }
 
+    func testSettingDefaultModelRestartsRunningServerPoolWithNewModel() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let oldDefault = FakeManagedProcess()
+        let newDefault = FakeManagedProcess()
+        let serverPoolController = RoleServerPoolController(
+            processLauncher: FakeProcessLauncher(processes: [oldDefault, newDefault]),
+            portChecker: FakePortChecker(isAvailable: true),
+            healthChecker: FakeHealthChecker()
+        )
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [
+                "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+                "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: "")
+            ])),
+            serverPoolController: serverPoolController
+        )
+        viewModel.settings.activeModel = "mlx-community/Old"
+        viewModel.settings.providerPort = 0
+        viewModel.installedModels = [
+            ModelRecord(id: "mlx-community/New", status: .installed, localPath: "/tmp/new")
+        ]
+        viewModel.selectedInstalledModelID = "mlx-community/New"
+
+        await viewModel.startServer()
+        await viewModel.setSelectedInstalledModelActiveAndRestartIfRunning()
+        defer {
+            viewModel.stopProvider()
+            viewModel.stopServer()
+        }
+
+        XCTAssertTrue(oldDefault.wasTerminated)
+        XCTAssertTrue(newDefault.wasLaunched)
+        XCTAssertEqual(serverPoolController.defaultEndpoint?.modelID, "mlx-community/New")
+        XCTAssertEqual(newDefault.arguments, [
+            "-m", "mlx_lm", "server", "--host", "127.0.0.1", "--port", "8080", "--model", "mlx-community/New"
+        ])
+    }
+
+    func testAssigningRoleModelRestartsRunningRoleServerWithNewModel() async throws {
+        let paths = try temporaryAppPaths()
+        let python = paths.venvDirectory.appending(path: "bin/python")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: python.path, contents: Data())
+
+        let base = FakeManagedProcess()
+        let oldAsk = FakeManagedProcess()
+        let newAsk = FakeManagedProcess()
+        let serverPoolController = RoleServerPoolController(
+            processLauncher: FakeProcessLauncher(processes: [base, oldAsk, newAsk]),
+            portChecker: FakePortChecker(isAvailable: true),
+            healthChecker: FakeHealthChecker()
+        )
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [
+                "import mlx_lm": CommandResult(exitCode: 0, standardOutput: "", standardError: ""),
+                "import huggingface_hub": CommandResult(exitCode: 0, standardOutput: "", standardError: "")
+            ])),
+            serverPoolController: serverPoolController
+        )
+        viewModel.settings.activeModel = "mlx-community/Base"
+        viewModel.settings.providerRoleAssignments = ProviderRoleAssignments(ask: "mlx-community/OldAsk")
+        viewModel.settings.providerPort = 0
+        viewModel.installedModels = [
+            ModelRecord(id: "mlx-community/NewAsk", status: .installed, localPath: "/tmp/new-ask")
+        ]
+        viewModel.selectedInstalledModelID = "mlx-community/NewAsk"
+
+        await viewModel.startServer()
+        await viewModel.assignSelectedInstalledModelAndRestartIfRunning(to: .ask)
+        defer {
+            viewModel.stopProvider()
+            viewModel.stopServer()
+        }
+
+        XCTAssertFalse(base.wasTerminated)
+        XCTAssertTrue(oldAsk.wasTerminated)
+        XCTAssertTrue(newAsk.wasLaunched)
+        XCTAssertEqual(serverPoolController.endpoint(for: .ask)?.modelID, "mlx-community/NewAsk")
+        XCTAssertEqual(newAsk.arguments, [
+            "-m", "mlx_lm", "server", "--host", "127.0.0.1", "--port", "8081", "--model", "mlx-community/NewAsk"
+        ])
+    }
+
     func testProviderStartStopAvailabilityFollowsProviderState() throws {
         let paths = try temporaryAppPaths()
         let viewModel = DashboardViewModel(

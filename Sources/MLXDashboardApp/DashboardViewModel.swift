@@ -1096,6 +1096,16 @@ final class DashboardViewModel: ObservableObject {
         modelInstallMessage = "Set \(selectedInstalledModelID) as the default model."
     }
 
+    func setSelectedInstalledModelActiveAndRestartIfRunning() async {
+        let previousModel = settings.activeModel
+        let wasRunning = serverPoolController.state == .running
+
+        setSelectedInstalledModelActive()
+
+        guard wasRunning, settings.activeModel != previousModel else { return }
+        await restartServer()
+    }
+
     func assignSelectedInstalledModel(to role: ProviderModelRole) {
         guard let selectedInstalledModelID,
               selectedInstalledModelIsInstalled
@@ -1109,6 +1119,18 @@ final class DashboardViewModel: ObservableObject {
         saveSettings()
         modelInstallMessage = "Assigned \(selectedInstalledModelID) to \(role.displayName)."
         telemetry.appendLog("Assigned \(selectedInstalledModelID) to provider role \(role.rawValue)")
+    }
+
+    func assignSelectedInstalledModelAndRestartIfRunning(to role: ProviderModelRole) async {
+        let previousModel = settings.providerRoleAssignments.model(for: role)
+        let wasRunning = serverPoolController.state == .running
+
+        assignSelectedInstalledModel(to: role)
+
+        guard wasRunning,
+              settings.providerRoleAssignments.model(for: role) != previousModel
+        else { return }
+        await restartRoleServer(role)
     }
 
     func deleteSelectedInstalledModelFromCache() {
