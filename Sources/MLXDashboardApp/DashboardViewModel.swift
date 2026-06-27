@@ -269,6 +269,14 @@ final class DashboardViewModel: ObservableObject {
         settings.providerBaseURL.absoluteString
     }
 
+    var providerOpenAIBaseURL: String {
+        settings.providerOpenAIBaseURL.absoluteString
+    }
+
+    var providerMLXChatSmokeTestCommand: String {
+        "swift run mlxchat --base-url \(providerBaseURL) --json"
+    }
+
     var providerDebugLogPath: String {
         environmentManager.paths.logsDirectory.appending(path: "provider-debug.jsonl").path
     }

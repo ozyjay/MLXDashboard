@@ -77,10 +77,13 @@ final class ProviderRouterTests: XCTestCase {
 
         XCTAssertEqual(try modelIDs(in: models.body), ["mlx-ask", "mlx-plan", "mlx-coding", "mlx-community/Tiny"])
         XCTAssertEqual(try modelIDs(in: v0Models.body), ["mlx-ask", "mlx-plan", "mlx-coding", "mlx-community/Tiny"])
+        XCTAssertFalse(try modelIDs(in: models.body).contains("mlx-fast"))
+        XCTAssertFalse(try modelIDs(in: v0Models.body).contains("mlx-fast"))
 
         let tagsJSON = try JSONSerialization.jsonObject(with: tags.body) as? [String: Any]
         let tagModels = try XCTUnwrap(tagsJSON?["models"] as? [[String: Any]])
         XCTAssertEqual(tagModels.compactMap { $0["name"] as? String }, ["mlx-ask", "mlx-plan", "mlx-coding", "mlx-community/Tiny"])
+        XCTAssertFalse(tagModels.compactMap { $0["name"] as? String }.contains("mlx-fast"))
         XCTAssertEqual(upstream.requests, [])
     }
 
@@ -146,6 +149,45 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(metadataJSON?["fallback_reason"] as? String, "role server unavailable; using active model")
     }
 
+    func testProviderAliasMetadataIncludesRoleEndpointRoutingState() async throws {
+        let router = ProviderRouter(
+            upstream: FakeUpstream(),
+            activeModelProvider: { "mlx-community/Gemma" },
+            roleAssignmentsProvider: {
+                ProviderRoleAssignments(coding: "mlx-community/Coder")
+            },
+            defaultEndpointProvider: {
+                ProviderUpstreamEndpoint(
+                    modelID: "mlx-community/Gemma",
+                    baseURL: URL(string: "http://127.0.0.1:8080")!,
+                    port: 8080
+                )
+            },
+            roleEndpointProvider: { role in
+                guard role == .coding else { return nil }
+                return ProviderUpstreamEndpoint(
+                    modelID: "mlx-community/Coder",
+                    baseURL: URL(string: "http://127.0.0.1:8081")!,
+                    port: 8081
+                )
+            }
+        )
+
+        let metadata = try await router.handle(
+            ProviderRequest(method: "GET", path: "/provider/v1/models/mlx-coding", headers: [:], body: Data())
+        )
+
+        XCTAssertEqual(metadata.status, 200)
+        let metadataJSON = try JSONSerialization.jsonObject(with: metadata.body) as? [String: Any]
+        XCTAssertEqual(metadataJSON?["id"] as? String, "mlx-coding")
+        XCTAssertEqual(metadataJSON?["role"] as? String, "coding")
+        XCTAssertEqual(metadataJSON?["resolved_model"] as? String, "mlx-community/Coder")
+        XCTAssertEqual(metadataJSON?["effective_model"] as? String, "mlx-community/Coder")
+        XCTAssertEqual(metadataJSON?["routing_state"] as? String, "role_endpoint")
+        XCTAssertEqual(metadataJSON?["effective_port"] as? Int, 8081)
+        XCTAssertNil(metadataJSON?["fallback_reason"])
+    }
+
     func testProviderServesConfiguredActiveModelByID() async throws {
         let upstream = FakeUpstream()
         let router = ProviderRouter(
@@ -173,7 +215,16 @@ final class ProviderRouterTests: XCTestCase {
         let upstream = FakeUpstream()
         let router = ProviderRouter(
             upstream: upstream,
-            activeModelProvider: { "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit" }
+            activeModelProvider: { "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit" },
+            modelMetadataProvider: {
+                [
+                    "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit": ProviderModelMetadata(
+                        modelType: "mistral3",
+                        maxContextLength: 65536,
+                        maxOutputTokens: 8192
+                    )
+                ]
+            }
         )
 
         let models = try await router.handle(
@@ -192,8 +243,37 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(model["generation_type"] as? String, "text")
         XCTAssertEqual(model["model_family"] as? String, "chat")
         XCTAssertEqual(model["state"] as? String, "loaded")
-        XCTAssertEqual(model["max_context_length"] as? Int, 32768)
+        XCTAssertEqual(model["runtime"] as? String, "mlx_lm")
+        XCTAssertEqual(model["model_type"] as? String, "mistral3")
+        XCTAssertEqual(model["supports_streaming"] as? Bool, true)
+        XCTAssertEqual(model["supported_generation_modes"] as? [String], ["autoregressive"])
+        XCTAssertEqual(model["max_context_length"] as? Int, 65536)
+        XCTAssertEqual(model["max_output_tokens"] as? Int, 8192)
         XCTAssertEqual(upstream.requests, [])
+    }
+
+    func testProviderModelMetadataOmitsOptionalTokenLimitsWhenUnavailable() async throws {
+        let router = ProviderRouter(
+            upstream: FakeUpstream(),
+            activeModelProvider: { "mlx-community/Tiny" },
+            modelMetadataProvider: {
+                [
+                    "mlx-community/Tiny": ProviderModelMetadata()
+                ]
+            }
+        )
+
+        let response = try await router.handle(
+            ProviderRequest(method: "GET", path: "/provider/v1/models/mlx-community%2FTiny", headers: [:], body: Data())
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let model = try JSONSerialization.jsonObject(with: response.body) as? [String: Any]
+        XCTAssertEqual(model?["runtime"] as? String, "mlx_lm")
+        XCTAssertEqual(model?["supports_streaming"] as? Bool, true)
+        XCTAssertEqual(model?["supported_generation_modes"] as? [String], ["autoregressive"])
+        XCTAssertNil(model?["max_context_length"])
+        XCTAssertNil(model?["max_output_tokens"])
     }
 
     func testProviderServesCanonicalProviderModelMetadataRoutes() async throws {
@@ -202,6 +282,15 @@ final class ProviderRouterTests: XCTestCase {
         let router = ProviderRouter(
             upstream: upstream,
             activeModelProvider: { "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit" },
+            modelMetadataProvider: {
+                [
+                    "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit": ProviderModelMetadata(
+                        modelType: "mistral3",
+                        maxContextLength: 65536,
+                        maxOutputTokens: 8192
+                    )
+                ]
+            },
             eventLogger: logger.log
         )
 
@@ -228,6 +317,12 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(modelJSON?["generation_type"] as? String, "text")
         XCTAssertEqual(modelJSON?["model_family"] as? String, "chat")
         XCTAssertEqual(modelJSON?["state"] as? String, "loaded")
+        XCTAssertEqual(modelJSON?["runtime"] as? String, "mlx_lm")
+        XCTAssertEqual(modelJSON?["model_type"] as? String, "mistral3")
+        XCTAssertEqual(modelJSON?["supports_streaming"] as? Bool, true)
+        XCTAssertEqual(modelJSON?["supported_generation_modes"] as? [String], ["autoregressive"])
+        XCTAssertEqual(modelJSON?["max_context_length"] as? Int, 65536)
+        XCTAssertEqual(modelJSON?["max_output_tokens"] as? Int, 8192)
         XCTAssertTrue(logger.messages.contains("Provider served GET /provider/v1/models"))
         XCTAssertTrue(logger.messages.contains("Provider served GET /provider/v1/models/mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit"))
         XCTAssertEqual(upstream.requests, [])
@@ -318,6 +413,9 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(ask["quantization"] as? String, "MXFP4-Q8")
         XCTAssertEqual(ask["resolved_model"] as? String, "mlx-community/gpt-oss-20b-MXFP4-Q8")
         XCTAssertEqual(ask["role"] as? String, "ask")
+        XCTAssertEqual(ask["runtime"] as? String, "mlx_lm")
+        XCTAssertEqual(ask["supports_streaming"] as? Bool, true)
+        XCTAssertEqual(ask["supported_generation_modes"] as? [String], ["autoregressive"])
         XCTAssertEqual(plan["arch"] as? String, "qwen")
         XCTAssertEqual(plan["quantization"] as? String, "4bit")
         XCTAssertEqual(plan["resolved_model"] as? String, "mlx-community/Qwen3.6-35B-A3B-4bit")
@@ -329,6 +427,9 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(askDetail?["id"] as? String, "mlx-ask")
         XCTAssertEqual(askDetail?["resolved_model"] as? String, "mlx-community/gpt-oss-20b-MXFP4-Q8")
         XCTAssertEqual(askDetail?["arch"] as? String, "gpt-oss")
+        XCTAssertEqual(askDetail?["runtime"] as? String, "mlx_lm")
+        XCTAssertEqual(askDetail?["supports_streaming"] as? Bool, true)
+        XCTAssertEqual(askDetail?["supported_generation_modes"] as? [String], ["autoregressive"])
         XCTAssertEqual(upstream.requests, [])
     }
 
@@ -2487,6 +2588,18 @@ final class ProviderRouterTests: XCTestCase {
 
         XCTAssertEqual(firstLine, #"data: {"choices":[{"delta":{"content":"Hel"},"finish_reason":null}]}"#)
         XCTAssertLessThan(elapsed, 0.8)
+    }
+
+    func testNIOProviderServerIgnoresUnsafeHostAndPinsToLocalhost() {
+        let router = ProviderRouter(
+            upstream: FakeUpstream(),
+            activeModelProvider: { "mlx-community/Tiny" }
+        )
+        let server = NIOProviderServer(host: "0.0.0.0", port: 0, router: router)
+        defer { try? server.stop() }
+
+        let host = Mirror(reflecting: server).children.first { $0.label == "host" }?.value as? String
+        XCTAssertEqual(host, "127.0.0.1")
     }
 
     private func modelIDs(in data: Data) throws -> [String] {

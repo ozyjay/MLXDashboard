@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import MLXCore
 import MLXPythonBridge
 import MLXServerControl
@@ -1095,8 +1096,15 @@ private struct ProviderTab: View {
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 16) {
                 Text("MLXChat Provider").appFont(.title2, weight: .bold)
-                LabeledContent("Base URL", value: viewModel.providerBaseURL)
                 LabeledContent("Access", value: "Localhost only")
+                GroupBox("MLXChat handoff") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        handoffRow("MLXChat base URL", value: viewModel.providerBaseURL, copyTitle: "Copy URL")
+                        handoffRow("OpenAI-compatible base URL", value: viewModel.providerOpenAIBaseURL, copyTitle: "Copy URL")
+                        handoffRow("CLI smoke test", value: viewModel.providerMLXChatSmokeTestCommand, copyTitle: "Copy Command")
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 GroupBox("Role assignments") {
                     Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
                         roleRow("Ask", viewModel.settings.providerRoleAssignments.ask)
@@ -1131,6 +1139,10 @@ private struct ProviderTab: View {
                     )
                 )
                 .toggleStyle(.switch)
+                Text("When enabled, Dashboard writes local request and response payload bodies to the provider debug log. Headers are redacted; prompt and reply text are not.")
+                    .appFont(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text("Debug log: \(viewModel.providerDebugLogPath)")
                     .appFont(.caption)
                     .foregroundStyle(.secondary)
@@ -1158,6 +1170,29 @@ private struct ProviderTab: View {
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    @ViewBuilder
+    private func handoffRow(_ label: String, value: String, copyTitle: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(label)
+                .foregroundStyle(.secondary)
+                .frame(width: 180, alignment: .leading)
+            Text(value)
+                .textSelection(.enabled)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                copyToPasteboard(value)
+            } label: {
+                Label(copyTitle, systemImage: "doc.on.doc")
+            }
+        }
+    }
+
+    private func copyToPasteboard(_ value: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
     }
 
     @ViewBuilder

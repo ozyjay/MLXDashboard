@@ -608,6 +608,23 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertTrue(viewModel.canStopProvider)
     }
 
+    func testProviderHandoffStringsUseLocalhostRootURL() throws {
+        let paths = try temporaryAppPaths()
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+        )
+        viewModel.settings.providerPort = 18123
+
+        XCTAssertEqual(viewModel.providerBaseURL, "http://127.0.0.1:18123")
+        XCTAssertEqual(viewModel.providerOpenAIBaseURL, "http://127.0.0.1:18123/v1")
+        XCTAssertEqual(
+            viewModel.providerMLXChatSmokeTestCommand,
+            "swift run mlxchat --base-url http://127.0.0.1:18123 --json"
+        )
+    }
+
     func testRunningProviderUsesActiveModelSelectedAfterProviderStart() async throws {
         let paths = try temporaryAppPaths()
         let registry = ModelRegistry(fileURL: paths.modelRegistryFile)

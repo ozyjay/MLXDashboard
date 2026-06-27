@@ -607,8 +607,19 @@ public struct ProviderRouter: Sendable {
             "model_family": metadata.modelFamily.rawValue,
             "quantization": quantization(for: metadataModel),
             "state": metadata.state.rawValue,
-            "max_context_length": 32768
+            "runtime": metadata.runtime.rawValue,
+            "supports_streaming": metadata.supportsStreaming,
+            "supported_generation_modes": metadata.supportedGenerationModes.map(\.rawValue)
         ]
+        if let modelType = metadata.modelType {
+            payload["model_type"] = modelType
+        }
+        if let maxContextLength = metadata.maxContextLength {
+            payload["max_context_length"] = maxContextLength
+        }
+        if let maxOutputTokens = metadata.maxOutputTokens {
+            payload["max_output_tokens"] = maxOutputTokens
+        }
         if metadataModel != model {
             payload["resolved_model"] = metadataModel
         }

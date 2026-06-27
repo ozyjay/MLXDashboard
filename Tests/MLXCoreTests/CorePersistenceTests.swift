@@ -74,8 +74,28 @@ final class CorePersistenceTests: XCTestCase {
         XCTAssertEqual(settings.mlxBaseURL.absoluteString, "http://127.0.0.1:8080")
     }
 
-    func testDashboardSettingsDefaultsProviderDebugCaptureOn() {
-        XCTAssertTrue(DashboardSettings().providerDebugCaptureEnabled)
+    func testDashboardSettingsDefaultsProviderDebugCaptureOff() {
+        XCTAssertFalse(DashboardSettings().providerDebugCaptureEnabled)
+    }
+
+    func testDashboardSettingsPreservesExplicitProviderDebugCaptureOn() throws {
+        let json = Data(
+            #"{"activeModel":"mlx-community/Tiny","providerDebugCaptureEnabled":true}"#.utf8
+        )
+
+        let settings = try JSONDecoder().decode(DashboardSettings.self, from: json)
+
+        XCTAssertTrue(settings.providerDebugCaptureEnabled)
+    }
+
+    func testDashboardSettingsDefaultsMissingProviderDebugCaptureOff() throws {
+        let json = Data(
+            #"{"activeModel":"mlx-community/Tiny"}"#.utf8
+        )
+
+        let settings = try JSONDecoder().decode(DashboardSettings.self, from: json)
+
+        XCTAssertFalse(settings.providerDebugCaptureEnabled)
     }
 
     func testDashboardSettingsDefaultsProviderRoleAssignmentsEmptyWhenMissing() throws {

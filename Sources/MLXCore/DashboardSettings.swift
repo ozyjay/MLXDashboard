@@ -300,7 +300,7 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
         providerHost: String = DashboardSettings.localMLXHost,
         providerPort: Int = 8123,
         serverFlags: [String] = [],
-        providerDebugCaptureEnabled: Bool = true,
+        providerDebugCaptureEnabled: Bool = false,
         providerRoleAssignments: ProviderRoleAssignments = ProviderRoleAssignments(),
         providerGenerationDefaults: ProviderRoleGenerationDefaults = .recommendedDefault,
         textDiffusionDefaults: TextDiffusionGenerationSettings = TextDiffusionGenerationSettings(),
@@ -338,7 +338,7 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
         providerHost: String = DashboardSettings.localMLXHost,
         providerPort: Int = 8123,
         serverFlags: [String] = [],
-        providerDebugCaptureEnabled: Bool = true,
+        providerDebugCaptureEnabled: Bool = false,
         providerRoleAssignments: ProviderRoleAssignments = ProviderRoleAssignments(),
         downloadSettings: HuggingFaceDownloadSettings
     ) {
@@ -382,7 +382,7 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
             mlxPort: try container.decodeIfPresent(Int.self, forKey: .mlxPort) ?? 8080,
             providerPort: try container.decodeIfPresent(Int.self, forKey: .providerPort) ?? 8123,
             serverFlags: try container.decodeIfPresent([String].self, forKey: .serverFlags) ?? [],
-            providerDebugCaptureEnabled: try container.decodeIfPresent(Bool.self, forKey: .providerDebugCaptureEnabled) ?? true,
+            providerDebugCaptureEnabled: try container.decodeIfPresent(Bool.self, forKey: .providerDebugCaptureEnabled) ?? false,
             providerRoleAssignments: try container.decodeIfPresent(ProviderRoleAssignments.self, forKey: .providerRoleAssignments) ?? ProviderRoleAssignments(),
             providerGenerationDefaults: try container.decodeIfPresent(ProviderRoleGenerationDefaults.self, forKey: .providerGenerationDefaults) ?? .recommendedDefault,
             textDiffusionDefaults: try container.decodeIfPresent(TextDiffusionGenerationSettings.self, forKey: .textDiffusionDefaults) ?? TextDiffusionGenerationSettings(),
