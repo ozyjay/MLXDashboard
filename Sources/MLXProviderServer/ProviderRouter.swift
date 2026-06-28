@@ -1114,7 +1114,7 @@ public struct ProviderRouter: Sendable {
             payload["messages"] = normalizedMessages
             eventLogger("Provider normalized \(request.method) \(request.path) messages for MLX upstream compatibility")
         }
-        _ = removeStreamOptions(from: &payload)
+        _ = normaliseStreamOptions(from: &payload)
         if removeToolCallingFields(from: &payload) {
             prependSystemMessage(
                 "Tool calls are not available through this local MLX provider. Answer in text instead of calling tools.",
@@ -1506,8 +1506,17 @@ public struct ProviderRouter: Sendable {
         return input.isEmpty ? nil : input
     }
 
-    private func removeStreamOptions(from payload: inout [String: Any]) -> Bool {
-        payload.removeValue(forKey: "stream_options") != nil
+    private func normaliseStreamOptions(from payload: inout [String: Any]) -> Bool {
+        guard let streamOptions = payload["stream_options"] as? [String: Any] else {
+            return false
+        }
+
+        if let includeUsage = streamOptions["include_usage"] as? Bool {
+            payload["stream_options"] = ["include_usage": includeUsage]
+        } else {
+            payload.removeValue(forKey: "stream_options")
+        }
+        return true
     }
 
     private func removeToolCallingFields(from payload: inout [String: Any]) -> Bool {

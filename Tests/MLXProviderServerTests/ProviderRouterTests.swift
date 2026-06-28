@@ -2205,7 +2205,8 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertNil(proxiedJSON?["tools"])
         XCTAssertNil(proxiedJSON?["tool_choice"])
         XCTAssertNil(proxiedJSON?["parallel_tool_calls"])
-        XCTAssertNil(proxiedJSON?["stream_options"])
+        let streamOptions = try XCTUnwrap(proxiedJSON?["stream_options"] as? [String: Any])
+        XCTAssertEqual(streamOptions["include_usage"] as? Bool, true)
         let messages = try XCTUnwrap(proxiedJSON?["messages"] as? [[String: Any]])
         XCTAssertEqual(messages.first?["role"] as? String, "system")
         XCTAssertEqual(messages.first?["content"] as? String, "Tool calls are not available through this local MLX provider. Answer in text instead of calling tools.")
@@ -2296,7 +2297,8 @@ final class ProviderRouterTests: XCTestCase {
 
         let proxied = try XCTUnwrap(upstream.requests.last)
         let proxiedJSON = try JSONSerialization.jsonObject(with: proxied.body) as? [String: Any]
-        XCTAssertNil(proxiedJSON?["stream_options"])
+        let streamOptions = try XCTUnwrap(proxiedJSON?["stream_options"] as? [String: Any])
+        XCTAssertEqual(streamOptions["include_usage"] as? Bool, true)
         let messages = try XCTUnwrap(proxiedJSON?["messages"] as? [[String: Any]])
         XCTAssertEqual(messages.first?["role"] as? String, "user")
         XCTAssertFalse(String(data: proxied.body, encoding: .utf8)?.contains("Tool calls are not available") == true)
