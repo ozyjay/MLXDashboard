@@ -1094,6 +1094,135 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(decision["upstream_model"] as? String, "mlx-community/Loaded")
     }
 
+    func testProviderRoutingDecisionPlanModePromptOverridesCodingAliasRole() async throws {
+        let root = try temporaryDirectory()
+        let debugFile = root.appending(path: "provider-debug.jsonl")
+        let router = ProviderRouter(
+            upstream: FakeUpstream(),
+            activeModelProvider: { "mlx-community/Loaded" },
+            roleAssignmentsProvider: {
+                ProviderRoleAssignments(plan: "mlx-community/Plan", coding: "mlx-community/Coder")
+            },
+            debugRecorder: ProviderDebugRecorder(fileURL: debugFile, isEnabled: { true })
+        )
+
+        _ = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/v1/chat/completions",
+                headers: [:],
+                body: Data(#"{"model":"mlx-coding","messages":[{"role":"developer","content":"You are in plan mode. Think first."},{"role":"user","content":"hi"}],"stream":false,"tools":[{"type":"function","function":{"name":"write_file"}}]}"#.utf8)
+            )
+        )
+
+        let record = try lastDebugRecord(in: debugFile)
+        let decision = try XCTUnwrap(record["routing_decision"] as? [String: Any])
+        XCTAssertEqual(decision["selected_alias"] as? String, "mlx-coding")
+        XCTAssertEqual(decision["inferred_role"] as? String, "plan")
+        XCTAssertEqual(decision["desired_role_model"] as? String, "mlx-community/Plan")
+        XCTAssertEqual(decision["upstream_model"] as? String, "mlx-community/Loaded")
+    }
+
+    func testProviderRoutingDecisionUsesModelAdviceForPlanningPrompts() async throws {
+        let root = try temporaryDirectory()
+        let debugFile = root.appending(path: "provider-debug.jsonl")
+        let upstream = FakeUpstream(
+            chatCompletionBody: Data(
+                #"{"choices":[{"message":{"content":"{\"mode\":\"plan\",\"confidence\":0.9,\"reason\":\"The prompt asks for a careful plan.\"}"}}]}"#.utf8
+            )
+        )
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Loaded" },
+            roleAssignmentsProvider: {
+                ProviderRoleAssignments(ask: "mlx-community/Ask", plan: "mlx-community/Plan", coding: "mlx-community/Coder")
+            },
+            defaultEndpointProvider: {
+                ProviderUpstreamEndpoint(
+                    modelID: "mlx-community/Ask",
+                    baseURL: URL(string: "http://127.0.0.1:8080")!,
+                    port: 8080
+                )
+            },
+            roleEndpointProvider: { role in
+                guard role == .ask else { return nil }
+                return ProviderUpstreamEndpoint(
+                    modelID: "mlx-community/Ask",
+                    baseURL: URL(string: "http://127.0.0.1:8080")!,
+                    port: 8080
+                )
+            },
+            debugRecorder: ProviderDebugRecorder(fileURL: debugFile, isEnabled: { true })
+        )
+
+        _ = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/v1/chat/completions",
+                headers: [:],
+                body: Data(#"{"model":"mlx-coding","messages":[{"role":"developer","content":"Think carefully before acting."},{"role":"user","content":"Map the repository and propose the implementation sequence."}],"stream":false}"#.utf8)
+            )
+        )
+
+        let record = try lastDebugRecord(in: debugFile)
+        let advice = try XCTUnwrap(record["mode_advice"] as? [String: Any])
+        XCTAssertEqual(advice["suggested_mode"] as? String, "plan")
+        let decision = try XCTUnwrap(record["routing_decision"] as? [String: Any])
+        XCTAssertEqual(decision["selected_alias"] as? String, "mlx-coding")
+        XCTAssertEqual(decision["inferred_role"] as? String, "plan")
+        XCTAssertEqual(decision["desired_role_model"] as? String, "mlx-community/Plan")
+    }
+
+    func testProviderRoutingDecisionDoesNotUseModeAdviceWhenDisabled() async throws {
+        let root = try temporaryDirectory()
+        let debugFile = root.appending(path: "provider-debug.jsonl")
+        let upstream = FakeUpstream(
+            chatCompletionBody: Data(
+                #"{"choices":[{"message":{"content":"{\"mode\":\"plan\",\"confidence\":0.9,\"reason\":\"The prompt asks for a careful plan.\"}"}}]}"#.utf8
+            )
+        )
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Loaded" },
+            roleAssignmentsProvider: {
+                ProviderRoleAssignments(ask: "mlx-community/Ask", plan: "mlx-community/Plan", coding: "mlx-community/Coder")
+            },
+            modeAdviceStrategyProvider: { .disabled },
+            defaultEndpointProvider: {
+                ProviderUpstreamEndpoint(
+                    modelID: "mlx-community/Ask",
+                    baseURL: URL(string: "http://127.0.0.1:8080")!,
+                    port: 8080
+                )
+            },
+            roleEndpointProvider: { role in
+                guard role == .ask else { return nil }
+                return ProviderUpstreamEndpoint(
+                    modelID: "mlx-community/Ask",
+                    baseURL: URL(string: "http://127.0.0.1:8080")!,
+                    port: 8080
+                )
+            },
+            debugRecorder: ProviderDebugRecorder(fileURL: debugFile, isEnabled: { true })
+        )
+
+        _ = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/v1/chat/completions",
+                headers: [:],
+                body: Data(#"{"model":"mlx-coding","messages":[{"role":"developer","content":"Think carefully before acting."},{"role":"user","content":"Map the repository and propose the implementation sequence."}],"stream":false}"#.utf8)
+            )
+        )
+
+        let record = try lastDebugRecord(in: debugFile)
+        XCTAssertNil(record["mode_advice"])
+        let decision = try XCTUnwrap(record["routing_decision"] as? [String: Any])
+        XCTAssertEqual(decision["selected_alias"] as? String, "mlx-coding")
+        XCTAssertEqual(decision["inferred_role"] as? String, "coding")
+        XCTAssertEqual(decision["desired_role_model"] as? String, "mlx-community/Coder")
+    }
+
     func testProviderAppliesRoleGenerationDefaultsToAliasRequests() async throws {
         let upstream = FakeUpstream()
         let router = ProviderRouter(

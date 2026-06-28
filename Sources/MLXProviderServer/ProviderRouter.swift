@@ -12,6 +12,7 @@ public struct ProviderRouter: Sendable {
     private let modelMetadataProvider: @Sendable () -> [String: ProviderModelMetadata]
     private let roleAssignmentsProvider: @Sendable () -> ProviderRoleAssignments
     private let generationDefaultsProvider: @Sendable () -> ProviderRoleGenerationDefaults
+    private let modeAdviceStrategyProvider: @Sendable () -> ModeAdviceStrategy
     private let defaultEndpointProvider: @Sendable () -> ProviderUpstreamEndpoint?
     private let roleEndpointProvider: @Sendable (ProviderModelRole) -> ProviderUpstreamEndpoint?
     private let modeAdviceTimeoutNanoseconds: UInt64
@@ -40,6 +41,7 @@ public struct ProviderRouter: Sendable {
         modelMetadataProvider: @escaping @Sendable () -> [String: ProviderModelMetadata] = { [:] },
         roleAssignmentsProvider: @escaping @Sendable () -> ProviderRoleAssignments = { ProviderRoleAssignments() },
         generationDefaultsProvider: @escaping @Sendable () -> ProviderRoleGenerationDefaults = { .recommendedDefault },
+        modeAdviceStrategyProvider: @escaping @Sendable () -> ModeAdviceStrategy = { .automatic },
         defaultEndpointProvider: @escaping @Sendable () -> ProviderUpstreamEndpoint?,
         roleEndpointProvider: @escaping @Sendable (ProviderModelRole) -> ProviderUpstreamEndpoint?,
         modeAdviceTimeoutNanoseconds: UInt64 = 6_000_000_000,
@@ -53,6 +55,7 @@ public struct ProviderRouter: Sendable {
             modelMetadataProvider: modelMetadataProvider,
             roleAssignmentsProvider: roleAssignmentsProvider,
             generationDefaultsProvider: generationDefaultsProvider,
+            modeAdviceStrategyProvider: modeAdviceStrategyProvider,
             defaultEndpointProvider: defaultEndpointProvider,
             roleEndpointProvider: roleEndpointProvider,
             modeAdviceTimeoutNanoseconds: modeAdviceTimeoutNanoseconds,
@@ -67,6 +70,7 @@ public struct ProviderRouter: Sendable {
         modelMetadataProvider: @escaping @Sendable () -> [String: ProviderModelMetadata] = { [:] },
         roleAssignmentsProvider: @escaping @Sendable () -> ProviderRoleAssignments = { ProviderRoleAssignments() },
         generationDefaultsProvider: @escaping @Sendable () -> ProviderRoleGenerationDefaults = { .recommendedDefault },
+        modeAdviceStrategyProvider: @escaping @Sendable () -> ModeAdviceStrategy = { .automatic },
         modeAdviceTimeoutNanoseconds: UInt64 = 6_000_000_000,
         eventLogger: @escaping @Sendable (String) -> Void = { _ in },
         debugRecorder: ProviderDebugRecorder? = nil
@@ -78,6 +82,7 @@ public struct ProviderRouter: Sendable {
             modelMetadataProvider: modelMetadataProvider,
             roleAssignmentsProvider: roleAssignmentsProvider,
             generationDefaultsProvider: generationDefaultsProvider,
+            modeAdviceStrategyProvider: modeAdviceStrategyProvider,
             defaultEndpointProvider: { nil },
             roleEndpointProvider: { _ in nil },
             modeAdviceTimeoutNanoseconds: modeAdviceTimeoutNanoseconds,
@@ -93,6 +98,7 @@ public struct ProviderRouter: Sendable {
         modelMetadataProvider: @escaping @Sendable () -> [String: ProviderModelMetadata],
         roleAssignmentsProvider: @escaping @Sendable () -> ProviderRoleAssignments,
         generationDefaultsProvider: @escaping @Sendable () -> ProviderRoleGenerationDefaults,
+        modeAdviceStrategyProvider: @escaping @Sendable () -> ModeAdviceStrategy,
         defaultEndpointProvider: @escaping @Sendable () -> ProviderUpstreamEndpoint?,
         roleEndpointProvider: @escaping @Sendable (ProviderModelRole) -> ProviderUpstreamEndpoint?,
         modeAdviceTimeoutNanoseconds: UInt64,
@@ -105,6 +111,7 @@ public struct ProviderRouter: Sendable {
         self.modelMetadataProvider = modelMetadataProvider
         self.roleAssignmentsProvider = roleAssignmentsProvider
         self.generationDefaultsProvider = generationDefaultsProvider
+        self.modeAdviceStrategyProvider = modeAdviceStrategyProvider
         self.defaultEndpointProvider = defaultEndpointProvider
         self.roleEndpointProvider = roleEndpointProvider
         self.modeAdviceTimeoutNanoseconds = modeAdviceTimeoutNanoseconds
@@ -296,7 +303,7 @@ public struct ProviderRouter: Sendable {
         }
 
         let usageEventsRequested = shouldEmitMLXUsageEvents(for: request)
-        let routed = requestWithSelectedUpstreamIfAvailable(request)
+        let routed = await requestWithSelectedUpstreamIfAvailable(request)
         let proxiedRequest = routed.request
         let upstreamEndpoint = routed.upstreamEndpoint ?? defaultUpstreamEndpoint()
         do {
@@ -923,7 +930,7 @@ public struct ProviderRouter: Sendable {
     ) async throws -> (response: ProviderResponse, model: String, debugContext: ProviderDebugContext) {
         let chatBody = try JSONSerialization.data(withJSONObject: payload)
         let request = ProviderRequest(method: "POST", path: "/v1/chat/completions", headers: headers, body: chatBody)
-        let routed = requestWithSelectedUpstreamIfAvailable(request)
+        let routed = await requestWithSelectedUpstreamIfAvailable(request)
         let selectedModel = selectedModel(from: routed.request.body) ?? fallbackModel
         let response = try await proxy(routed.request, to: routed.upstreamEndpoint ?? defaultUpstreamEndpoint())
         return (response, selectedModel, routed.debugContext)
@@ -1037,7 +1044,7 @@ public struct ProviderRouter: Sendable {
         return jsonResponse(modelPayload(requestedModel))
     }
 
-    private func requestWithSelectedUpstreamIfAvailable(_ request: ProviderRequest) -> (
+    private func requestWithSelectedUpstreamIfAvailable(_ request: ProviderRequest) async -> (
         request: ProviderRequest,
         debugContext: ProviderDebugContext,
         upstreamEndpoint: ProviderUpstreamEndpoint?
@@ -1055,15 +1062,21 @@ public struct ProviderRouter: Sendable {
 
         var payload = object
         let activeModel = activeModel()
+        let modeAdvice = await routingModeAdvice(
+            selectedModel: selectedModel,
+            messagesValue: object["messages"]
+        )
         let routingDecision = routingDecision(
             selectedModel: selectedModel,
             payload: object,
             activeModel: activeModel,
             defaultEndpoint: defaultUpstreamEndpoint(),
-            canProxyWithoutEndpoint: legacyUpstream != nil
+            canProxyWithoutEndpoint: legacyUpstream != nil,
+            modeAdviceRole: modeAdvice.role
         )
         let upstreamEndpoint = routingDecision.upstreamEndpoint
         debugContext.routingDecision = routingDecision
+        debugContext.modeAdvice = modeAdvice.advice
         if let selectedModel,
            Self.acceptedModeAliases.contains(selectedModel) {
             debugContext.aliasResolution = "\(selectedModel) -> \(routingDecision.upstreamModel)"
@@ -1289,7 +1302,8 @@ public struct ProviderRouter: Sendable {
         payload: [String: Any],
         activeModel: String?,
         defaultEndpoint: ProviderUpstreamEndpoint?,
-        canProxyWithoutEndpoint: Bool
+        canProxyWithoutEndpoint: Bool,
+        modeAdviceRole: ProviderModelRole? = nil
     ) -> ProviderRoutingDecision {
         func fallbackReasonForUnavailableRoleEndpoint(using defaultEndpoint: ProviderUpstreamEndpoint?) -> String {
             guard let defaultEndpoint else {
@@ -1304,7 +1318,9 @@ public struct ProviderRouter: Sendable {
         let selectedAlias = selectedModel.flatMap { Self.acceptedModeAliases.contains($0) ? $0 : nil }
         let aliasRole = selectedAlias.flatMap(role(forAlias:))
         let inferredRole: ProviderModelRole?
-        if containsPlanningModePrompt(in: payload["messages"]) {
+        if let modeAdviceRole {
+            inferredRole = modeAdviceRole
+        } else if containsPlanningModePrompt(in: payload["messages"]) {
             inferredRole = .plan
         } else {
             inferredRole = aliasRole
@@ -1392,6 +1408,48 @@ public struct ProviderRouter: Sendable {
         )
     }
 
+    private func routingModeAdvice(
+        selectedModel: String?,
+        messagesValue: Any?
+    ) async -> (role: ProviderModelRole?, advice: ProviderModeAdvice?) {
+        guard let selectedModel,
+              Self.acceptedModeAliases.contains(selectedModel),
+              let currentMode = mode(forSelectedModel: selectedModel),
+              currentMode != ProviderModelRole.plan.rawValue
+        else { return (nil, nil) }
+
+        let strategy = modeAdviceStrategyProvider()
+        if strategy == .disabled {
+            return (nil, nil)
+        }
+
+        let heuristicRole: ProviderModelRole? = containsPlanningModePrompt(in: messagesValue) ? .plan : nil
+        if strategy == .heuristic {
+            return (heuristicRole, nil)
+        }
+
+        if let input = modeAdviceInput(from: messagesValue) {
+            let advice = await classifyModeAdviceWithTimeout(input: input, currentMode: currentMode)
+            if advice.suggestedMode == .unknown {
+                eventLogger("Provider routing mode advice unavailable: \(advice.reason)")
+            } else {
+                eventLogger(
+                    "Provider routing mode advice: suggested=\(advice.suggestedMode.rawValue), confidence=\(advice.confidence), current=\(advice.currentMode ?? "none")"
+                )
+            }
+            if advice.suggestedMode == .plan,
+               advice.confidence >= ProviderModeAdvice.switchConfidenceThreshold {
+                return (.plan, advice)
+            }
+            if strategy == .model {
+                return (nil, advice)
+            }
+            return (heuristicRole, advice)
+        }
+
+        return (heuristicRole, nil)
+    }
+
     private func role(forAlias alias: String) -> ProviderModelRole? {
         switch alias {
         case "mlx-ask":
@@ -1426,8 +1484,26 @@ public struct ProviderRouter: Sendable {
                   role == "developer" || role == "system",
                   let text = normalizedContent(message["content"] ?? "")
             else { return false }
-            return text.contains("You are in PLANNING mode") || text.contains("Mode: PLANNING")
+            let lowercased = text.lowercased()
+            return lowercased.contains("planning mode")
+                || lowercased.contains("plan mode")
+                || lowercased.contains("mode: planning")
+                || lowercased.contains("mode: plan")
         }
+    }
+
+    private func modeAdviceInput(from messagesValue: Any?) -> String? {
+        guard let messages = messagesValue as? [[String: Any]] else { return nil }
+        let texts = messages.compactMap { message -> String? in
+            guard let role = message["role"] as? String,
+                  role == "developer" || role == "system" || role == "user",
+                  let text = normalizedContent(message["content"] ?? "")?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !text.isEmpty
+            else { return nil }
+            return "\(role): \(text)"
+        }
+        let input = texts.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return input.isEmpty ? nil : input
     }
 
     private func removeStreamOptions(from payload: inout [String: Any]) -> Bool {

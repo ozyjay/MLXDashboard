@@ -95,6 +95,25 @@ private final class ProviderGenerationDefaultsState: @unchecked Sendable {
     }
 }
 
+private final class ProviderModeAdviceStrategyState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedStrategy: ModeAdviceStrategy
+
+    init(strategy: ModeAdviceStrategy) {
+        self.storedStrategy = strategy
+    }
+
+    var strategy: ModeAdviceStrategy {
+        lock.withLock { storedStrategy }
+    }
+
+    func update(_ strategy: ModeAdviceStrategy) {
+        lock.withLock {
+            storedStrategy = strategy
+        }
+    }
+}
+
 private final class ProviderUpstreamEndpointState: @unchecked Sendable {
     private let lock = NSLock()
     private var defaultEndpointValue: ProviderUpstreamEndpoint?
@@ -192,6 +211,7 @@ final class DashboardViewModel: ObservableObject {
     private let providerDebugCaptureState: ProviderDebugCaptureState
     private let providerRoleAssignmentState: ProviderRoleAssignmentState
     private let providerGenerationDefaultsState: ProviderGenerationDefaultsState
+    private let providerModeAdviceStrategyState: ProviderModeAdviceStrategyState
     private let providerUpstreamEndpointState: ProviderUpstreamEndpointState
     private let providerModelMetadataState: ProviderModelMetadataState
     private var serverPoolControllerCancellable: AnyCancellable?
@@ -236,6 +256,7 @@ final class DashboardViewModel: ObservableObject {
         self.providerDebugCaptureState = ProviderDebugCaptureState(enabled: loadedSettings.providerDebugCaptureEnabled)
         self.providerRoleAssignmentState = ProviderRoleAssignmentState(assignments: loadedSettings.providerRoleAssignments)
         self.providerGenerationDefaultsState = ProviderGenerationDefaultsState(defaults: loadedSettings.providerGenerationDefaults)
+        self.providerModeAdviceStrategyState = ProviderModeAdviceStrategyState(strategy: loadedSettings.modeAdviceStrategy)
         self.providerUpstreamEndpointState = ProviderUpstreamEndpointState()
         self.providerModelMetadataState = ProviderModelMetadataState()
         self.roleServerStatuses = serverPoolController.roleStatuses
@@ -401,6 +422,7 @@ final class DashboardViewModel: ObservableObject {
             providerDebugCaptureState.update(settings.providerDebugCaptureEnabled)
             providerRoleAssignmentState.update(settings.providerRoleAssignments)
             providerGenerationDefaultsState.update(settings.providerGenerationDefaults)
+            providerModeAdviceStrategyState.update(settings.modeAdviceStrategy)
             refreshProviderModelMetadataState()
             try settingsStore.save(settings)
             telemetry.appendLog("Saved settings")
@@ -614,6 +636,7 @@ final class DashboardViewModel: ObservableObject {
             },
             roleAssignmentsProvider: { [providerRoleAssignmentState] in providerRoleAssignmentState.assignments },
             generationDefaultsProvider: { [providerGenerationDefaultsState] in providerGenerationDefaultsState.defaults },
+            modeAdviceStrategyProvider: { [providerModeAdviceStrategyState] in providerModeAdviceStrategyState.strategy },
             defaultEndpointProvider: { [providerUpstreamEndpointState] in
                 providerUpstreamEndpointState.defaultEndpoint
             },
