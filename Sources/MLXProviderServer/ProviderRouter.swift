@@ -2124,6 +2124,8 @@ public struct ProviderRouter: Sendable {
             Task {
                 var buffer = ""
                 var latestUsage: MLXStreamTokenUsage?
+                var estimatedOutputTokens = 0
+                var lastEmittedEstimatedOutputTokens = 0
                 var didEmitCompletedUsage = false
                 continuation.yield(
                     mlxUsageEventData(
@@ -2150,13 +2152,33 @@ public struct ProviderRouter: Sendable {
                             if let usage = mlxStreamTokenUsage(fromSSEBlock: block) {
                                 latestUsage = usage
                             }
+                            estimatedOutputTokens += estimatedOutputTokenDeltaCount(fromSSEBlock: block)
+                            if shouldEmitProgressiveUsage(
+                                estimatedOutputTokens: estimatedOutputTokens,
+                                lastEmittedEstimatedOutputTokens: lastEmittedEstimatedOutputTokens
+                            ) {
+                                continuation.yield(
+                                    mlxUsageEventData(
+                                        phase: "streaming",
+                                        model: model,
+                                        contextLimit: contextLimit,
+                                        tokens: MLXStreamTokenUsage(
+                                            inputTokens: nil,
+                                            outputTokens: estimatedOutputTokens,
+                                            totalTokens: nil,
+                                            isEstimated: true
+                                        )
+                                    )
+                                )
+                                lastEmittedEstimatedOutputTokens = estimatedOutputTokens
+                            }
                             if isSSEDoneBlock(block), !didEmitCompletedUsage {
                                 continuation.yield(
                                     mlxUsageEventData(
                                         phase: "completed",
                                         model: model,
                                         contextLimit: contextLimit,
-                                        tokens: latestUsage
+                                        tokens: latestUsage ?? estimatedUsage(outputTokens: estimatedOutputTokens)
                                     )
                                 )
                                 didEmitCompletedUsage = true
@@ -2170,13 +2192,33 @@ public struct ProviderRouter: Sendable {
                         if let usage = mlxStreamTokenUsage(fromSSEBlock: buffer) {
                             latestUsage = usage
                         }
+                        estimatedOutputTokens += estimatedOutputTokenDeltaCount(fromSSEBlock: buffer)
+                        if shouldEmitProgressiveUsage(
+                            estimatedOutputTokens: estimatedOutputTokens,
+                            lastEmittedEstimatedOutputTokens: lastEmittedEstimatedOutputTokens
+                        ) {
+                            continuation.yield(
+                                mlxUsageEventData(
+                                    phase: "streaming",
+                                    model: model,
+                                    contextLimit: contextLimit,
+                                    tokens: MLXStreamTokenUsage(
+                                        inputTokens: nil,
+                                        outputTokens: estimatedOutputTokens,
+                                        totalTokens: nil,
+                                        isEstimated: true
+                                    )
+                                )
+                            )
+                            lastEmittedEstimatedOutputTokens = estimatedOutputTokens
+                        }
                         if isSSEDoneBlock(buffer), !didEmitCompletedUsage {
                             continuation.yield(
                                 mlxUsageEventData(
                                     phase: "completed",
                                     model: model,
                                     contextLimit: contextLimit,
-                                    tokens: latestUsage
+                                    tokens: latestUsage ?? estimatedUsage(outputTokens: estimatedOutputTokens)
                                 )
                             )
                             didEmitCompletedUsage = true
@@ -2190,7 +2232,7 @@ public struct ProviderRouter: Sendable {
                                 phase: "completed",
                                 model: model,
                                 contextLimit: contextLimit,
-                                tokens: latestUsage
+                                tokens: latestUsage ?? estimatedUsage(outputTokens: estimatedOutputTokens)
                             )
                         )
                     }
@@ -2219,7 +2261,8 @@ public struct ProviderRouter: Sendable {
         let tokenPayload: [String: Any] = [
             "input_tokens": tokens?.inputTokens.map { $0 as Any } ?? null,
             "output_tokens": tokens?.outputTokens.map { $0 as Any } ?? null,
-            "total_tokens": tokens?.totalTokens.map { $0 as Any } ?? null
+            "total_tokens": tokens?.totalTokens.map { $0 as Any } ?? null,
+            "estimated": tokens?.isEstimated ?? false
         ]
         let payload: [String: Any] = [
             "type": "mlx.usage",
@@ -2253,10 +2296,57 @@ public struct ProviderRouter: Sendable {
             return MLXStreamTokenUsage(
                 inputTokens: inputTokens,
                 outputTokens: outputTokens,
-                totalTokens: totalTokens
+                totalTokens: totalTokens,
+                isEstimated: false
             )
         }
         return nil
+    }
+
+    private func estimatedUsage(outputTokens: Int) -> MLXStreamTokenUsage? {
+        guard outputTokens > 0 else { return nil }
+        return MLXStreamTokenUsage(
+            inputTokens: nil,
+            outputTokens: outputTokens,
+            totalTokens: nil,
+            isEstimated: true
+        )
+    }
+
+    private func shouldEmitProgressiveUsage(
+        estimatedOutputTokens: Int,
+        lastEmittedEstimatedOutputTokens: Int
+    ) -> Bool {
+        guard estimatedOutputTokens > lastEmittedEstimatedOutputTokens else { return false }
+        return lastEmittedEstimatedOutputTokens == 0
+            || estimatedOutputTokens - lastEmittedEstimatedOutputTokens >= 16
+    }
+
+    private func estimatedOutputTokenDeltaCount(fromSSEBlock block: String) -> Int {
+        sseDataPayloads(in: block).reduce(0) { count, payload in
+            guard payload != "[DONE]",
+                  let data = payload.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let choices = object["choices"] as? [[String: Any]]
+            else { return count }
+
+            let deltaCount = choices.reduce(0) { choiceCount, choice in
+                if let delta = choice["delta"] as? [String: Any],
+                   Self.hasNonEmptyText(delta["content"]) || Self.hasNonEmptyText(delta["reasoning"]) {
+                    return choiceCount + 1
+                }
+                if Self.hasNonEmptyText(choice["text"]) {
+                    return choiceCount + 1
+                }
+                return choiceCount
+            }
+            return count + deltaCount
+        }
+    }
+
+    private static func hasNonEmptyText(_ value: Any?) -> Bool {
+        guard let text = value as? String else { return false }
+        return !text.isEmpty
     }
 
     private func sseDataPayloads(in block: String) -> [String] {
@@ -2301,6 +2391,7 @@ private struct MLXStreamTokenUsage {
     var inputTokens: Int?
     var outputTokens: Int?
     var totalTokens: Int?
+    var isEstimated: Bool = false
 }
 
 private enum ProviderModeAdviceMode: String {

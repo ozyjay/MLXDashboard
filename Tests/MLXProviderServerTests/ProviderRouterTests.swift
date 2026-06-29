@@ -2281,7 +2281,7 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(response.status, 200)
         let stream = try XCTUnwrap(String(data: response.body, encoding: .utf8))
         let events = try mlxUsageEvents(in: stream)
-        XCTAssertEqual(events.count, 2)
+        XCTAssertEqual(events.map { $0["phase"] as? String }, ["started", "streaming", "completed"])
         let startedEvent = try XCTUnwrap(events.first)
         XCTAssertEqual(startedEvent["phase"] as? String, "started")
         XCTAssertEqual(startedEvent["model"] as? String, "mlx-community/Tiny")
@@ -2324,7 +2324,43 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(response.status, 200)
         let stream = try XCTUnwrap(String(data: response.body, encoding: .utf8))
         let events = try mlxUsageEvents(in: stream)
-        XCTAssertEqual(events.map { $0["phase"] as? String }, ["started", "completed"])
+        XCTAssertEqual(events.map { $0["phase"] as? String }, ["started", "streaming", "completed"])
+    }
+
+    func testProviderEmitsProgressiveEstimatedUsageEventsWhileStreaming() async throws {
+        let upstreamStream = """
+        data: {"choices":[{"delta":{"content":"Hel"},"finish_reason":null}]}
+
+        data: {"choices":[{"delta":{"content":"lo"},"finish_reason":null}]}
+
+        data: [DONE]
+
+        """
+        let upstream = FakeUpstream(streamingChatCompletionBody: Data(upstreamStream.utf8))
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Tiny" }
+        )
+        let body = Data(
+            #"{"messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":true}}"#.utf8
+        )
+
+        let response = try await router.handle(
+            ProviderRequest(method: "POST", path: "/v1/chat/completions", headers: [:], body: body)
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let stream = try XCTUnwrap(String(data: response.body, encoding: .utf8))
+        let events = try mlxUsageEvents(in: stream)
+        XCTAssertEqual(events.map { $0["phase"] as? String }, ["started", "streaming", "completed"])
+        XCTAssertEqual(events.count, 3)
+        guard events.count == 3 else { return }
+        let streamingTokens = try XCTUnwrap(events[1]["tokens"] as? [String: Any])
+        XCTAssertEqual(streamingTokens["output_tokens"] as? Int, 1)
+        XCTAssertEqual(streamingTokens["estimated"] as? Bool, true)
+        let completedTokens = try XCTUnwrap(events[2]["tokens"] as? [String: Any])
+        XCTAssertEqual(completedTokens["output_tokens"] as? Int, 2)
+        XCTAssertEqual(completedTokens["estimated"] as? Bool, true)
     }
 
     func testProviderUsesNullContextLimitWhenUsageMetadataIsMissing() async throws {
