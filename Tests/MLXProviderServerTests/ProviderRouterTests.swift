@@ -1223,6 +1223,208 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(decision["desired_role_model"] as? String, "mlx-community/Coder")
     }
 
+    func testProviderRoutingDecisionFallsBackToUserPlanningHeuristicWhenModeAdviceIsMalformed() async throws {
+        let root = try temporaryDirectory()
+        let debugFile = root.appending(path: "provider-debug.jsonl")
+        let upstream = FakeUpstream(
+            chatCompletionBody: Data(
+                #"{"choices":[{"message":{"content":"not json"}}]}"#.utf8
+            )
+        )
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Loaded" },
+            roleAssignmentsProvider: {
+                ProviderRoleAssignments(ask: "mlx-community/Ask", plan: "mlx-community/Plan", coding: "mlx-community/Coder")
+            },
+            defaultEndpointProvider: {
+                ProviderUpstreamEndpoint(
+                    modelID: "mlx-community/Ask",
+                    baseURL: URL(string: "http://127.0.0.1:8080")!,
+                    port: 8080
+                )
+            },
+            roleEndpointProvider: { role in
+                guard role == .ask else { return nil }
+                return ProviderUpstreamEndpoint(
+                    modelID: "mlx-community/Ask",
+                    baseURL: URL(string: "http://127.0.0.1:8080")!,
+                    port: 8080
+                )
+            },
+            debugRecorder: ProviderDebugRecorder(fileURL: debugFile, isEnabled: { true })
+        )
+
+        _ = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/v1/chat/completions",
+                headers: [:],
+                body: Data(#"{"model":"mlx-ask","messages":[{"role":"user","content":"I'd like to plan the implementation sequence before changing code."}],"stream":false}"#.utf8)
+            )
+        )
+
+        let record = try lastDebugRecord(in: debugFile)
+        let decision = try XCTUnwrap(record["routing_decision"] as? [String: Any])
+        XCTAssertEqual(decision["selected_alias"] as? String, "mlx-ask")
+        XCTAssertEqual(decision["inferred_role"] as? String, "plan")
+        XCTAssertEqual(decision["desired_role_model"] as? String, "mlx-community/Plan")
+    }
+
+    func testProviderRoutingDecisionCorpusAccuracyWhenModeAdviceIsMalformed() async throws {
+        let root = try temporaryDirectory()
+        let debugFile = root.appending(path: "provider-debug.jsonl")
+        let upstream = FakeUpstream(
+            chatCompletionBody: Data(
+                #"{"choices":[{"message":{"content":"not json"}}]}"#.utf8
+            )
+        )
+        let router = ProviderRouter(
+            upstream: upstream,
+            activeModelProvider: { "mlx-community/Ask" },
+            roleAssignmentsProvider: {
+                ProviderRoleAssignments(
+                    ask: "mlx-community/Ask",
+                    plan: "mlx-community/Plan",
+                    coding: "mlx-community/Coder"
+                )
+            },
+            defaultEndpointProvider: {
+                ProviderUpstreamEndpoint(
+                    modelID: "mlx-community/Ask",
+                    baseURL: URL(string: "http://127.0.0.1:8080")!,
+                    port: 8080
+                )
+            },
+            roleEndpointProvider: { role in
+                switch role {
+                case .ask:
+                    return ProviderUpstreamEndpoint(
+                        modelID: "mlx-community/Ask",
+                        baseURL: URL(string: "http://127.0.0.1:8080")!,
+                        port: 8080
+                    )
+                case .plan:
+                    return ProviderUpstreamEndpoint(
+                        modelID: "mlx-community/Plan",
+                        baseURL: URL(string: "http://127.0.0.1:8081")!,
+                        port: 8081
+                    )
+                case .coding:
+                    return ProviderUpstreamEndpoint(
+                        modelID: "mlx-community/Coder",
+                        baseURL: URL(string: "http://127.0.0.1:8082")!,
+                        port: 8082
+                    )
+                }
+            },
+            debugRecorder: ProviderDebugRecorder(fileURL: debugFile, isEnabled: { true })
+        )
+        let cases: [(name: String, input: String, selectedModel: String, expectedRole: String, expectedModel: String)] = [
+            (
+                "ask-error-explanation",
+                "Can you explain what this Swift concurrency warning means?",
+                "mlx-coding",
+                "ask",
+                "mlx-community/Ask"
+            ),
+            (
+                "ask-summary",
+                "Summarise this file and tell me the important pieces.",
+                "mlx-coding",
+                "ask",
+                "mlx-community/Ask"
+            ),
+            (
+                "plan-implementation-sequence",
+                "I'd like to plan the implementation sequence before changing code.",
+                "mlx-ask",
+                "plan",
+                "mlx-community/Plan"
+            ),
+            (
+                "plan-risk-analysis",
+                "Do a risk analysis and propose an approach for the migration.",
+                "mlx-ask",
+                "plan",
+                "mlx-community/Plan"
+            ),
+            (
+                "coding-implementation",
+                "Implement the new settings toggle in SwiftUI.",
+                "mlx-ask",
+                "coding",
+                "mlx-community/Coder"
+            ),
+            (
+                "coding-refactor",
+                "Refactor this view model and update the tests.",
+                "mlx-ask",
+                "coding",
+                "mlx-community/Coder"
+            )
+        ]
+
+        var misses: [String] = []
+        var totalsByMode: [String: Int] = [:]
+        var correctByMode: [String: Int] = [:]
+        for testCase in cases {
+            totalsByMode[testCase.expectedRole, default: 0] += 1
+            let body = try JSONSerialization.data(withJSONObject: [
+                "model": testCase.selectedModel,
+                "messages": [
+                    [
+                        "role": "user",
+                        "content": testCase.input
+                    ]
+                ],
+                "stream": false
+            ])
+            _ = try await router.handle(
+                ProviderRequest(
+                    method: "POST",
+                    path: "/v1/chat/completions",
+                    headers: [:],
+                    body: body
+                )
+            )
+            let record = try lastDebugRecord(in: debugFile)
+            let decision = try XCTUnwrap(record["routing_decision"] as? [String: Any])
+            let actualRole = decision["inferred_role"] as? String
+            let actualModel = decision["upstream_model"] as? String
+            if actualRole == testCase.expectedRole, actualModel == testCase.expectedModel {
+                correctByMode[testCase.expectedRole, default: 0] += 1
+            } else {
+                misses.append(
+                    "\(testCase.name): expected \(testCase.expectedRole)/\(testCase.expectedModel), got \(actualRole ?? "nil")/\(actualModel ?? "nil")"
+                )
+            }
+        }
+
+        let correctCount = cases.count - misses.count
+        let accuracy = Double(correctCount) / Double(cases.count)
+        let perModeSummary = modeAccuracySummary(totalsByMode: totalsByMode, correctByMode: correctByMode)
+        for mode in ["ask", "plan", "coding"] {
+            let total = totalsByMode[mode, default: 0]
+            let correct = correctByMode[mode, default: 0]
+            let modeAccuracy = total == 0 ? 0 : Double(correct) / Double(total)
+            XCTAssertGreaterThanOrEqual(
+                modeAccuracy,
+                0.9,
+                "Mode routing \(mode) accuracy \(correct)/\(total). Summary: \(perModeSummary). Misses: \(misses.joined(separator: "; "))"
+            )
+        }
+        XCTAssertGreaterThanOrEqual(
+            accuracy,
+            0.9,
+            "Mode routing accuracy \(correctCount)/\(cases.count) (\(Int(accuracy * 100))%). Per-mode: \(perModeSummary). Misses: \(misses.joined(separator: "; "))"
+        )
+        XCTAssertTrue(
+            misses.isEmpty,
+            "Mode routing accuracy \(correctCount)/\(cases.count) (\(Int(accuracy * 100))%). Per-mode: \(perModeSummary). Misses: \(misses.joined(separator: "; "))"
+        )
+    }
+
     func testProviderAppliesRoleGenerationDefaultsToAliasRequests() async throws {
         let upstream = FakeUpstream()
         let router = ProviderRouter(
@@ -1451,6 +1653,216 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(advice["suggested_mode"] as? String, "unknown")
         XCTAssertEqual(advice["confidence"] as? Double, 0)
         XCTAssertEqual(advice["should_suggest_switch"] as? Bool, false)
+    }
+
+    func testModeAdviceFallsBackToPlanningHeuristicWhenClassifierJSONIsMalformed() async throws {
+        let upstream = FakeUpstream(
+            chatCompletionBody: Data(
+                #"{"choices":[{"message":{"content":"not json"}}]}"#.utf8
+            )
+        )
+        let router = modeAdviceRouter(upstream: upstream)
+
+        let response = try await router.handle(
+            ProviderRequest(
+                method: "POST",
+                path: "/provider/v1/mode-advice",
+                headers: [:],
+                body: Data(#"{"input":"I'd like to plan the implementation sequence before changing code","selected_model":"mlx-ask"}"#.utf8)
+            )
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let advice = try jsonObject(in: response.body)
+        XCTAssertEqual(advice["suggested_mode"] as? String, "plan")
+        XCTAssertEqual(advice["current_mode"] as? String, "ask")
+        XCTAssertEqual(advice["should_suggest_switch"] as? Bool, true)
+    }
+
+    func testModeAdviceFallbackCorpusAccuracyWhenClassifierJSONIsMalformed() async throws {
+        let upstream = FakeUpstream(
+            chatCompletionBody: Data(
+                #"{"choices":[{"message":{"content":"not json"}}]}"#.utf8
+            )
+        )
+        let router = modeAdviceRouter(upstream: upstream)
+        let cases: [(name: String, input: String, selectedModel: String, expectedMode: String)] = [
+            (
+                "ask-error-explanation",
+                "Can you explain what this Swift concurrency warning means?",
+                "mlx-coding",
+                "ask"
+            ),
+            (
+                "ask-summary",
+                "Summarise this file and tell me the important pieces.",
+                "mlx-coding",
+                "ask"
+            ),
+            (
+                "ask-light-troubleshooting",
+                "Why does this test fail with an optional nil error?",
+                "mlx-coding",
+                "ask"
+            ),
+            (
+                "plan-implementation-sequence",
+                "I'd like to plan the implementation sequence before changing code.",
+                "mlx-ask",
+                "plan"
+            ),
+            (
+                "plan-architecture",
+                "Help me choose the architecture and break this down into tasks.",
+                "mlx-ask",
+                "plan"
+            ),
+            (
+                "plan-risk-analysis",
+                "Do a risk analysis and propose an approach for the migration.",
+                "mlx-ask",
+                "plan"
+            ),
+            (
+                "coding-implementation",
+                "Implement the new settings toggle in SwiftUI.",
+                "mlx-ask",
+                "coding"
+            ),
+            (
+                "coding-fix",
+                "Fix the provider routing bug and add regression tests.",
+                "mlx-ask",
+                "coding"
+            ),
+            (
+                "coding-refactor",
+                "Refactor this view model and update the tests.",
+                "mlx-ask",
+                "coding"
+            )
+        ]
+
+        var misses: [String] = []
+        var totalsByMode: [String: Int] = [:]
+        var correctByMode: [String: Int] = [:]
+        for testCase in cases {
+            totalsByMode[testCase.expectedMode, default: 0] += 1
+            let body = try JSONSerialization.data(withJSONObject: [
+                "input": testCase.input,
+                "selected_model": testCase.selectedModel
+            ])
+            let response = try await router.handle(
+                ProviderRequest(
+                    method: "POST",
+                    path: "/provider/v1/mode-advice",
+                    headers: [:],
+                    body: body
+                )
+            )
+            let advice = try jsonObject(in: response.body)
+            let actualMode = advice["suggested_mode"] as? String
+            if actualMode != testCase.expectedMode {
+                misses.append("\(testCase.name): expected \(testCase.expectedMode), got \(actualMode ?? "nil")")
+            } else {
+                correctByMode[testCase.expectedMode, default: 0] += 1
+            }
+        }
+
+        let correctCount = cases.count - misses.count
+        let accuracy = Double(correctCount) / Double(cases.count)
+        let perModeSummary = modeAccuracySummary(totalsByMode: totalsByMode, correctByMode: correctByMode)
+        for mode in ["ask", "plan", "coding"] {
+            let total = totalsByMode[mode, default: 0]
+            let correct = correctByMode[mode, default: 0]
+            let modeAccuracy = total == 0 ? 0 : Double(correct) / Double(total)
+            XCTAssertGreaterThanOrEqual(
+                modeAccuracy,
+                0.9,
+                "Mode advice fallback \(mode) accuracy \(correct)/\(total). Summary: \(perModeSummary). Misses: \(misses.joined(separator: "; "))"
+            )
+        }
+        XCTAssertGreaterThanOrEqual(
+            accuracy,
+            0.9,
+            "Mode advice fallback accuracy \(correctCount)/\(cases.count) (\(Int(accuracy * 100))%). Per-mode: \(perModeSummary). Misses: \(misses.joined(separator: "; "))"
+        )
+        XCTAssertTrue(
+            misses.isEmpty,
+            "Mode advice fallback accuracy \(correctCount)/\(cases.count) (\(Int(accuracy * 100))%). Per-mode: \(perModeSummary). Misses: \(misses.joined(separator: "; "))"
+        )
+    }
+
+    func testLiveModeAdviceClassifierCorpusAccuracy() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["MLXDASHBOARD_LIVE_MODE_ADVICE"] == "1" else {
+            throw XCTSkip("Set MLXDASHBOARD_LIVE_MODE_ADVICE=1 to run live classifier accuracy.")
+        }
+        guard let baseURLText = environment["MLXDASHBOARD_LIVE_MODE_ADVICE_BASE_URL"],
+              let baseURL = URL(string: baseURLText)
+        else {
+            throw XCTSkip("Set MLXDASHBOARD_LIVE_MODE_ADVICE_BASE_URL, for example http://127.0.0.1:8080.")
+        }
+        guard let model = environment["MLXDASHBOARD_LIVE_MODE_ADVICE_MODEL"],
+              !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            throw XCTSkip("Set MLXDASHBOARD_LIVE_MODE_ADVICE_MODEL to the live classifier model ID.")
+        }
+
+        let minimumAccuracy = environment["MLXDASHBOARD_LIVE_MODE_ADVICE_MIN_ACCURACY"]
+            .flatMap(Double.init)
+            ?? 0
+        let router = ProviderRouter(
+            upstream: URLSessionProviderUpstreamProxyClient(),
+            activeModelProvider: { model },
+            roleAssignmentsProvider: { ProviderRoleAssignments(ask: model) },
+            defaultEndpointProvider: {
+                ProviderUpstreamEndpoint(modelID: model, baseURL: baseURL, port: baseURL.port)
+            },
+            roleEndpointProvider: { role in
+                guard role == .ask else { return nil }
+                return ProviderUpstreamEndpoint(modelID: model, baseURL: baseURL, port: baseURL.port)
+            }
+        )
+        let cases = liveModeAdviceCorpus()
+
+        var misses: [String] = []
+        var totalsByMode: [String: Int] = [:]
+        var correctByMode: [String: Int] = [:]
+        for testCase in cases {
+            totalsByMode[testCase.expectedMode, default: 0] += 1
+            let body = try JSONSerialization.data(withJSONObject: [
+                "input": testCase.input,
+                "selected_model": testCase.selectedModel
+            ])
+            let response = try await router.handle(
+                ProviderRequest(
+                    method: "POST",
+                    path: "/provider/v1/mode-advice",
+                    headers: [:],
+                    body: body
+                )
+            )
+            XCTAssertEqual(response.status, 200, "Live classifier request failed for \(testCase.name).")
+            let advice = try jsonObject(in: response.body)
+            let actualMode = advice["suggested_mode"] as? String
+            let confidence = advice["confidence"] as? Double ?? 0
+            let reason = advice["reason"] as? String ?? ""
+            if actualMode == testCase.expectedMode {
+                correctByMode[testCase.expectedMode, default: 0] += 1
+            } else {
+                misses.append(
+                    "\(testCase.name): expected \(testCase.expectedMode), got \(actualMode ?? "nil") confidence=\(confidence) reason=\(reason)"
+                )
+            }
+        }
+
+        let correctCount = cases.count - misses.count
+        let accuracy = Double(correctCount) / Double(cases.count)
+        let perModeSummary = modeAccuracySummary(totalsByMode: totalsByMode, correctByMode: correctByMode)
+        let summary = "Live mode advice classifier accuracy \(correctCount)/\(cases.count) (\(Int(accuracy * 100))%). Per-mode: \(perModeSummary). Model: \(model). Misses: \(misses.joined(separator: "; "))"
+        print("MLXDASHBOARD_LIVE_MODE_ADVICE_ACCURACY \(summary)")
+        XCTAssertGreaterThanOrEqual(accuracy, minimumAccuracy, summary)
     }
 
     func testModeAdviceParsesChannelMarkedFinalJSON() async throws {
@@ -2809,6 +3221,76 @@ final class ProviderRouterTests: XCTestCase {
                 let payload = dataLine.dropFirst("data:".count).trimmingCharacters(in: .whitespaces)
                 return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any])
             }
+    }
+
+    private func modeAccuracySummary(totalsByMode: [String: Int], correctByMode: [String: Int]) -> String {
+        ["ask", "plan", "coding"]
+            .map { mode in
+                let total = totalsByMode[mode, default: 0]
+                let correct = correctByMode[mode, default: 0]
+                let percentage = total == 0 ? 0 : Int((Double(correct) / Double(total)) * 100)
+                return "\(mode)=\(correct)/\(total) (\(percentage)%)"
+            }
+            .joined(separator: ", ")
+    }
+
+    private func liveModeAdviceCorpus() -> [(name: String, input: String, selectedModel: String, expectedMode: String)] {
+        [
+            (
+                "ask-error-explanation",
+                "Can you explain what this Swift concurrency warning means?",
+                "mlx-coding",
+                "ask"
+            ),
+            (
+                "ask-summary",
+                "Summarise this file and tell me the important pieces.",
+                "mlx-coding",
+                "ask"
+            ),
+            (
+                "ask-light-troubleshooting",
+                "Why does this test fail with an optional nil error?",
+                "mlx-coding",
+                "ask"
+            ),
+            (
+                "plan-implementation-sequence",
+                "I'd like to plan the implementation sequence before changing code.",
+                "mlx-ask",
+                "plan"
+            ),
+            (
+                "plan-architecture",
+                "Help me choose the architecture and break this down into tasks.",
+                "mlx-ask",
+                "plan"
+            ),
+            (
+                "plan-risk-analysis",
+                "Do a risk analysis and propose an approach for the migration.",
+                "mlx-ask",
+                "plan"
+            ),
+            (
+                "coding-implementation",
+                "Implement the new settings toggle in SwiftUI.",
+                "mlx-ask",
+                "coding"
+            ),
+            (
+                "coding-fix",
+                "Fix the provider routing bug and add regression tests.",
+                "mlx-ask",
+                "coding"
+            ),
+            (
+                "coding-refactor",
+                "Refactor this view model and update the tests.",
+                "mlx-ask",
+                "coding"
+            )
+        ]
     }
 
     private func modeAdviceRouter(upstream: FakeUpstream) -> ProviderRouter {

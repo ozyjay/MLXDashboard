@@ -1211,10 +1211,11 @@ public struct ProviderRouter: Sendable {
         input: String,
         currentMode: String?
     ) async -> ProviderModeAdvice {
+        let heuristicAdvice = modeHeuristicAdvice(input: input, currentMode: currentMode)
         guard let endpoint = modeAdviceAskEndpoint(),
               let askModel = roleAssignmentsProvider().ask
         else {
-            return ProviderModeAdvice.unknown(
+            return heuristicAdvice ?? ProviderModeAdvice.unknown(
                 currentMode: currentMode,
                 reason: "Ask role endpoint is unavailable."
             )
@@ -1252,18 +1253,29 @@ public struct ProviderRouter: Sendable {
                 classifierOutput: text,
                 currentMode: currentMode
             ) else {
-                return ProviderModeAdvice.unknown(
+                return heuristicAdvice ?? ProviderModeAdvice.unknown(
                     currentMode: currentMode,
                     reason: "Classifier response was not valid mode advice."
                 )
             }
             return classified
         } catch {
-            return ProviderModeAdvice.unknown(
+            return heuristicAdvice ?? ProviderModeAdvice.unknown(
                 currentMode: currentMode,
                 reason: "Classifier request failed: \(error.localizedDescription)"
             )
         }
+    }
+
+    private func modeHeuristicAdvice(input: String, currentMode: String?) -> ProviderModeAdvice? {
+        guard let mode = inferredModeIntent(in: input) else { return nil }
+        return ProviderModeAdvice(
+            suggestedMode: mode,
+            confidence: ProviderModeAdvice.switchConfidenceThreshold,
+            shouldSuggestSwitch: currentMode != nil && currentMode != mode.rawValue,
+            currentMode: currentMode,
+            reason: "The prompt asks for \(mode.displayName)."
+        )
     }
 
     private var modeAdviceClassifierPrompt: String {
@@ -1423,7 +1435,7 @@ public struct ProviderRouter: Sendable {
             return (nil, nil)
         }
 
-        let heuristicRole: ProviderModelRole? = containsPlanningModePrompt(in: messagesValue) ? .plan : nil
+        let heuristicRole = userModeIntent(in: messagesValue)
         if strategy == .heuristic {
             return (heuristicRole, nil)
         }
@@ -1490,6 +1502,75 @@ public struct ProviderRouter: Sendable {
                 || lowercased.contains("mode: planning")
                 || lowercased.contains("mode: plan")
         }
+    }
+
+    private func userModeIntent(in messagesValue: Any?) -> ProviderModelRole? {
+        guard let messages = messagesValue as? [[String: Any]] else { return nil }
+        for message in messages.reversed() {
+            guard let role = message["role"] as? String,
+                  role == "developer" || role == "system" || role == "user",
+                  let text = normalizedContent(message["content"] ?? ""),
+                  let mode = inferredModeIntent(in: text)
+            else { continue }
+            return mode.providerRole
+        }
+        return nil
+    }
+
+    private func inferredModeIntent(in text: String) -> ProviderModeAdviceMode? {
+        let lowercased = text.lowercased()
+        let planningPhrases = [
+            "i'd like to plan",
+            "i would like to plan",
+            "i want to plan",
+            "help me plan",
+            "let's plan",
+            "planning question",
+            "planning request",
+            "implementation sequence",
+            "task decomposition",
+            "risk analysis",
+            "architecture",
+            "architectural",
+            "break this down",
+            "propose an approach",
+            "propose the approach"
+        ]
+        if planningPhrases.contains(where: { lowercased.contains($0) }) {
+            return .plan
+        }
+
+        let codingPhrases = [
+            "implement",
+            "write the code",
+            "edit the",
+            "change the code",
+            "fix the",
+            "refactor",
+            "add regression tests",
+            "update the tests",
+            "make the tests pass"
+        ]
+        if codingPhrases.contains(where: { lowercased.contains($0) }) {
+            return .coding
+        }
+
+        let askPhrases = [
+            "can you explain",
+            "explain what",
+            "what does",
+            "why does",
+            "summarise",
+            "summarize",
+            "tell me",
+            "what is",
+            "how does"
+        ]
+        if askPhrases.contains(where: { lowercased.contains($0) }) {
+            return .ask
+        }
+
+        return nil
     }
 
     private func modeAdviceInput(from messagesValue: Any?) -> String? {
@@ -2399,6 +2480,32 @@ private enum ProviderModeAdviceMode: String {
     case plan
     case coding
     case unknown
+
+    var displayName: String {
+        switch self {
+        case .ask:
+            return "asking"
+        case .plan:
+            return "planning"
+        case .coding:
+            return "coding"
+        case .unknown:
+            return "an unknown mode"
+        }
+    }
+
+    var providerRole: ProviderModelRole? {
+        switch self {
+        case .ask:
+            return .ask
+        case .plan:
+            return .plan
+        case .coding:
+            return .coding
+        case .unknown:
+            return nil
+        }
+    }
 }
 
 private struct ProviderModeAdvice {
