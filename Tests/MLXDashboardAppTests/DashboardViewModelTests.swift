@@ -14,6 +14,35 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertFalse(AppLaunchOptions(arguments: ["MLXDashboard"]).autostartProvider)
     }
 
+    func testStartupPolicyStartsWhenLaunchArgumentRequestsAutostart() {
+        XCTAssertTrue(AppStartupPolicy.shouldStartServices(
+            launchOptions: AppLaunchOptions(arguments: ["MLXDashboard", "--autostart"]),
+            settings: DashboardSettings(startServicesOnLaunch: false),
+            didHandleLaunchOptions: false
+        ))
+    }
+
+    func testStartupPolicyStartsWhenPersistedSettingRequestsAutostart() {
+        XCTAssertTrue(AppStartupPolicy.shouldStartServices(
+            launchOptions: AppLaunchOptions(arguments: ["MLXDashboard"]),
+            settings: DashboardSettings(startServicesOnLaunch: true),
+            didHandleLaunchOptions: false
+        ))
+    }
+
+    func testStartupPolicyDoesNotStartTwiceOrWithoutAutostartIntent() {
+        XCTAssertFalse(AppStartupPolicy.shouldStartServices(
+            launchOptions: AppLaunchOptions(arguments: ["MLXDashboard", "--autostart"]),
+            settings: DashboardSettings(startServicesOnLaunch: true),
+            didHandleLaunchOptions: true
+        ))
+        XCTAssertFalse(AppStartupPolicy.shouldStartServices(
+            launchOptions: AppLaunchOptions(arguments: ["MLXDashboard"]),
+            settings: DashboardSettings(startServicesOnLaunch: false),
+            didHandleLaunchOptions: false
+        ))
+    }
+
     func testDashboardRecentLogsUseExpandedMinimumHeight() {
         XCTAssertEqual(DashboardLayoutPolicy.activeModelMinHeight, 240)
         XCTAssertEqual(DashboardLayoutPolicy.recentLogsMinHeight, 360)
@@ -237,6 +266,20 @@ final class DashboardViewModelTests: XCTestCase {
 
         let logText = try String(contentsOf: paths.logsDirectory.appending(path: "mlxdashboard.log"), encoding: .utf8)
         XCTAssertTrue(logText.contains("Temp-path telemetry check"))
+    }
+
+    func testSetStartServicesOnLaunchPersistsSetting() throws {
+        let paths = try temporaryAppPaths()
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: ModelRegistry(fileURL: paths.modelRegistryFile),
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+        )
+
+        viewModel.setStartServicesOnLaunch(true)
+
+        XCTAssertTrue(viewModel.settings.startServicesOnLaunch)
+        XCTAssertTrue(try SettingsStore(fileURL: paths.settingsFile).load().startServicesOnLaunch)
     }
 
     func testRestartServerRestartsRunningController() async throws {

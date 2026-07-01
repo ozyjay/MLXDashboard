@@ -22,7 +22,8 @@ final class CorePersistenceTests: XCTestCase {
                 ask: ProviderGenerationSettings(temperature: 0.31, topP: 0.91, maxTokens: 1024),
                 plan: ProviderGenerationSettings(temperature: 0.21, topP: 0.96, maxTokens: 4096),
                 coding: ProviderGenerationSettings(temperature: 0.01, topP: 1.0, maxTokens: 2048)
-            )
+            ),
+            startServicesOnLaunch: true
         )
 
         try store.save(settings)
@@ -45,6 +46,7 @@ final class CorePersistenceTests: XCTestCase {
         XCTAssertEqual(reloaded.providerGenerationDefaults.coding.temperature, 0.01)
         XCTAssertEqual(reloaded.providerGenerationDefaults.coding.topP, 1.0)
         XCTAssertEqual(reloaded.providerGenerationDefaults.coding.maxTokens, 2048)
+        XCTAssertTrue(reloaded.startServicesOnLaunch)
     }
 
     func testSettingsStorePersistsDownloadSettings() throws {
@@ -76,6 +78,30 @@ final class CorePersistenceTests: XCTestCase {
 
     func testDashboardSettingsDefaultsProviderDebugCaptureOff() {
         XCTAssertFalse(DashboardSettings().providerDebugCaptureEnabled)
+    }
+
+    func testDashboardSettingsDefaultsStartServicesOnLaunchOff() {
+        XCTAssertFalse(DashboardSettings().startServicesOnLaunch)
+    }
+
+    func testDashboardSettingsPreservesExplicitStartServicesOnLaunch() throws {
+        let json = Data(
+            #"{"activeModel":"mlx-community/Tiny","startServicesOnLaunch":true}"#.utf8
+        )
+
+        let settings = try JSONDecoder().decode(DashboardSettings.self, from: json)
+
+        XCTAssertTrue(settings.startServicesOnLaunch)
+    }
+
+    func testDashboardSettingsDefaultsMissingStartServicesOnLaunchOff() throws {
+        let json = Data(
+            #"{"activeModel":"mlx-community/Tiny"}"#.utf8
+        )
+
+        let settings = try JSONDecoder().decode(DashboardSettings.self, from: json)
+
+        XCTAssertFalse(settings.startServicesOnLaunch)
     }
 
     func testDashboardSettingsPreservesExplicitProviderDebugCaptureOn() throws {

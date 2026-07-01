@@ -438,6 +438,12 @@ final class DashboardViewModel: ObservableObject {
         telemetry.appendLog(enabled ? "Enabled provider debug payload capture" : "Disabled provider debug payload capture")
     }
 
+    func setStartServicesOnLaunch(_ enabled: Bool) {
+        settings.startServicesOnLaunch = enabled
+        saveSettings()
+        telemetry.appendLog(enabled ? "Enabled service autostart" : "Disabled service autostart")
+    }
+
     func updateDownloadSettings(_ downloadSettings: HuggingFaceDownloadSettings) {
         settings.downloadSettings = downloadSettings.validated()
         saveSettings()

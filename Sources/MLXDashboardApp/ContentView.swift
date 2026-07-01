@@ -262,6 +262,45 @@ private struct AppHeader: View {
 
             Spacer()
 
+            HStack(spacing: 8) {
+                Toggle("Auto-start", isOn: Binding(
+                    get: { viewModel.settings.startServicesOnLaunch },
+                    set: { viewModel.setStartServicesOnLaunch($0) }
+                ))
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .help("Start MLX services when MLXDashboard opens")
+
+                Divider()
+                    .frame(height: 20)
+
+                Button {
+                    Task { await viewModel.startServer() }
+                } label: {
+                    Label("Start", systemImage: "play.fill")
+                }
+                .disabled(!viewModel.canStartServer)
+                .help("Start MLX services")
+
+                Button {
+                    viewModel.stopServer()
+                } label: {
+                    Label("Stop", systemImage: "stop.fill")
+                }
+                .disabled(!viewModel.canStopServer)
+                .help("Stop MLX services")
+
+                Button {
+                    Task { await viewModel.restartServer() }
+                } label: {
+                    Label("Restart", systemImage: "arrow.clockwise")
+                }
+                .disabled(!viewModel.canRestartServer)
+                .help("Restart MLX services")
+            }
+            .labelStyle(.titleAndIcon)
+            .controlSize(.small)
+
             Button {
                 Task { await viewModel.refreshPythonStatus() }
             } label: {

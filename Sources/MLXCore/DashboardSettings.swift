@@ -292,6 +292,7 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
     public var residentModelMemoryBudgetGB: Double
     public var maxResidentModelProcesses: Int
     public var downloadSettings: HuggingFaceDownloadSettings
+    public var startServicesOnLaunch: Bool
 
     public init(
         activeModel: String? = nil,
@@ -309,7 +310,8 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
         modelRuntimeOverrides: [String: ModelRuntimeOverride] = [:],
         residentModelMemoryBudgetGB: Double = 42,
         maxResidentModelProcesses: Int = 2,
-        downloadSettings: HuggingFaceDownloadSettings = .standardDefault
+        downloadSettings: HuggingFaceDownloadSettings = .standardDefault,
+        startServicesOnLaunch: Bool = false
     ) {
         self.activeModel = activeModel
         self.mlxHost = Self.localMLXHost
@@ -327,6 +329,7 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
         self.residentModelMemoryBudgetGB = min(max(residentModelMemoryBudgetGB, 4), 60)
         self.maxResidentModelProcesses = min(max(maxResidentModelProcesses, 1), 8)
         self.downloadSettings = downloadSettings.validated()
+        self.startServicesOnLaunch = startServicesOnLaunch
         _ = mlxHost
         _ = providerHost
     }
@@ -340,7 +343,8 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
         serverFlags: [String] = [],
         providerDebugCaptureEnabled: Bool = false,
         providerRoleAssignments: ProviderRoleAssignments = ProviderRoleAssignments(),
-        downloadSettings: HuggingFaceDownloadSettings
+        downloadSettings: HuggingFaceDownloadSettings,
+        startServicesOnLaunch: Bool = false
     ) {
         self.init(
             activeModel: activeModel,
@@ -352,7 +356,8 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
             providerDebugCaptureEnabled: providerDebugCaptureEnabled,
             providerRoleAssignments: providerRoleAssignments,
             providerGenerationDefaults: .recommendedDefault,
-            downloadSettings: downloadSettings
+            downloadSettings: downloadSettings,
+            startServicesOnLaunch: startServicesOnLaunch
         )
     }
 
@@ -373,6 +378,7 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
         case residentModelMemoryBudgetGB
         case maxResidentModelProcesses
         case downloadSettings
+        case startServicesOnLaunch
     }
 
     public init(from decoder: Decoder) throws {
@@ -391,7 +397,8 @@ public struct DashboardSettings: Codable, Equatable, Sendable {
             modelRuntimeOverrides: try container.decodeIfPresent([String: ModelRuntimeOverride].self, forKey: .modelRuntimeOverrides) ?? [:],
             residentModelMemoryBudgetGB: try container.decodeIfPresent(Double.self, forKey: .residentModelMemoryBudgetGB) ?? 42,
             maxResidentModelProcesses: try container.decodeIfPresent(Int.self, forKey: .maxResidentModelProcesses) ?? 2,
-            downloadSettings: try container.decodeIfPresent(HuggingFaceDownloadSettings.self, forKey: .downloadSettings) ?? .standardDefault
+            downloadSettings: try container.decodeIfPresent(HuggingFaceDownloadSettings.self, forKey: .downloadSettings) ?? .standardDefault,
+            startServicesOnLaunch: try container.decodeIfPresent(Bool.self, forKey: .startServicesOnLaunch) ?? false
         )
     }
 

@@ -13,6 +13,17 @@ struct AppLaunchOptions {
     }
 }
 
+struct AppStartupPolicy {
+    static func shouldStartServices(
+        launchOptions: AppLaunchOptions,
+        settings: DashboardSettings,
+        didHandleLaunchOptions: Bool
+    ) -> Bool {
+        guard !didHandleLaunchOptions else { return false }
+        return launchOptions.autostartProvider || settings.startServicesOnLaunch
+    }
+}
+
 @main
 struct MLXDashboardApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -69,7 +80,11 @@ struct MLXDashboardApp: App {
     }
 
     private func startFromLaunchOptionsIfNeeded() {
-        guard launchOptions.autostartProvider, !didHandleLaunchOptions else { return }
+        guard AppStartupPolicy.shouldStartServices(
+            launchOptions: launchOptions,
+            settings: viewModel.settings,
+            didHandleLaunchOptions: didHandleLaunchOptions
+        ) else { return }
         didHandleLaunchOptions = true
         Task { await viewModel.startServer() }
     }
