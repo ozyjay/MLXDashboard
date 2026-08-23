@@ -670,8 +670,10 @@ final class DashboardViewModelTests: XCTestCase {
 
     func testRunningProviderUsesActiveModelSelectedAfterProviderStart() async throws {
         let paths = try temporaryAppPaths()
+        let snapshot = paths.applicationSupport.appending(path: "cache/models--mlx-community--Tiny/snapshots/abc")
+        try createCachedModelSnapshot(at: snapshot, config: #"{"model_type":"qwen2"}"#)
         let registry = ModelRegistry(fileURL: paths.modelRegistryFile)
-        registry.upsert(ModelRecord(id: "mlx-community/Tiny", status: .installed, localPath: "/tmp/tiny"))
+        registry.upsert(ModelRecord(id: "mlx-community/Tiny", status: .installed, localPath: snapshot.path))
         try registry.save()
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
@@ -1558,6 +1560,9 @@ final class DashboardViewModelTests: XCTestCase {
 
     func testInstallSelectedModelInstallsChosenSearchResultAndStoresLocalPath() async throws {
         let paths = try temporaryAppPaths()
+        let cacheRoot = try temporaryDirectory()
+        let snapshot = cacheRoot.appending(path: "models--mlx-community--Tiny/snapshots/abc")
+        try createCachedModelSnapshot(at: snapshot, config: #"{"model_type":"qwen2"}"#)
         let python = paths.venvDirectory.appending(path: "bin/python")
         try FileManager.default.createDirectory(
             at: python.deletingLastPathComponent(),
@@ -1571,7 +1576,7 @@ final class DashboardViewModelTests: XCTestCase {
             "whoami": CommandResult(exitCode: 0, standardOutput: #"{"name":"octocat"}"#, standardError: ""),
             "install": CommandResult(
                 exitCode: 0,
-                standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/abc"}"#,
+                standardOutput: "{\"local_path\":\"(snapshot.path)\"}",
                 standardError: ""
             )
         ])
@@ -1581,7 +1586,8 @@ final class DashboardViewModelTests: XCTestCase {
             registry: registry,
             environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
             modelInstaller: HuggingFaceModelInstaller(runner: runner),
-            authChecker: HuggingFaceAuthChecker(runner: runner)
+            authChecker: HuggingFaceAuthChecker(runner: runner),
+            huggingFaceCacheRoot: cacheRoot
         )
         viewModel.searchResults = [
             HuggingFaceModelSummary(id: "mlx-community/Other"),
@@ -1593,9 +1599,9 @@ final class DashboardViewModelTests: XCTestCase {
 
         let record = registry.record(id: "mlx-community/Tiny")
         XCTAssertEqual(record?.status, .installed)
-        XCTAssertEqual(record?.localPath, "/tmp/cache/models--mlx-community--Tiny/snapshots/abc")
+        XCTAssertEqual(record?.localPath, snapshot.path)
         XCTAssertEqual(viewModel.huggingFaceAuthMessage, "Hugging Face: logged in as octocat")
-        XCTAssertEqual(viewModel.modelInstallMessage, "Installed mlx-community/Tiny at /tmp/cache/models--mlx-community--Tiny/snapshots/abc")
+        XCTAssertEqual(viewModel.modelInstallMessage, "Installed mlx-community/Tiny at (snapshot.path)")
         XCTAssertNil(registry.record(id: "mlx-community/Other"))
     }
 
@@ -1725,6 +1731,9 @@ final class DashboardViewModelTests: XCTestCase {
 
     func testInstallSelectedModelFinishesWithCompletedProgress() async throws {
         let paths = try temporaryAppPaths()
+        let cacheRoot = try temporaryDirectory()
+        let snapshot = cacheRoot.appending(path: "models--mlx-community--Tiny/snapshots/abc")
+        try createCachedModelSnapshot(at: snapshot, config: #"{"model_type":"qwen2"}"#)
         let python = paths.venvDirectory.appending(path: "bin/python")
         try FileManager.default.createDirectory(
             at: python.deletingLastPathComponent(),
@@ -1738,7 +1747,7 @@ final class DashboardViewModelTests: XCTestCase {
             "whoami": CommandResult(exitCode: 0, standardOutput: #"{"name":"octocat"}"#, standardError: ""),
             "install": CommandResult(
                 exitCode: 0,
-                standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/abc"}"#,
+                standardOutput: "{\"local_path\":\"(snapshot.path)\"}",
                 standardError: ""
             )
         ])
@@ -1747,7 +1756,8 @@ final class DashboardViewModelTests: XCTestCase {
             registry: ModelRegistry(fileURL: paths.modelRegistryFile),
             environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
             modelInstaller: HuggingFaceModelInstaller(runner: runner),
-            authChecker: HuggingFaceAuthChecker(runner: runner)
+            authChecker: HuggingFaceAuthChecker(runner: runner),
+            huggingFaceCacheRoot: cacheRoot
         )
         viewModel.searchResults = [HuggingFaceModelSummary(id: "mlx-community/Tiny")]
         viewModel.selectedSearchModelID = "mlx-community/Tiny"
@@ -2125,6 +2135,9 @@ final class DashboardViewModelTests: XCTestCase {
 
     func testContinueLastModelInstallRetriesFailedModelID() async throws {
         let paths = try temporaryAppPaths()
+        let cacheRoot = try temporaryDirectory()
+        let snapshot = cacheRoot.appending(path: "models--mlx-community--Tiny/snapshots/resumed")
+        try createCachedModelSnapshot(at: snapshot, config: #"{"model_type":"qwen2"}"#)
         let python = paths.venvDirectory.appending(path: "bin/python")
         try FileManager.default.createDirectory(
             at: python.deletingLastPathComponent(),
@@ -2138,7 +2151,7 @@ final class DashboardViewModelTests: XCTestCase {
             "whoami": CommandResult(exitCode: 0, standardOutput: #"{"name":"octocat"}"#, standardError: ""),
             "install": CommandResult(
                 exitCode: 0,
-                standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/resumed"}"#,
+                standardOutput: "{\"local_path\":\"(snapshot.path)\"}",
                 standardError: ""
             )
         ])
@@ -2149,7 +2162,8 @@ final class DashboardViewModelTests: XCTestCase {
             registry: registry,
             environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
             modelInstaller: HuggingFaceModelInstaller(runner: runner),
-            authChecker: HuggingFaceAuthChecker(runner: runner)
+            authChecker: HuggingFaceAuthChecker(runner: runner),
+            huggingFaceCacheRoot: cacheRoot
         )
         viewModel.setInstallProgressForTesting(ModelInstallProgress(
             modelID: "mlx-community/Tiny",
@@ -2165,11 +2179,14 @@ final class DashboardViewModelTests: XCTestCase {
         XCTAssertNil(installCommands.last?.environment["HF_XET_NUM_CONCURRENT_RANGE_GETS"])
         XCTAssertEqual(registry.record(id: "mlx-community/Tiny")?.status, .installed)
         XCTAssertEqual(viewModel.modelInstallProgress?.phase, .installed)
-        XCTAssertEqual(viewModel.modelInstallMessage, "Installed mlx-community/Tiny at /tmp/cache/models--mlx-community--Tiny/snapshots/resumed")
+        XCTAssertEqual(viewModel.modelInstallMessage, "Installed mlx-community/Tiny at (snapshot.path)")
     }
 
     func testContinueSelectedInstalledModelRetriesFailedRecord() async throws {
         let paths = try temporaryAppPaths()
+        let cacheRoot = try temporaryDirectory()
+        let snapshot = cacheRoot.appending(path: "models--mlx-community--Tiny/snapshots/resumed")
+        try createCachedModelSnapshot(at: snapshot, config: #"{"model_type":"qwen2"}"#)
         let python = paths.venvDirectory.appending(path: "bin/python")
         try FileManager.default.createDirectory(
             at: python.deletingLastPathComponent(),
@@ -2183,7 +2200,7 @@ final class DashboardViewModelTests: XCTestCase {
             "whoami": CommandResult(exitCode: 0, standardOutput: #"{"name":"octocat"}"#, standardError: ""),
             "install": CommandResult(
                 exitCode: 0,
-                standardOutput: #"{"local_path":"/tmp/cache/models--mlx-community--Tiny/snapshots/resumed"}"#,
+                standardOutput: "{\"local_path\":\"(snapshot.path)\"}",
                 standardError: ""
             )
         ])
@@ -2195,7 +2212,8 @@ final class DashboardViewModelTests: XCTestCase {
             registry: registry,
             environmentManager: PythonEnvironmentManager(paths: paths, runner: runner),
             modelInstaller: HuggingFaceModelInstaller(runner: runner),
-            authChecker: HuggingFaceAuthChecker(runner: runner)
+            authChecker: HuggingFaceAuthChecker(runner: runner),
+            huggingFaceCacheRoot: cacheRoot
         )
         viewModel.selectedInstalledModelID = "mlx-community/Tiny"
 
@@ -2387,8 +2405,10 @@ final class DashboardViewModelTests: XCTestCase {
 
     func testSetSelectedInstalledModelActiveDoesNotClearInstallProgressHistory() throws {
         let paths = try temporaryAppPaths()
+        let snapshot = paths.applicationSupport.appending(path: "cache/models--mlx-community--Tiny/snapshots/abc")
+        try createCachedModelSnapshot(at: snapshot, config: #"{"model_type":"qwen2"}"#)
         let registry = ModelRegistry(fileURL: paths.modelRegistryFile)
-        registry.upsert(ModelRecord(id: "mlx-community/Tiny", status: .installed, localPath: "/tmp/tiny"))
+        registry.upsert(ModelRecord(id: "mlx-community/Tiny", status: .installed, localPath: snapshot.path))
         try registry.save()
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
@@ -2477,8 +2497,10 @@ final class DashboardViewModelTests: XCTestCase {
 
     func testAssignSelectedInstalledModelToRoleDoesNotClearInstallProgressHistory() throws {
         let paths = try temporaryAppPaths()
+        let snapshot = paths.applicationSupport.appending(path: "cache/models--mlx-community--Tiny/snapshots/abc")
+        try createCachedModelSnapshot(at: snapshot, config: #"{"model_type":"qwen2"}"#)
         let registry = ModelRegistry(fileURL: paths.modelRegistryFile)
-        registry.upsert(ModelRecord(id: "mlx-community/Tiny", status: .installed, localPath: "/tmp/tiny"))
+        registry.upsert(ModelRecord(id: "mlx-community/Tiny", status: .installed, localPath: snapshot.path))
         try registry.save()
         let viewModel = DashboardViewModel(
             settingsStore: SettingsStore(fileURL: paths.settingsFile),
@@ -2691,6 +2713,49 @@ final class DashboardViewModelTests: XCTestCase {
         let persisted = try SettingsStore(fileURL: paths.settingsFile).load()
         XCTAssertNil(persisted.activeModel)
         XCTAssertNil(persisted.providerRoleAssignments.ask)
+    }
+
+    func testInitializationMarksInstalledRecordRemovedWhenSnapshotNoLongerExists() throws {
+        let paths = try temporaryAppPaths()
+        let missingSnapshot = paths.applicationSupport
+            .appending(path: "missing-cache/models--mlx-community--Old/snapshots/abc")
+        try SettingsStore(fileURL: paths.settingsFile).save(
+            DashboardSettings(
+                activeModel: "mlx-community/Old",
+                providerRoleAssignments: ProviderRoleAssignments(
+                    ask: "mlx-community/Old",
+                    plan: "mlx-community/Current"
+                )
+            )
+        )
+        let registry = ModelRegistry(fileURL: paths.modelRegistryFile)
+        registry.upsert(ModelRecord(
+            id: "mlx-community/Old",
+            status: .installed,
+            localPath: missingSnapshot.path
+        ))
+        try registry.save()
+
+        let viewModel = DashboardViewModel(
+            settingsStore: SettingsStore(fileURL: paths.settingsFile),
+            registry: registry,
+            environmentManager: PythonEnvironmentManager(paths: paths, runner: FakeCommandRunner(results: [:]))
+        )
+
+        XCTAssertEqual(registry.record(id: "mlx-community/Old")?.status, .removed)
+        XCTAssertFalse(viewModel.installedModels.contains { $0.id == "mlx-community/Old" })
+        XCTAssertNil(viewModel.settings.activeModel)
+        XCTAssertNil(viewModel.settings.providerRoleAssignments.ask)
+        XCTAssertEqual(viewModel.settings.providerRoleAssignments.plan, "mlx-community/Current")
+
+        let persistedRegistry = ModelRegistry(fileURL: paths.modelRegistryFile)
+        try persistedRegistry.load()
+        XCTAssertEqual(persistedRegistry.record(id: "mlx-community/Old")?.status, .removed)
+
+        let persistedSettings = try SettingsStore(fileURL: paths.settingsFile).load()
+        XCTAssertNil(persistedSettings.activeModel)
+        XCTAssertNil(persistedSettings.providerRoleAssignments.ask)
+        XCTAssertEqual(persistedSettings.providerRoleAssignments.plan, "mlx-community/Current")
     }
 
     func testRequestModelDownloadSettingsNavigationIncrementsRequestID() throws {

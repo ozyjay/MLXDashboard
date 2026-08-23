@@ -704,6 +704,7 @@ final class DashboardViewModel: ObservableObject {
             for model in cached {
                 registry.upsert(runtimeCheckedRecord(id: model.id, localPath: model.localPath))
             }
+            _ = refreshRuntimeCompatibilityForInstalledRecords()
             try registry.save()
             installedModels = Self.visibleInstalledModels(from: registry.records)
             refreshProviderModelMetadataState()
@@ -1420,6 +1421,13 @@ final class DashboardViewModel: ObservableObject {
     private func refreshRuntimeCompatibilityForInstalledRecords() -> Bool {
         var changed = false
         for record in registry.records where record.status == .installed {
+            guard let localPath = record.localPath,
+                  FileManager.default.fileExists(atPath: localPath)
+            else {
+                registry.markRemoved(id: record.id)
+                changed = true
+                continue
+            }
             let checked = runtimeCheckedRecord(id: record.id, localPath: record.localPath)
             if checked.status != record.status || checked.message != record.message {
                 registry.upsert(checked)
@@ -1490,7 +1498,10 @@ final class DashboardViewModel: ObservableObject {
 
     private func refreshProviderModelMetadataState() {
         let metadata = registry.records.reduce(into: [String: ProviderModelMetadata]()) { result, record in
-            guard record.status == .installed || record.localPath != nil else { return }
+            guard record.status != .removed,
+                  let localPath = record.localPath,
+                  FileManager.default.fileExists(atPath: localPath)
+            else { return }
             switch runtimeCompatibilityChecker.compatibility(localPath: record.localPath) {
             case .runnable(let modelType):
                 result[record.id] = .inferred(modelID: record.id, modelType: modelType)
